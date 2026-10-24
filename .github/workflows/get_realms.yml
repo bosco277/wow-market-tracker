@@ -1,0 +1,27 @@
+name: Get Realm IDs (Manual)
+
+# 'workflow_dispatch' means this ONLY runs when you manually click the button
+on:
+  workflow_dispatch:
+
+jobs:
+  print-realms:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository files
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Script to Print Realms
+        env:
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+        run: python realm_query.py
