@@ -19,7 +19,7 @@ B2_BUCKET_NAME = "wow-market-data-lake"
 # Initialize the S3 client globally
 s3 = boto3.client(
     "s3",
-    endpoint_url="https://s3.us-west-004.backblazeb2.com", # UPDATE THIS TO YOUR B2 ENDPOINT
+    endpoint_url="https://s3.us-east-005.backblazeb2.com", # UPDATE THIS TO YOUR B2 ENDPOINT
     aws_access_key_id=B2_KEY_ID,
     aws_secret_access_key=B2_APP_KEY
 )
