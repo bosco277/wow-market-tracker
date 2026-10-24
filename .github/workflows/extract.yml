@@ -30,4 +30,5 @@ jobs:
           BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
           B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
           B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }} # Add this line!
         run: python fetch.py
