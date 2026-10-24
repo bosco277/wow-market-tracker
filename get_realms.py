@@ -14,10 +14,17 @@ def get_blizzard_token():
 
 def print_realm_list(token):
     index_url = "https://us.api.blizzard.com/data/wow/connected-realm/index"
-    params = {"namespace": "dynamic-us", "locale": "en_US", "access_token": token}
+    
+    # 1. The token is removed from params
+    params = {"namespace": "dynamic-us", "locale": "en_US"}
+    
+    # 2. The token is now sent securely in the Authorization Header
+    headers = {"Authorization": f"Bearer {token}"}
     
     print("Fetching Connected Realm Index...")
-    index_response = requests.get(index_url, params=params)
+    
+    # 3. We pass the headers to the requests.get() function
+    index_response = requests.get(index_url, params=params, headers=headers)
     index_response.raise_for_status()
     
     connected_realms = index_response.json()["connected_realms"]
@@ -27,7 +34,7 @@ def print_realm_list(token):
 
     for r_id in realm_ids:
         details_url = f"https://us.api.blizzard.com/data/wow/connected-realm/{r_id}"
-        details_response = requests.get(details_url, params=params)
+        details_response = requests.get(details_url, params=params, headers=headers)
         
         if details_response.status_code == 200:
             realm_names = [sub["name"] for sub in details_response.json().get("realms", [])]
