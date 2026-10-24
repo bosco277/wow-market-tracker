@@ -5,26 +5,33 @@ import pandas as pd
 import boto3
 from datetime import datetime
 import botocore.exceptions
+from huggingface_hub import HfApi # 1. ADD THIS IMPORT
 
 # --- CONFIGURATION ---
 # Replace these with the 5 Realm IDs you pulled from the get_realms script
 REALM_IDS = [73, 96, 118] 
 
+# Credentials pulled securely from GitHub Secrets
 BLIZZARD_CLIENT_ID = os.environ.get("BLIZZARD_CLIENT_ID")
 BLIZZARD_CLIENT_SECRET = os.environ.get("BLIZZARD_CLIENT_SECRET")
 B2_KEY_ID = os.environ.get("B2_KEY_ID")
 B2_APP_KEY = os.environ.get("B2_APP_KEY")
-B2_BUCKET_NAME = "wow-market-data-lake"
+HF_TOKEN = os.environ.get("HF_TOKEN")
 
-# Initialize the S3 client globally
+B2_BUCKET_NAME = "wow-market-data-lake"
+# IMPORTANT: Update with your Hugging Face username!
+HF_REPO_ID = "YOUR_HF_USERNAME/wow-market-data-lake" 
+
+# Initialize the S3 client globally (Using your confirmed us-east-005 endpoint)
 s3 = boto3.client(
     "s3",
-    endpoint_url="https://s3.us-east-005.backblazeb2.com", # UPDATE THIS TO YOUR B2 ENDPOINT
+    endpoint_url="https://s3.us-east-005.backblazeb2.com",
     aws_access_key_id=B2_KEY_ID,
     aws_secret_access_key=B2_APP_KEY
 )
 
 def get_blizzard_token():
+    """Fetches a temporary access token from Blizzard."""
     url = "https://oauth.battle.net/token"
     auth = (BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET)
     data = {"grant_type": "client_credentials"}
@@ -49,16 +56,14 @@ def save_new_timestamp(tracker_name, timestamp_string):
     s3.put_object(Bucket=B2_BUCKET_NAME, Key=file_key, Body=timestamp_string.encode('utf-8'))
 
 def fetch_blizzard_data(url, token, last_modified_date):
-    """Fetches data using the secure Header authorization and If-Modified-Since logic."""
+    """Fetches data using secure Header authorization and If-Modified-Since logic."""
     params = {
         "namespace": "dynamic-us",
         "locale": "en_US"
     }
     
-    # Securely pass the token via Bearer Authorization
     headers = {"Authorization": f"Bearer {token}"}
     
-    # If we have checked before, ask Blizzard for only new data
     if last_modified_date:
         headers["If-Modified-Since"] = last_modified_date
 
@@ -74,19 +79,32 @@ def fetch_blizzard_data(url, token, last_modified_date):
     return response.json().get("auctions", []), new_timestamp
 
 def process_and_upload(auctions_json, folder_name):
-    """Converts the JSON to Parquet and uploads it to B2 with partition folders."""
+    """Converts JSON to Parquet and dual-writes to Backblaze B2 and Hugging Face."""
     df = pd.DataFrame(auctions_json)
     now = datetime.utcnow()
-    
-    # Creates partition folders: realm_11/year=2026/month=10/day=24/hour_09_30.parquet
     filename = f"{folder_name}/year={now.year}/month={now.month:02d}/day={now.day:02d}/hour_{now.hour:02d}_{now.minute:02d}.parquet"
     
     parquet_buffer = io.BytesIO()
     df.to_parquet(parquet_buffer, index=False, compression="snappy")
-    parquet_buffer.seek(0) 
     
+    # 1. Upload to Backblaze B2
+    parquet_buffer.seek(0) 
     s3.upload_fileobj(parquet_buffer, B2_BUCKET_NAME, filename)
-    print(f"Successfully uploaded: {filename}")
+    print(f"Successfully uploaded to B2: {filename}")
+
+    # 2. Upload to Hugging Face
+    try:
+        parquet_buffer.seek(0) # Reset buffer to the beginning before reading again
+        api = HfApi(token=HF_TOKEN)
+        api.upload_file(
+            path_or_fileobj=parquet_buffer,
+            path_in_repo=filename,
+            repo_id=HF_REPO_ID,
+            repo_type="dataset"
+        )
+        print(f"Successfully uploaded to Hugging Face: {filename}")
+    except Exception as e:
+        print(f"Failed to upload to Hugging Face (B2 upload still succeeded): {e}")
 
 def main():
     print("Starting auction extraction cycle...")
@@ -106,7 +124,7 @@ def main():
         process_and_upload(comm_data, "commodities")
         save_new_timestamp("commodities", comm_timestamp)
 
-    # 2. Loop Through the 5 Target Realms
+    # 2. Loop Through the Target Realms
     for realm_id in REALM_IDS:
         print(f"\n--- Checking Realm {realm_id} ---")
         realm_url = f"https://us.api.blizzard.com/data/wow/connected-realm/{realm_id}/auctions"
