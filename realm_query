@@ -1,0 +1,66 @@
+import os
+import requests
+
+# Set your credentials here (or use os.environ if running in GitHub Actions)
+BLIZZARD_CLIENT_ID = "YOUR_CLIENT_ID"
+BLIZZARD_CLIENT_SECRET = "YOUR_CLIENT_SECRET"
+
+def get_blizzard_token():
+    """Fetches a temporary access token from Blizzard."""
+    url = "https://oauth.battle.net/token"
+    auth = (BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET)
+    data = {"grant_type": "client_credentials"}
+    response = requests.post(url, auth=auth, data=data)
+    response.raise_for_status()
+    return response.json()["access_token"]
+
+def print_realm_list(token):
+    """Fetches the index of all Connected Realms and prints their IDs and names."""
+    
+    # 1. Get the list of all Connected Realm IDs
+    index_url = "https://us.api.blizzard.com/data/wow/connected-realm/index"
+    params = {
+        "namespace": "dynamic-us",
+        "locale": "en_US",
+        "access_token": token
+    }
+    
+    print("Fetching Connected Realm Index...")
+    index_response = requests.get(index_url, params=params)
+    index_response.raise_for_status()
+    
+    # The API returns a list of URL links (hrefs). We need to extract the ID number from the end of each link.
+    connected_realms = index_response.json()["connected_realms"]
+    
+    realm_ids = []
+    for realm_link in connected_realms:
+        # Example href: "https://us.api.blizzard.com/data/wow/connected-realm/11?namespace=dynamic-us"
+        # We split the string by "/" and take the last part, then remove the "?namespace=..."
+        url_part = realm_link["href"].split("/")[-1] 
+        realm_id = url_part.split("?")[0]
+        realm_ids.append(realm_id)
+
+    print(f"Found {len(realm_ids)} Connected Realms. Fetching names...\n")
+
+    # 2. Look up the names for each ID
+    for r_id in realm_ids:
+        # We query the specific Connected Realm endpoint to see which servers belong to this ID
+        details_url = f"https://us.api.blizzard.com/data/wow/connected-realm/{r_id}"
+        details_response = requests.get(details_url, params=params)
+        
+        if details_response.status_code == 200:
+            details_json = details_response.json()
+            
+            # A Connected Realm contains an array of individual servers (realms)
+            realm_names = []
+            for sub_realm in details_json.get("realms", []):
+                realm_names.append(sub_realm["name"])
+            
+            # Print the ID and the list of server names grouped under it
+            print(f"ID {r_id}: {', '.join(realm_names)}")
+        else:
+             print(f"ID {r_id}: Failed to fetch details.")
+
+if __name__ == "__main__":
+    token = get_blizzard_token()
+    print_realm_list(token)
