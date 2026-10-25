@@ -62,9 +62,16 @@ if st.button(f"Fetch Data for {selected_display_name}"):
         s3_path = f"s3://wow-market-data-lake/{target_folder}/**/*.parquet"
         dict_path = "s3://wow-market-data-lake/system/item_dictionary.parquet"
         
-        # Note the updated alias 'auc.item.id'
-        if search_id.strip().isdigit():
-            where_clause = f"WHERE auc.item.id = {search_id.strip()}"
+        # Modify the query based on whether the user typed an Item ID or a Name
+        search_term = search_id.strip()
+        
+        if search_term:
+            if search_term.isdigit():
+                # It is an Item ID number
+                where_clause = f"WHERE auc.item.id = {search_term}"
+            else:
+                # It is text, so search the dictionary names
+                where_clause = f"WHERE dict.name ILIKE '%{search_term}%'"
             limit_clause = "LIMIT 1000"
         else:
             where_clause = ""
@@ -90,7 +97,6 @@ if st.button(f"Fetch Data for {selected_display_name}"):
             if df.empty:
                 st.warning("No active auctions found for that search.")
             else:
-                # Convert to gold using the new column name
                 if 'Buyout_Copper' in df.columns:
                     df['Gold_Price'] = df['Buyout_Copper'] / 10000 
                     
