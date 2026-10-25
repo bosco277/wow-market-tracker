@@ -36,16 +36,61 @@ try:
 except Exception as e:
     st.error(f"Failed to connect: {e}")
 
-# 3. Create a Basic Query Button for Realm 73
-if st.button("Fetch Latest Auctions for Realm 73"):
-    with st.spinner("Querying Parquet files..."):
-        query = """
-            SELECT item.id, item.context, buyout, quantity 
-            FROM read_parquet('s3://wow-market-data-lake/realm_73/**/*.parquet') 
-            LIMIT 50;
-        """
-        # Execute the DuckDB query and convert it instantly to a Pandas DataFrame
-        df = db.execute(query).df()
+# 3. Interactive UI Controls
+# Create two columns side-by-side
+col1, col2 = st.columns(2)
+
+with col1:
+    # A dictionary mapping the dropdown display names to your Backblaze folder names
+    realm_options = {
+        "Realm 73": "realm_73",
+        "Realm 96": "realm_96",
+        "Realm 118": "realm_118",
+        "Commodities": "commodities"
+    }
+    selected_display_name = st.selectbox("Select Realm/Category", list(realm_options.keys()))
+    target_folder = realm_options[selected_display_name]
+
+with col2:
+    # Text input for the Item ID
+    search_id = st.text_input("Search Item ID (Optional)", placeholder="e.g., 208396")
+
+# 4. Dynamic Query Execution
+if st.button(f"Fetch Data for {selected_display_name}"):
+    with st.spinner("Scanning Parquet files in the Data Lake..."):
         
-        # Display the DataFrame as an interactive web table
-        st.dataframe(df, use_container_width=True)
+        # Base path using the folder selected in the dropdown
+        s3_path = f"s3://wow-market-data-lake/{target_folder}/**/*.parquet"
+        
+        # Modify the query based on whether the user typed an Item ID
+        if search_id.strip().isdigit():
+            # If searching a specific item, we can safely pull more rows
+            where_clause = f"WHERE item.id = {search_id.strip()}"
+            limit_clause = "LIMIT 1000"
+        else:
+            # If pulling everything, keep the limit small to save memory
+            where_clause = ""
+            limit_clause = "LIMIT 50"
+
+        query = f"""
+            SELECT item.id, item.context, buyout, quantity 
+            FROM read_parquet('{s3_path}') 
+            {where_clause}
+            {limit_clause};
+        """
+        
+        try:
+            df = db.execute(query).df()
+            
+            if df.empty:
+                st.warning("No active auctions found for that search.")
+            else:
+                # Optional: Format the buyout price to show raw gold (Blizzard uses copper as the base unit)
+                if 'buyout' in df.columns:
+                    df['gold_price'] = df['buyout'] / 10000 
+                    
+                st.dataframe(df, use_container_width=True)
+                st.caption(f"Showing {len(df)} results.")
+                
+        except Exception as e:
+            st.error(f"Query Failed: {e}")
