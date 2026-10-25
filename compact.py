@@ -57,15 +57,16 @@ def compact_folder(folder_prefix):
     parquet_buffer = io.BytesIO()
     merged_df.to_parquet(parquet_buffer, index=False, compression="snappy")
     
+    # Extract raw bytes
+    parquet_bytes = parquet_buffer.getvalue()
+    
     # Upload to B2
-    parquet_buffer.seek(0)
-    s3.upload_fileobj(parquet_buffer, B2_BUCKET_NAME, daily_filename)
+    s3.upload_fileobj(io.BytesIO(parquet_bytes), B2_BUCKET_NAME, daily_filename)
     
     # Upload to HF
     try:
-        parquet_buffer.seek(0)
         hf_api.upload_file(
-            path_or_fileobj=parquet_buffer,
+            path_or_fileobj=io.BytesIO(parquet_bytes),
             path_in_repo=daily_filename,
             repo_id=HF_REPO_ID,
             repo_type="dataset"
