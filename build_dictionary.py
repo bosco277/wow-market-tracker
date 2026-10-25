@@ -28,7 +28,7 @@ def get_blizzard_token():
     return response.json()["access_token"]
 
 def get_distinct_item_ids():
-    print("Scanning the entire Data Lake for unique item IDs...")
+    print("Scanning the Data Lake for unique item IDs...")
     con = duckdb.connect()
     con.execute("INSTALL httpfs; LOAD httpfs;")
     con.execute(f"""
@@ -38,12 +38,14 @@ def get_distinct_item_ids():
         );
     """)
     
-    # Scan ALL folders recursively for every unique item ID ever seen
+    # Explicitly target ONLY the commodities and realm folders, ignoring system/
     query = """
         SELECT DISTINCT item.id 
-        FROM read_parquet('s3://wow-market-data-lake/**/*.parquet');
+        FROM read_parquet([
+            's3://wow-market-data-lake/commodities/**/*.parquet',
+            's3://wow-market-data-lake/realm_*/**/*.parquet'
+        ]);
     """
-    # Execute and extract the list of IDs
     return con.execute(query).df()['id'].tolist()
 
 def fetch_names_from_blizzard(item_ids, token):
