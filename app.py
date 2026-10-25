@@ -76,8 +76,8 @@ if st.button(f"Fetch Data for {selected_display_name}"):
                     auc.item.id as Item_ID, 
                     (auc.{price_col} / 10000.0) as Gold_Price, 
                     auc.quantity as Quantity,
-                    make_timestamp(year, month, day, 0, 0, 0) as timestamp
-                FROM read_parquet('{s3_path}', hive_partitioning=1) as auc
+                    COALESCE(auc.scan_timestamp, make_timestamp(year, month, day, 0, 0, 0)) as timestamp
+                FROM read_parquet('{s3_path}', hive_partitioning=1, union_by_name=True) as auc
                 LEFT JOIN read_parquet('{dict_path}') as dict 
                     ON auc.item.id = dict.id
                 WHERE dict.name ILIKE '%{search_term}%' OR auc.item.id = TRY_CAST('{search_term}' AS BIGINT)
