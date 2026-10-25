@@ -76,7 +76,7 @@ if st.button(f"Fetch Data for {selected_display_name}"):
                     auc.item.id as Item_ID, 
                     (auc.{price_col} / 10000.0) as Gold_Price, 
                     auc.quantity as Quantity,
-                    make_timestamp(year, month, day, hour, 0, 0) as timestamp
+                    make_timestamp(year, month, day, 0, 0, 0) as timestamp
                 FROM read_parquet('{s3_path}', hive_partitioning=1) as auc
                 LEFT JOIN read_parquet('{dict_path}') as dict 
                     ON auc.item.id = dict.id
