@@ -84,27 +84,29 @@ def process_and_upload(auctions_json, folder_name):
     now = datetime.utcnow()
     filename = f"{folder_name}/year={now.year}/month={now.month:02d}/day={now.day:02d}/hour_{now.hour:02d}_{now.minute:02d}.parquet"
     
+    # Create the initial buffer and save the Parquet data
     parquet_buffer = io.BytesIO()
     df.to_parquet(parquet_buffer, index=False, compression="snappy")
     
-    # 1. Upload to Backblaze B2
-    parquet_buffer.seek(0) 
-    s3.upload_fileobj(parquet_buffer, B2_BUCKET_NAME, filename)
+    # EXTRACT THE RAW BYTES SO NO LIBRARY CAN CLOSE OUR STREAM
+    parquet_bytes = parquet_buffer.getvalue()
+    
+    # 1. Upload to Backblaze B2 (using a fresh wrapper)
+    s3.upload_fileobj(io.BytesIO(parquet_bytes), B2_BUCKET_NAME, filename)
     print(f"Successfully uploaded to B2: {filename}")
 
-    # 2. Upload to Hugging Face
+    # 2. Upload to Hugging Face (using a fresh wrapper)
     try:
-        parquet_buffer.seek(0) # Reset buffer to the beginning before reading again
         api = HfApi(token=HF_TOKEN)
         api.upload_file(
-            path_or_fileobj=parquet_buffer,
+            path_or_fileobj=io.BytesIO(parquet_bytes),
             path_in_repo=filename,
             repo_id=HF_REPO_ID,
             repo_type="dataset"
         )
         print(f"Successfully uploaded to Hugging Face: {filename}")
     except Exception as e:
-        print(f"Failed to upload to Hugging Face (B2 upload still succeeded): {e}")
+        print(f"Failed to upload to Hugging Face: {e}")
 
 def main():
     print("Starting auction extraction cycle...")
