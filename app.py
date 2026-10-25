@@ -59,22 +59,27 @@ with col2:
 if st.button(f"Fetch Data for {selected_display_name}"):
     with st.spinner("Scanning Parquet files in the Data Lake..."):
         
-        # Base path using the folder selected in the dropdown
         s3_path = f"s3://wow-market-data-lake/{target_folder}/**/*.parquet"
+        dict_path = "s3://wow-market-data-lake/system/item_dictionary.parquet"
         
-        # Modify the query based on whether the user typed an Item ID
+        # Note the updated alias 'auc.item.id'
         if search_id.strip().isdigit():
-            # If searching a specific item, we can safely pull more rows
-            where_clause = f"WHERE item.id = {search_id.strip()}"
+            where_clause = f"WHERE auc.item.id = {search_id.strip()}"
             limit_clause = "LIMIT 1000"
         else:
-            # If pulling everything, keep the limit small to save memory
             where_clause = ""
             limit_clause = "LIMIT 50"
 
+        # The LEFT JOIN connects the two files instantly
         query = f"""
-            SELECT item.id, item.context, buyout, quantity 
-            FROM read_parquet('{s3_path}') 
+            SELECT 
+                COALESCE(dict.name, 'Unknown Item (' || auc.item.id || ')') as Item_Name,
+                auc.item.id as Item_ID, 
+                auc.buyout as Buyout_Copper, 
+                auc.quantity as Quantity
+            FROM read_parquet('{s3_path}') as auc
+            LEFT JOIN read_parquet('{dict_path}') as dict 
+                ON auc.item.id = dict.id
             {where_clause}
             {limit_clause};
         """
@@ -85,9 +90,9 @@ if st.button(f"Fetch Data for {selected_display_name}"):
             if df.empty:
                 st.warning("No active auctions found for that search.")
             else:
-                # Optional: Format the buyout price to show raw gold (Blizzard uses copper as the base unit)
-                if 'buyout' in df.columns:
-                    df['gold_price'] = df['buyout'] / 10000 
+                # Convert to gold using the new column name
+                if 'Buyout_Copper' in df.columns:
+                    df['Gold_Price'] = df['Buyout_Copper'] / 10000 
                     
                 st.dataframe(df, use_container_width=True)
                 st.caption(f"Showing {len(df)} results.")
