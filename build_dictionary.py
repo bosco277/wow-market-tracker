@@ -27,8 +27,8 @@ def get_blizzard_token():
     response = requests.post(url, auth=auth, data=data)
     return response.json()["access_token"]
 
-def get_top_item_ids():
-    print("Connecting to Data Lake to find the 100 most common items...")
+def get_distinct_item_ids():
+    print("Scanning the entire Data Lake for unique item IDs...")
     con = duckdb.connect()
     con.execute("INSTALL httpfs; LOAD httpfs;")
     con.execute(f"""
@@ -38,14 +38,12 @@ def get_top_item_ids():
         );
     """)
     
-    # Scan the commodities folder for the most frequently posted item IDs
+    # Scan ALL folders recursively for every unique item ID ever seen
     query = """
-        SELECT item.id 
-        FROM read_parquet('s3://wow-market-data-lake/commodities/**/*.parquet')
-        GROUP BY item.id
-        ORDER BY count(*) DESC
-        LIMIT 100;
+        SELECT DISTINCT item.id 
+        FROM read_parquet('s3://wow-market-data-lake/**/*.parquet');
     """
+    # Execute and extract the list of IDs
     return con.execute(query).df()['id'].tolist()
 
 def fetch_names_from_blizzard(item_ids, token):
@@ -69,7 +67,7 @@ def fetch_names_from_blizzard(item_ids, token):
     return pd.DataFrame(item_data)
 
 def main():
-    item_ids = get_top_item_ids()
+    item_ids = get_distinct_item_ids()
     token = get_blizzard_token()
     
     df_items = fetch_names_from_blizzard(item_ids, token)
