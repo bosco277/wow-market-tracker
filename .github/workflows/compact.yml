@@ -1,9 +1,6 @@
 name: Daily Data Compaction
 
 on:
-  schedule:
-    # Runs at 2:00 AM UTC every day
-    - cron: '0 2 * * *'
   workflow_dispatch:
 
 jobs:
