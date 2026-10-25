@@ -82,6 +82,10 @@ def process_and_upload(auctions_json, folder_name):
     """Converts JSON to Parquet and dual-writes to Backblaze B2 and Hugging Face."""
     df = pd.DataFrame(auctions_json)
     now = datetime.utcnow()
+    
+    # ADD THIS LINE: Explicitly stamp every row with the exact time
+    df['scan_timestamp'] = now 
+    
     filename = f"{folder_name}/year={now.year}/month={now.month:02d}/day={now.day:02d}/hour_{now.hour:02d}_{now.minute:02d}.parquet"
     
     # Create the initial buffer and save the Parquet data
