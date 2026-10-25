@@ -56,8 +56,10 @@ with col2:
     search_id = st.text_input("Search Item ID (Optional)", placeholder="e.g., 208396")
 
 # 4. Dynamic Query Execution
-if st.button(f"Fetch Data for {selected_display_name}"):
-    with st.spinner("Scanning Parquet files in the Data Lake..."):
+search_term = search_id.strip()
+
+if st.button(f"Fetch Data for {selected_display_name}") and search_term:
+    with st.spinner("Compiling historical market data..."):
         
         s3_path = f"s3://wow-market-data-lake/{target_folder}/**/*.parquet"
         dict_path = "s3://wow-market-data-lake/system/item_dictionary.parquet"
