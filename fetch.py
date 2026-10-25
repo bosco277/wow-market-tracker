@@ -20,7 +20,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 
 B2_BUCKET_NAME = "wow-market-data-lake"
 # IMPORTANT: Update with your Hugging Face username!
-HF_REPO_ID = "YOUR_HF_USERNAME/wow-market-data-lake" 
+HF_REPO_ID = "bosco277/wow-market-data-lake" 
 
 # Initialize the S3 client globally (Using your confirmed us-east-005 endpoint)
 s3 = boto3.client(
