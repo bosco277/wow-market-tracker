@@ -1,6 +1,9 @@
 import streamlit as st
 import duckdb
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import numpy as np
 
 # 1. Setup the Web Page
 st.set_page_config(page_title="WoW Market Dashboard", layout="wide")
@@ -8,14 +11,11 @@ st.title("World of Warcraft Market Data")
 st.markdown("Live auction house data querying directly from Backblaze B2.")
 
 # 2. Connect to DuckDB and Backblaze
-# Streamlit has a special st.cache_resource command so it doesn't reconnect on every button click
 @st.cache_resource
 def connect_to_datalake():
     con = duckdb.connect(database=':memory:')
-    con.execute("INSTALL httpfs;")
-    con.execute("LOAD httpfs;")
+    con.execute("INSTALL httpfs; LOAD httpfs;")
     
-    # Streamlit pulls secrets differently than GitHub Actions using st.secrets
     b2_key = st.secrets["B2_KEY_ID"]
     b2_secret = st.secrets["B2_APP_KEY"]
     
@@ -37,11 +37,9 @@ except Exception as e:
     st.error(f"Failed to connect: {e}")
 
 # 3. Interactive UI Controls
-# Create two columns side-by-side
 col1, col2 = st.columns(2)
 
 with col1:
-    # A dictionary mapping the dropdown display names to your Backblaze folder names
     realm_options = {
         "Realm 73": "realm_73",
         "Realm 96": "realm_96",
@@ -52,10 +50,9 @@ with col1:
     target_folder = realm_options[selected_display_name]
 
 with col2:
-    # Text input for the Item ID
     search_id = st.text_input("Search Item ID (Optional)", placeholder="e.g., 208396")
 
-# 4. Dynamic Query Execution
+# 4. Dynamic Query Execution & Dashboard
 search_term = search_id.strip()
 
 if st.button(f"Fetch Data for {selected_display_name}") and search_term:
@@ -64,61 +61,7 @@ if st.button(f"Fetch Data for {selected_display_name}") and search_term:
         s3_path = f"s3://wow-market-data-lake/{target_folder}/**/*.parquet"
         dict_path = "s3://wow-market-data-lake/system/item_dictionary.parquet"
         
-        # Modify the query based on whether the user typed an Item ID or a Name
-        search_term = search_id.strip()
-        
-        if search_term:
-            if search_term.isdigit():
-                # It is an Item ID number
-                where_clause = f"WHERE auc.item.id = {search_term}"
-            else:
-                # It is text, so search the dictionary names
-                where_clause = f"WHERE dict.name ILIKE '%{search_term}%'"
-            limit_clause = "LIMIT 1000"
-        else:
-            where_clause = ""
-            limit_clause = "LIMIT 50"
-
-        # The LEFT JOIN connects the two files instantly
-        query = f"""
-            SELECT 
-                COALESCE(dict.name, 'Unknown Item (' || auc.item.id || ')') as Item_Name,
-                auc.item.id as Item_ID, 
-                auc.buyout as Buyout_Copper, 
-                auc.quantity as Quantity
-            FROM read_parquet('{s3_path}') as auc
-            LEFT JOIN read_parquet('{dict_path}') as dict 
-                ON auc.item.id = dict.id
-            {where_clause}
-            {limit_clause};
-        """
-        
-        try:
-            df = db.execute(query).df()
-            
-            if df.empty:
-                st.warning("No active auctions found for that search.")
-            else:
-                if 'Buyout_Copper' in df.columns:
-                    df['Gold_Price'] = df['Buyout_Copper'] / 10000 
-                    
-                st.dataframe(df, use_container_width=True)
-                st.caption(f"Showing {len(df)} results.")
-                
-        except Exception as e:
-            st.error(f"Query Failed: {e}")
-
-import plotly.express as px
-import plotly.graph_objects as go
-import numpy as np
-
-# ... [Keep your existing st.set_page_config and DuckDB connection code] ...
-
-if st.button(f"Fetch Data for {selected_display_name}") and search_term:
-    with st.spinner("Compiling historical market data..."):
-        
-        # 1. Fetch Historical Data
-        # Ensure hive_partitioning is enabled to extract dates from your folder structure
+        # Fetch Historical Data with hive_partitioning to extract timestamps
         query = f"""
             SELECT 
                 COALESCE(dict.name, 'Unknown Item') as Item_Name,
@@ -137,14 +80,13 @@ if st.button(f"Fetch Data for {selected_display_name}") and search_term:
             df = db.execute(query).df()
             
             if not df.empty:
-                # 2. Extract DateTime features for Heatmaps
+                # Extract DateTime features for Heatmaps
                 df['Hour'] = df['timestamp'].dt.hour
                 df['Day_of_Week'] = df['timestamp'].dt.day_name()
                 
-                # Order days for the heatmap Y-axis
                 day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
                 
-                # 3. Top KPI Header
+                # Top KPI Header
                 st.divider()
                 header_col1, header_col2, header_col3, header_col4 = st.columns([2, 1, 1, 1])
                 
@@ -155,7 +97,6 @@ if st.button(f"Fetch Data for {selected_display_name}") and search_term:
                     current_price = df['Gold_Price'].iloc[-1]
                     st.metric("Market Value", f"{current_price:,.2f}g")
                 with header_col3:
-                    # Calculate trend vs first record
                     start_price = df['Gold_Price'].iloc[0]
                     trend = ((current_price - start_price) / start_price) * 100 if start_price else 0
                     st.metric("Trend", f"{trend:+.2f}%")
@@ -165,7 +106,7 @@ if st.button(f"Fetch Data for {selected_display_name}") and search_term:
                 
                 st.divider()
 
-                # 4. Main Dashboard Layout (3/4 Charts, 1/4 Sidebar)
+                # Main Dashboard Layout
                 main_col, side_col = st.columns([3, 1])
                 
                 with main_col:
@@ -188,7 +129,7 @@ if st.button(f"Fetch Data for {selected_display_name}") and search_term:
                         y=heatmap_df['Day_of_Week'],
                         colorscale=[[0, '#F2EDE4'], [1, '#2B4C59']]
                     ))
-                    fig_heat.update_yaxes(categoryorder='array', categoryarray=day_order[::-1]) # Reverse so Monday is top
+                    fig_heat.update_yaxes(categoryorder='array', categoryarray=day_order[::-1])
                     fig_heat.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(l=0, r=0, t=10, b=0))
                     st.plotly_chart(fig_heat, use_container_width=True)
 
