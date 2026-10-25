@@ -3,7 +3,7 @@ name: Hourly Auction Extractor
 on:
   schedule:
     # Runs every 30 minutes for the scout strategy
-    - cron: '*/30 * * * *'
+    - cron: '14,44 * * * *'
   # Adds the button to run it manually
   workflow_dispatch: 
 
