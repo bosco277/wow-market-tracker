@@ -1,0 +1,29 @@
+name: Update Item Dictionary (Manual)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  update-dictionary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        # We explicitly install the needed libraries in case they aren't all in requirements.txt yet
+        run: pip install requests pandas duckdb boto3 pyarrow fastparquet
+
+      - name: Run Dictionary Builder
+        env:
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
+        run: python build_dictionary.py
