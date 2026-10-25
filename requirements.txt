@@ -3,3 +3,5 @@ pandas
 pyarrow
 boto3
 huggingface_hub
+streamlit
+duckdb
