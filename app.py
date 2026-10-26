@@ -12,16 +12,24 @@ import json
 # ---------------------------------------------------------
 @st.cache_data
 def load_metadata():
-    # Load the local JSON file containing the WoW items database
     try:
-        with open('items.json', 'r', encoding='utf-8') as f:
-            item_data = json.load(f)
-        df_meta = pd.DataFrame(item_data)
-        # Rename columns to match the auction dataframe
-        df_meta = df_meta.rename(columns={'itemId': 'item_id', 'class': 'item_class', 'subclass': 'item_subclass'})
+        # Spin up a temporary, lightning-fast DuckDB instance just for parsing the JSON
+        temp_db = duckdb.connect(':memory:')
+        
+        # Use DuckDB's native JSON reader to extract ONLY the 3 columns we actually need
+        query = """
+            SELECT 
+                itemId as item_id, 
+                class as item_class, 
+                subclass as item_subclass 
+            FROM read_json_auto('items.json')
+        """
+        df_meta = temp_db.execute(query).df()
+        temp_db.close()
+        
         return df_meta
-    except FileNotFoundError:
-        st.error("items.json not found. Please upload it to your repository.")
+    except Exception as e:
+        st.error(f"Could not load items.json. Did you push it to GitHub? Error: {e}")
         return pd.DataFrame(columns=['item_id', 'item_class', 'item_subclass'])
 
 def prep_treemap_data(auction_df, meta_df):
