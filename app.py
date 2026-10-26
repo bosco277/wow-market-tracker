@@ -78,14 +78,26 @@ def create_market_treemap(trend_df):
         path=[px.Constant("All Categories"), 'item_class', 'item_subclass', 'Item_Name'],
         values='total_volume',
         color='price_trend_pct',
-        color_continuous_scale=['#b22222', '#2f4f4f', '#228b22'], 
+        
+        # Use your custom color palette (Critical Red, Deep Slate Blue, Muted Green)
+        color_continuous_scale=['#B33F3F', '#2B4C59', '#3E7C59'], 
         color_continuous_midpoint=0,
+        
+        # Clamp the color scale so outliers don't destroy the gradient
+        range_color=[-100, 100] 
     )
     
     fig.update_traces(
         hovertemplate="<b>%{label}</b><br>Volume: %{value}<br>Trend: %{color:.1f}%<extra></extra>"
     )
-    fig.update_layout(margin=dict(t=30, l=10, r=10, b=10), paper_bgcolor='rgba(0,0,0,0)')
+    
+    # Hide the color bar legend since the fixed bounds make it visually redundant
+    fig.update_layout(
+        margin=dict(t=30, l=10, r=10, b=10), 
+        paper_bgcolor='rgba(0,0,0,0)',
+        coloraxis_showscale=False 
+    )
+    
     return fig
 
 # ---------------------------------------------------------
@@ -219,10 +231,10 @@ with tab1:
                                     x=agg_df['timestamp'], 
                                     y=agg_df['Total_Quantity'], 
                                     name='Total Quantity',
-                                    marker_color='#C98A4B', # Warm amber for supporting bars
+                                    marker_color='#C98A4B',
                                     opacity=0.4
                                 ),
-                                secondary_y=True,
+                                secondary_y=True
                             )
 
                             # 4. Add Minimum Price Line (Primary Color)
@@ -232,9 +244,9 @@ with tab1:
                                     y=agg_df['Min_Price'], 
                                     name='Min Price',
                                     mode='lines',
-                                    line=dict(color='#2B4C59', width=2) # Deep slate blue
+                                    line=dict(color='#2B4C59', width=2)
                                 ),
-                                secondary_y=False,
+                                secondary_y=False
                             )
 
                             # 5. Calculate and Add Trend Line
@@ -249,13 +261,12 @@ with tab1:
                                         y=p(x_numeric), 
                                         name='Price Trend',
                                         mode='lines',
-                                        line=dict(color='#2B4C59', width=2, dash='dot') # Deep slate blue for main trend line
+                                        line=dict(color='#2B4C59', width=2, dash='dot')
                                     ),
-                                    secondary_y=False,
+                                    secondary_y=False
                                 )
 
                             # 6. Layout adjustments
-                            # Force bars to sit at the bottom by expanding the secondary Y-axis range
                             max_qty = agg_df['Total_Quantity'].max()
                             fig_price.update_yaxes(title_text="Gold", secondary_y=False, rangemode='tozero')
                             fig_price.update_yaxes(showgrid=False, secondary_y=True, range=[0, max_qty * 4], showticklabels=False)
