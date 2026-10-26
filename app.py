@@ -28,7 +28,6 @@ def format_gsc(gold_float):
 def load_metadata():
     try:
         temp_db = duckdb.connect(':memory:')
-        # Added 'name' so we can populate the dropdown menus natively
         query = """
             SELECT 
                 itemId as item_id, 
@@ -51,7 +50,6 @@ def prep_treemap_data(auction_df, meta_df):
     current_df = df[df['timestamp'] == latest_scan]
     historical_df = df[df['timestamp'] < latest_scan]
     
-    # Added Item_ID to the groupby so it isn't lost during aggregation
     current_stats = current_df.groupby(['Item_Name', 'Item_ID', 'item_class', 'item_subclass']).agg(
         current_price=('Gold_Price', 'min'),
         total_volume=('Quantity', 'sum') 
@@ -81,14 +79,12 @@ def create_market_treemap(trend_df):
         path=[px.Constant("All Categories"), 'item_class', 'item_subclass', 'Item_Name'],
         values='total_volume',
         color='price_trend_pct',
-        # Passed Item_ID into custom_data for the tooltip
         custom_data=['Formatted_Price', 'Item_ID'], 
         color_continuous_scale=['#B33F3F', '#2B4C59', '#3E7C59'], 
         color_continuous_midpoint=0,
         range_color=[-100, 100] 
     )
     
-    # Updated Hovertemplate to display the ID
     fig.update_traces(
         hovertemplate="<b>%{label}</b> (ID: %{customdata[1]})<br>Volume: %{value}<br>Price: %{customdata[0]}<br>Trend: %{color:.1f}%<extra></extra>"
     )
@@ -166,7 +162,6 @@ with tab1:
     if meta_df.empty:
         st.warning("Please ensure items.json is present in the repository to use the item browser.")
     else:
-        # Category Drill-Down Columns
         cat_col, sub_col, item_col = st.columns(3)
         
         with cat_col:
@@ -178,11 +173,9 @@ with tab1:
             selected_subclass = st.selectbox("2. Select Subcategory", subclasses)
             
         with item_col:
-            # Filter and construct the item dictionary { "Item Name (ID)": ID }
             items_in_subclass = meta_df[(meta_df['item_class'] == selected_class) & (meta_df['item_subclass'] == selected_subclass)]
             items_in_subclass = items_in_subclass.dropna(subset=['item_name']).sort_values('item_name')
             
-            # Appending ID to the string prevents dictionary collisions if two items share the same name
             item_display = items_in_subclass.apply(lambda x: f"{x['item_name']} ({x['item_id']})", axis=1)
             item_options = dict(zip(item_display, items_in_subclass['item_id']))
             
@@ -192,7 +185,6 @@ with tab1:
         if not selected_item_display:
             st.warning("Please select an item from the dropdown.")
         else:
-            # Pull the exact ID based on what was selected in the third column
             search_id = item_options[selected_item_display]
             
             with st.spinner(f"Compiling historical market data for {selected_item_display}..."):
@@ -212,3 +204,164 @@ with tab1:
                 
                 try:
                     df = db.execute(query).df()
+                    
+                    if not df.empty:
+                        df['Hour'] = df['timestamp'].dt.hour
+                        df['Day_of_Week'] = df['timestamp'].dt.day_name()
+                        day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                        
+                        st.divider()
+                        header_col1, header_col2, header_col3, header_col4 = st.columns([2, 1, 1, 1])
+                        
+                        with header_col1:
+                            st.markdown(f"### {df['Item_Name'].iloc[0]}")
+                            st.caption(f"Item ID: {df['Item_ID'].iloc[0]}")
+                        with header_col2:
+                            current_price = df['Gold_Price'].iloc[-1]
+                            st.metric("Market Value", format_gsc(current_price))
+                        with header_col3:
+                            start_price = df['Gold_Price'].iloc[0]
+                            trend = ((current_price - start_price) / start_price) * 100 if start_price else 0
+                            st.metric("Trend", f"{trend:+.2f}%")
+                        with header_col4:
+                            current_qty = df['Quantity'].iloc[-1]
+                            st.metric("Available Quantity", f"{current_qty:,}")
+                        
+                        st.divider()
+                        main_col, side_col = st.columns([3, 1])
+                        
+                        with main_col:
+                            st.subheader("Price & Quantity History")
+                            
+                            agg_df = df.groupby('timestamp').agg(
+                                Min_Price=('Gold_Price', 'min'),
+                                Total_Quantity=('Quantity', 'sum')
+                            ).reset_index()
+
+                            agg_df['Formatted_Price'] = agg_df['Min_Price'].apply(format_gsc)
+
+                            fig_price = make_subplots(specs=[[{"secondary_y": True}]])
+
+                            fig_price.add_trace(
+                                go.Bar(
+                                    x=agg_df['timestamp'], 
+                                    y=agg_df['Total_Quantity'], 
+                                    name='Total Quantity',
+                                    marker_color='#C98A4B',
+                                    opacity=0.4
+                                ),
+                                secondary_y=True
+                            )
+
+                            fig_price.add_trace(
+                                go.Scatter(
+                                    x=agg_df['timestamp'], 
+                                    y=agg_df['Min_Price'], 
+                                    name='Min Price',
+                                    mode='lines',
+                                    line=dict(color='#2B4C59', width=2),
+                                    customdata=agg_df['Formatted_Price'],
+                                    hovertemplate='%{x}<br>Min Price: %{customdata}<extra></extra>'
+                                ),
+                                secondary_y=False
+                            )
+
+                            if len(agg_df) > 1:
+                                x_numeric = pd.to_numeric(agg_df['timestamp'])
+                                z = np.polyfit(x_numeric, agg_df['Min_Price'], 1)
+                                p = np.poly1d(z)
+                                trend_vals = p(x_numeric)
+                                trend_formatted = [format_gsc(val) for val in trend_vals]
+                                
+                                fig_price.add_trace(
+                                    go.Scatter(
+                                        x=agg_df['timestamp'], 
+                                        y=trend_vals, 
+                                        name='Price Trend',
+                                        mode='lines',
+                                        line=dict(color='#2B4C59', width=2, dash='dot'),
+                                        customdata=trend_formatted,
+                                        hovertemplate='Trend Price: %{customdata}<extra></extra>'
+                                    ),
+                                    secondary_y=False
+                                )
+
+                            min_qty = agg_df['Total_Quantity'].min()
+                            max_qty = agg_df['Total_Quantity'].max()
+                            qty_floor = min_qty * 0.90
+                            qty_ceiling = qty_floor + ((max_qty - qty_floor) * 4)
+
+                            fig_price.update_yaxes(title_text="Gold", secondary_y=False, rangemode='tozero')
+                            fig_price.update_yaxes(showgrid=False, secondary_y=True, range=[qty_floor, qty_ceiling], showticklabels=False)
+
+                            fig_price.update_layout(
+                                plot_bgcolor='rgba(0,0,0,0)', 
+                                paper_bgcolor='rgba(0,0,0,0)', 
+                                margin=dict(l=0, r=0, t=10, b=0),
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                            )
+                            
+                            st.plotly_chart(fig_price, width='stretch')
+                            
+                            st.subheader("Price Heatmap")
+                            heatmap_df = df.groupby(['Day_of_Week', 'Hour'])['Gold_Price'].mean().reset_index()
+                            heatmap_df['Formatted_Price'] = heatmap_df['Gold_Price'].apply(format_gsc)
+                            
+                            fig_heat = go.Figure(data=go.Heatmap(
+                                z=heatmap_df['Gold_Price'],
+                                x=heatmap_df['Hour'],
+                                y=heatmap_df['Day_of_Week'],
+                                text=heatmap_df['Formatted_Price'],
+                                hovertemplate='%{x}:00 %{y}<br>Avg Price: %{text}<extra></extra>',
+                                colorscale=[[0, '#F2EDE4'], [1, '#2B4C59']]
+                            ))
+                            fig_heat.update_yaxes(categoryorder='array', categoryarray=day_order[::-1])
+                            fig_heat.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(l=0, r=0, t=10, b=0))
+                            st.plotly_chart(fig_heat, width='stretch')
+
+                        with side_col:
+                            st.subheader("Auction Stats")
+                            st.markdown(f"""
+                            **Min Buyout:** {format_gsc(df['Gold_Price'].min())}  
+                            **Max Buyout:** {format_gsc(df['Gold_Price'].max())}  
+                            **Average Price:** {format_gsc(df['Gold_Price'].mean())}  
+                            **Total Scans:** {len(df):,}  
+                            """)
+                    else:
+                        st.warning("No historical data found for that item.")
+                except Exception as e:
+                    st.error(f"Query Failed: {e}")
+
+# ==========================================
+# TAB 2: OVERALL MARKET TRENDS (TREEMAP)
+# ==========================================
+with tab2:
+    st.subheader(f"Market Trends for {selected_display_name}")
+    st.write("Click on a category block to drill down into specific subcategories and items. Color indicates price trend, while block size indicates available quantity.")
+    
+    if st.button(f"Generate Heatmap for {selected_display_name}"):
+        with st.spinner("Aggregating overall market data. This may take a moment..."):
+            
+            macro_query = f"""
+                SELECT 
+                    COALESCE(dict.name, 'Unknown Item') as Item_Name,
+                    auc.item.id as Item_ID, 
+                    (auc.{price_col} / 10000.0) as Gold_Price, 
+                    auc.quantity as Quantity,
+                    COALESCE(auc.scan_timestamp, make_timestamp(year, month, day, 0, 0, 0)) as timestamp
+                FROM read_parquet('{s3_path}', hive_partitioning=1, union_by_name=True) as auc
+                LEFT JOIN read_parquet('{dict_path}') as dict 
+                    ON auc.item.id = dict.id
+            """
+            try:
+                macro_df = db.execute(macro_query).df()
+                
+                if not macro_df.empty:
+                    trend_data = prep_treemap_data(macro_df, meta_df)
+                    treemap_fig = create_market_treemap(trend_data)
+                    
+                    st.plotly_chart(treemap_fig, width='stretch')
+                else:
+                    st.warning("No data found for this realm/category.")
+            except Exception as e:
+                st.error(f"Macro Query Failed: {e}")
