@@ -196,7 +196,6 @@ with tab1:
             search_id = item_options[selected_item_display]
             
             with st.spinner(f"Compiling historical market data for {selected_item_display}..."):
-                # Updated query strictly uses the exact ID rather than an ILIKE string match
                 query = f"""
                     SELECT 
                         COALESCE(dict.name, 'Unknown Item') as Item_Name,
@@ -207,4 +206,9 @@ with tab1:
                     FROM read_parquet('{s3_path}', hive_partitioning=1, union_by_name=True) as auc
                     LEFT JOIN read_parquet('{dict_path}') as dict 
                         ON auc.item.id = dict.id
-                    WHERE auc.item.id
+                    WHERE auc.item.id = {search_id}
+                    ORDER BY timestamp ASC;
+                """
+                
+                try:
+                    df = db.execute(query).df()
