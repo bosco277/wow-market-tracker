@@ -259,7 +259,7 @@ with tab1:
                                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                             )
                             
-                            st.plotly_chart(fig_price, use_container_width=True)
+                            st.plotly_chart(fig_price, width='stretch')
                             
                             st.subheader("Price Heatmap")
                             heatmap_df = df.groupby(['Day_of_Week', 'Hour'])['Gold_Price'].mean().reset_index()
@@ -271,7 +271,7 @@ with tab1:
                             ))
                             fig_heat.update_yaxes(categoryorder='array', categoryarray=day_order[::-1])
                             fig_heat.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(l=0, r=0, t=10, b=0))
-                            st.plotly_chart(fig_heat, use_container_width=True)
+                            st.plotly_chart(fig_heat, width='stretch')
 
                         with side_col:
                             st.subheader("Auction Stats")
@@ -317,7 +317,7 @@ with tab2:
                     treemap_fig = create_market_treemap(trend_data)
                     
                     # Display the Treemap
-                    st.plotly_chart(treemap_fig, use_container_width=True)
+                    st.plotly_chart(treemap_fig, width='stretch')
                 else:
                     st.warning("No data found for this realm/category.")
             except Exception as e:
