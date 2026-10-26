@@ -10,13 +10,24 @@ import json
 # ---------------------------------------------------------
 # HELPER FUNCTIONS 
 # ---------------------------------------------------------
+def format_gsc(gold_float):
+    """Converts a decimal gold float into a formatted g s c string."""
+    if pd.isna(gold_float):
+        return "0g 0s 0c"
+    
+    # Convert float back to total copper
+    copper_total = int(round(gold_float * 10000))
+    
+    g = copper_total // 10000
+    s = (copper_total % 10000) // 100
+    c = copper_total % 100
+    
+    return f"{g:,}g {s}s {c}c"
+
 @st.cache_data
 def load_metadata():
     try:
-        # Spin up a temporary, lightning-fast DuckDB instance just for parsing the JSON
         temp_db = duckdb.connect(':memory:')
-        
-        # Use DuckDB's native JSON reader to extract ONLY the 3 columns we actually need
         query = """
             SELECT 
                 itemId as item_id, 
@@ -26,78 +37,63 @@ def load_metadata():
         """
         df_meta = temp_db.execute(query).df()
         temp_db.close()
-        
         return df_meta
     except Exception as e:
         st.error(f"Could not load items.json. Did you push it to GitHub? Error: {e}")
         return pd.DataFrame(columns=['item_id', 'item_class', 'item_subclass'])
 
 def prep_treemap_data(auction_df, meta_df):
-    # Merge live auction data with your local items.json metadata
     df = pd.merge(auction_df, meta_df, left_on='Item_ID', right_on='item_id', how='left')
     
-    # 1. Identify the most recent scan timestamp
     latest_scan = df['timestamp'].max()
-    
-    # 2. Separate current data from historical data
     current_df = df[df['timestamp'] == latest_scan]
     historical_df = df[df['timestamp'] < latest_scan]
     
-    # 3. Calculate Current Stats (using minimum price to match Tab 1 logic)
     current_stats = current_df.groupby(['Item_Name', 'item_class', 'item_subclass']).agg(
         current_price=('Gold_Price', 'min'),
         total_volume=('Quantity', 'sum') 
     ).reset_index()
     
-    # 4. Calculate Historical Baseline
     if not historical_df.empty:
-        # Get the minimum price for each historical scan, then average them together
         hist_scan_mins = historical_df.groupby(['Item_Name', 'timestamp']).agg(scan_min=('Gold_Price', 'min')).reset_index()
         historical_stats = hist_scan_mins.groupby('Item_Name').agg(hist_price=('scan_min', 'mean')).reset_index()
     else:
-        # Fallback if there is only one scan in the database
         historical_stats = current_stats[['Item_Name', 'current_price']].copy()
         historical_stats.rename(columns={'current_price': 'hist_price'}, inplace=True)
         
-    # 5. Merge and calculate the percentage trend
     trend_df = pd.merge(current_stats, historical_stats, on='Item_Name')
     
-    # Avoid division by zero
     trend_df['hist_price'] = trend_df['hist_price'].replace(0, np.nan)
     trend_df['price_trend_pct'] = ((trend_df['current_price'] - trend_df['hist_price']) / trend_df['hist_price']) * 100
     trend_df['price_trend_pct'] = trend_df['price_trend_pct'].fillna(0)
     
-    # Fill missing metadata with 'Other' so the chart doesn't break
     trend_df.fillna({'item_class': 'Other', 'item_subclass': 'Other'}, inplace=True)
-    
     return trend_df
 
 def create_market_treemap(trend_df):
+    # Apply the G/S/C formatting for the hover text
+    trend_df['Formatted_Price'] = trend_df['current_price'].apply(format_gsc)
+    
     fig = px.treemap(
         trend_df,
         path=[px.Constant("All Categories"), 'item_class', 'item_subclass', 'Item_Name'],
         values='total_volume',
         color='price_trend_pct',
-        
-        # Use your custom color palette (Critical Red, Deep Slate Blue, Muted Green)
+        custom_data=['Formatted_Price'], 
         color_continuous_scale=['#B33F3F', '#2B4C59', '#3E7C59'], 
         color_continuous_midpoint=0,
-        
-        # Clamp the color scale so outliers don't destroy the gradient
         range_color=[-100, 100] 
     )
     
     fig.update_traces(
-        hovertemplate="<b>%{label}</b><br>Volume: %{value}<br>Trend: %{color:.1f}%<extra></extra>"
+        hovertemplate="<b>%{label}</b><br>Volume: %{value}<br>Price: %{customdata[0]}<br>Trend: %{color:.1f}%<extra></extra>"
     )
     
-    # Hide the color bar legend since the fixed bounds make it visually redundant
     fig.update_layout(
         margin=dict(t=30, l=10, r=10, b=10), 
         paper_bgcolor='rgba(0,0,0,0)',
         coloraxis_showscale=False 
     )
-    
     return fig
 
 # ---------------------------------------------------------
@@ -201,7 +197,7 @@ with tab1:
                             st.caption(f"Item ID: {df['Item_ID'].iloc[0]}")
                         with header_col2:
                             current_price = df['Gold_Price'].iloc[-1]
-                            st.metric("Market Value", f"{current_price:,.2f}g")
+                            st.metric("Market Value", format_gsc(current_price))
                         with header_col3:
                             start_price = df['Gold_Price'].iloc[0]
                             trend = ((current_price - start_price) / start_price) * 100 if start_price else 0
@@ -216,16 +212,15 @@ with tab1:
                         with main_col:
                             st.subheader("Price & Quantity History")
                             
-                            # 1. Aggregate data: Min Price and Total Quantity per scan
                             agg_df = df.groupby('timestamp').agg(
                                 Min_Price=('Gold_Price', 'min'),
                                 Total_Quantity=('Quantity', 'sum')
                             ).reset_index()
 
-                            # 2. Setup dual-axis figure
+                            agg_df['Formatted_Price'] = agg_df['Min_Price'].apply(format_gsc)
+
                             fig_price = make_subplots(specs=[[{"secondary_y": True}]])
 
-                            # 3. Add Total Quantity Bars (Accent Color)
                             fig_price.add_trace(
                                 go.Bar(
                                     x=agg_df['timestamp'], 
@@ -237,39 +232,50 @@ with tab1:
                                 secondary_y=True
                             )
 
-                            # 4. Add Minimum Price Line (Primary Color)
                             fig_price.add_trace(
                                 go.Scatter(
                                     x=agg_df['timestamp'], 
                                     y=agg_df['Min_Price'], 
                                     name='Min Price',
                                     mode='lines',
-                                    line=dict(color='#2B4C59', width=2)
+                                    line=dict(color='#2B4C59', width=2),
+                                    customdata=agg_df['Formatted_Price'],
+                                    hovertemplate='%{x}<br>Min Price: %{customdata}<extra></extra>'
                                 ),
                                 secondary_y=False
                             )
 
-                            # 5. Calculate and Add Trend Line
                             if len(agg_df) > 1:
                                 x_numeric = pd.to_numeric(agg_df['timestamp'])
                                 z = np.polyfit(x_numeric, agg_df['Min_Price'], 1)
                                 p = np.poly1d(z)
+                                trend_vals = p(x_numeric)
+                                trend_formatted = [format_gsc(val) for val in trend_vals]
                                 
                                 fig_price.add_trace(
                                     go.Scatter(
                                         x=agg_df['timestamp'], 
-                                        y=p(x_numeric), 
+                                        y=trend_vals, 
                                         name='Price Trend',
                                         mode='lines',
-                                        line=dict(color='#2B4C59', width=2, dash='dot')
+                                        line=dict(color='#2B4C59', width=2, dash='dot'),
+                                        customdata=trend_formatted,
+                                        hovertemplate='Trend Price: %{customdata}<extra></extra>'
                                     ),
                                     secondary_y=False
                                 )
 
-                            # 6. Layout adjustments
+                            # Dynamic Quantity Floor Logic
+                            min_qty = agg_df['Total_Quantity'].min()
                             max_qty = agg_df['Total_Quantity'].max()
+                            
+                            # Set the floor slightly below the minimum quantity to exaggerate visual variance
+                            qty_floor = min_qty * 0.90
+                            # Propel the ceiling 4x higher than the active variance to keep bars in the bottom 25% of the chart
+                            qty_ceiling = qty_floor + ((max_qty - qty_floor) * 4)
+
                             fig_price.update_yaxes(title_text="Gold", secondary_y=False, rangemode='tozero')
-                            fig_price.update_yaxes(showgrid=False, secondary_y=True, range=[0, max_qty * 4], showticklabels=False)
+                            fig_price.update_yaxes(showgrid=False, secondary_y=True, range=[qty_floor, qty_ceiling], showticklabels=False)
 
                             fig_price.update_layout(
                                 plot_bgcolor='rgba(0,0,0,0)', 
@@ -282,10 +288,14 @@ with tab1:
                             
                             st.subheader("Price Heatmap")
                             heatmap_df = df.groupby(['Day_of_Week', 'Hour'])['Gold_Price'].mean().reset_index()
+                            heatmap_df['Formatted_Price'] = heatmap_df['Gold_Price'].apply(format_gsc)
+                            
                             fig_heat = go.Figure(data=go.Heatmap(
                                 z=heatmap_df['Gold_Price'],
                                 x=heatmap_df['Hour'],
                                 y=heatmap_df['Day_of_Week'],
+                                text=heatmap_df['Formatted_Price'],
+                                hovertemplate='%{x}:00 %{y}<br>Avg Price: %{text}<extra></extra>',
                                 colorscale=[[0, '#F2EDE4'], [1, '#2B4C59']]
                             ))
                             fig_heat.update_yaxes(categoryorder='array', categoryarray=day_order[::-1])
@@ -295,9 +305,9 @@ with tab1:
                         with side_col:
                             st.subheader("Auction Stats")
                             st.markdown(f"""
-                            **Min Buyout:** {df['Gold_Price'].min():,.2f}g  
-                            **Max Buyout:** {df['Gold_Price'].max():,.2f}g  
-                            **Average Price:** {df['Gold_Price'].mean():,.2f}g  
+                            **Min Buyout:** {format_gsc(df['Gold_Price'].min())}  
+                            **Max Buyout:** {format_gsc(df['Gold_Price'].max())}  
+                            **Average Price:** {format_gsc(df['Gold_Price'].mean())}  
                             **Total Scans:** {len(df):,}  
                             """)
                     else:
@@ -315,7 +325,6 @@ with tab2:
     if st.button(f"Generate Heatmap for {selected_display_name}"):
         with st.spinner("Aggregating overall market data. This may take a moment..."):
             
-            # Query the entire realm/category without the WHERE filter
             macro_query = f"""
                 SELECT 
                     COALESCE(dict.name, 'Unknown Item') as Item_Name,
@@ -331,11 +340,9 @@ with tab2:
                 macro_df = db.execute(macro_query).df()
                 
                 if not macro_df.empty:
-                    # Prepare the data and build the Treemap
                     trend_data = prep_treemap_data(macro_df, meta_df)
                     treemap_fig = create_market_treemap(trend_data)
                     
-                    # Display the Treemap
                     st.plotly_chart(treemap_fig, width='stretch')
                 else:
                     st.warning("No data found for this realm/category.")
