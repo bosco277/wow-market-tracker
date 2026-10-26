@@ -300,14 +300,44 @@ with tab2:
             try:
                 macro_df = db.execute(macro_query).df()
                 
-                if not macro_df.empty:
-                    # Prepare the data and build the Treemap
-                    trend_data = prep_treemap_data(macro_df, meta_df)
-                    treemap_fig = create_market_treemap(trend_data)
-                    
-                    # Display the Treemap
-                    st.plotly_chart(treemap_fig, use_container_width=True)
-                else:
-                    st.warning("No data found for this realm/category.")
+def prep_treemap_data(auction_df, meta_df):
+    # Merge live auction data with your local items.json metadata
+    df = pd.merge(auction_df, meta_df, left_on='Item_ID', right_on='item_id', how='left')
+    
+    # 1. Identify the most recent scan timestamp
+    latest_scan = df['timestamp'].max()
+    
+    # 2. Separate current data from historical data
+    current_df = df[df['timestamp'] == latest_scan]
+    historical_df = df[df['timestamp'] < latest_scan]
+    
+    # 3. Calculate Current Stats (using minimum price to match Tab 1 logic)
+    current_stats = current_df.groupby(['Item_Name', 'item_class', 'item_subclass']).agg(
+        current_price=('Gold_Price', 'min'),
+        total_volume=('Quantity', 'sum') 
+    ).reset_index()
+    
+    # 4. Calculate Historical Baseline
+    if not historical_df.empty:
+        # Get the minimum price for each historical scan, then average them together
+        hist_scan_mins = historical_df.groupby(['Item_Name', 'timestamp']).agg(scan_min=('Gold_Price', 'min')).reset_index()
+        historical_stats = hist_scan_mins.groupby('Item_Name').agg(hist_price=('scan_min', 'mean')).reset_index()
+    else:
+        # Fallback if there is only one scan in the database
+        historical_stats = current_stats[['Item_Name', 'current_price']].copy()
+        historical_stats.rename(columns={'current_price': 'hist_price'}, inplace=True)
+        
+    # 5. Merge and calculate the percentage trend
+    trend_df = pd.merge(current_stats, historical_stats, on='Item_Name')
+    
+    # Avoid division by zero
+    trend_df['hist_price'] = trend_df['hist_price'].replace(0, np.nan)
+    trend_df['price_trend_pct'] = ((trend_df['current_price'] - trend_df['hist_price']) / trend_df['hist_price']) * 100
+    trend_df['price_trend_pct'] = trend_df['price_trend_pct'].fillna(0)
+    
+    # Fill missing metadata with 'Other' so the chart doesn't break
+    trend_df.fillna({'item_class': 'Other', 'item_subclass': 'Other'}, inplace=True)
+    
+    return trend_df
             except Exception as e:
                 st.error(f"Macro Query Failed: {e}")
