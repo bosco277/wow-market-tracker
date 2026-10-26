@@ -8,7 +8,7 @@ import numpy as np
 import json
 
 # ---------------------------------------------------------
-# HELPER FUNCTIONS FOR TREEMAP
+# HELPER FUNCTIONS 
 # ---------------------------------------------------------
 @st.cache_data
 def load_metadata():
@@ -28,18 +28,30 @@ def prep_treemap_data(auction_df, meta_df):
     # Merge live auction data with your local items.json metadata
     df = pd.merge(auction_df, meta_df, left_on='Item_ID', right_on='item_id', how='left')
     
-    # Calculate current average price and total volume per item
-    current_stats = df.groupby(['Item_Name', 'item_class', 'item_subclass']).agg(
-        current_price=('Gold_Price', 'mean'),
+    # 1. Identify the most recent scan timestamp
+    latest_scan = df['timestamp'].max()
+    
+    # 2. Separate current data from historical data
+    current_df = df[df['timestamp'] == latest_scan]
+    historical_df = df[df['timestamp'] < latest_scan]
+    
+    # 3. Calculate Current Stats (using minimum price to match Tab 1 logic)
+    current_stats = current_df.groupby(['Item_Name', 'item_class', 'item_subclass']).agg(
+        current_price=('Gold_Price', 'min'),
         total_volume=('Quantity', 'sum') 
     ).reset_index()
     
-    # Calculate a historical baseline (for the trend calculation)
-    historical_stats = df.groupby('Item_Name').agg(
-        hist_price=('Gold_Price', 'mean')
-    ).reset_index()
-    
-    # Merge and calculate the percentage trend
+    # 4. Calculate Historical Baseline
+    if not historical_df.empty:
+        # Get the minimum price for each historical scan, then average them together
+        hist_scan_mins = historical_df.groupby(['Item_Name', 'timestamp']).agg(scan_min=('Gold_Price', 'min')).reset_index()
+        historical_stats = hist_scan_mins.groupby('Item_Name').agg(hist_price=('scan_min', 'mean')).reset_index()
+    else:
+        # Fallback if there is only one scan in the database
+        historical_stats = current_stats[['Item_Name', 'current_price']].copy()
+        historical_stats.rename(columns={'current_price': 'hist_price'}, inplace=True)
+        
+    # 5. Merge and calculate the percentage trend
     trend_df = pd.merge(current_stats, historical_stats, on='Item_Name')
     
     # Avoid division by zero
@@ -195,149 +207,4 @@ with tab1:
 
                             # 3. Add Total Quantity Bars (Accent Color)
                             fig_price.add_trace(
-                                go.Bar(
-                                    x=agg_df['timestamp'], 
-                                    y=agg_df['Total_Quantity'], 
-                                    name='Total Quantity',
-                                    marker_color='#C98A4B', # Warm amber for supporting bars
-                                    opacity=0.4
-                                ),
-                                secondary_y=True,
-                            )
-
-                            # 4. Add Minimum Price Line (Primary Color)
-                            fig_price.add_trace(
-                                go.Scatter(
-                                    x=agg_df['timestamp'], 
-                                    y=agg_df['Min_Price'], 
-                                    name='Min Price',
-                                    mode='lines',
-                                    line=dict(color='#2B4C59', width=2) # Deep slate blue
-                                ),
-                                secondary_y=False,
-                            )
-
-                            # 5. Calculate and Add Trend Line
-                            if len(agg_df) > 1:
-                                x_numeric = pd.to_numeric(agg_df['timestamp'])
-                                z = np.polyfit(x_numeric, agg_df['Min_Price'], 1)
-                                p = np.poly1d(z)
-                                
-                                fig_price.add_trace(
-                                    go.Scatter(
-                                        x=agg_df['timestamp'], 
-                                        y=p(x_numeric), 
-                                        name='Price Trend',
-                                        mode='lines',
-                                        line=dict(color='#2B4C59', width=2, dash='dot') # Deep slate blue for main trend line
-                                    ),
-                                    secondary_y=False,
-                                )
-
-                            # 6. Layout adjustments
-                            # Force bars to sit at the bottom by expanding the secondary Y-axis range
-                            max_qty = agg_df['Total_Quantity'].max()
-                            fig_price.update_yaxes(title_text="Gold", secondary_y=False, rangemode='tozero')
-                            fig_price.update_yaxes(showgrid=False, secondary_y=True, range=[0, max_qty * 4], showticklabels=False)
-
-                            fig_price.update_layout(
-                                plot_bgcolor='rgba(0,0,0,0)', 
-                                paper_bgcolor='rgba(0,0,0,0)', 
-                                margin=dict(l=0, r=0, t=10, b=0),
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                            )
-                            
-                            st.plotly_chart(fig_price, use_container_width=True)
-                            
-                            st.subheader("Price Heatmap")
-                            heatmap_df = df.groupby(['Day_of_Week', 'Hour'])['Gold_Price'].mean().reset_index()
-                            fig_heat = go.Figure(data=go.Heatmap(
-                                z=heatmap_df['Gold_Price'],
-                                x=heatmap_df['Hour'],
-                                y=heatmap_df['Day_of_Week'],
-                                colorscale=[[0, '#F2EDE4'], [1, '#2B4C59']]
-                            ))
-                            fig_heat.update_yaxes(categoryorder='array', categoryarray=day_order[::-1])
-                            fig_heat.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(l=0, r=0, t=10, b=0))
-                            st.plotly_chart(fig_heat, use_container_width=True)
-
-                        with side_col:
-                            st.subheader("Auction Stats")
-                            st.markdown(f"""
-                            **Min Buyout:** {df['Gold_Price'].min():,.2f}g  
-                            **Max Buyout:** {df['Gold_Price'].max():,.2f}g  
-                            **Average Price:** {df['Gold_Price'].mean():,.2f}g  
-                            **Total Scans:** {len(df):,}  
-                            """)
-                    else:
-                        st.warning("No historical data found for that item.")
-                except Exception as e:
-                    st.error(f"Query Failed: {e}")
-
-
-# ==========================================
-# TAB 2: OVERALL MARKET TRENDS (TREEMAP)
-# ==========================================
-with tab2:
-    st.subheader(f"Market Trends for {selected_display_name}")
-    st.write("Click on a category block to drill down into specific subcategories and items. Color indicates price trend, while block size indicates available quantity.")
-    
-    if st.button(f"Generate Heatmap for {selected_display_name}"):
-        with st.spinner("Aggregating overall market data. This may take a moment..."):
-            
-            # Query the entire realm/category without the WHERE filter
-            macro_query = f"""
-                SELECT 
-                    COALESCE(dict.name, 'Unknown Item') as Item_Name,
-                    auc.item.id as Item_ID, 
-                    (auc.{price_col} / 10000.0) as Gold_Price, 
-                    auc.quantity as Quantity,
-                    COALESCE(auc.scan_timestamp, make_timestamp(year, month, day, 0, 0, 0)) as timestamp
-                FROM read_parquet('{s3_path}', hive_partitioning=1, union_by_name=True) as auc
-                LEFT JOIN read_parquet('{dict_path}') as dict 
-                    ON auc.item.id = dict.id
-            """
-            try:
-                macro_df = db.execute(macro_query).df()
-                
-def prep_treemap_data(auction_df, meta_df):
-    # Merge live auction data with your local items.json metadata
-    df = pd.merge(auction_df, meta_df, left_on='Item_ID', right_on='item_id', how='left')
-    
-    # 1. Identify the most recent scan timestamp
-    latest_scan = df['timestamp'].max()
-    
-    # 2. Separate current data from historical data
-    current_df = df[df['timestamp'] == latest_scan]
-    historical_df = df[df['timestamp'] < latest_scan]
-    
-    # 3. Calculate Current Stats (using minimum price to match Tab 1 logic)
-    current_stats = current_df.groupby(['Item_Name', 'item_class', 'item_subclass']).agg(
-        current_price=('Gold_Price', 'min'),
-        total_volume=('Quantity', 'sum') 
-    ).reset_index()
-    
-    # 4. Calculate Historical Baseline
-    if not historical_df.empty:
-        # Get the minimum price for each historical scan, then average them together
-        hist_scan_mins = historical_df.groupby(['Item_Name', 'timestamp']).agg(scan_min=('Gold_Price', 'min')).reset_index()
-        historical_stats = hist_scan_mins.groupby('Item_Name').agg(hist_price=('scan_min', 'mean')).reset_index()
-    else:
-        # Fallback if there is only one scan in the database
-        historical_stats = current_stats[['Item_Name', 'current_price']].copy()
-        historical_stats.rename(columns={'current_price': 'hist_price'}, inplace=True)
-        
-    # 5. Merge and calculate the percentage trend
-    trend_df = pd.merge(current_stats, historical_stats, on='Item_Name')
-    
-    # Avoid division by zero
-    trend_df['hist_price'] = trend_df['hist_price'].replace(0, np.nan)
-    trend_df['price_trend_pct'] = ((trend_df['current_price'] - trend_df['hist_price']) / trend_df['hist_price']) * 100
-    trend_df['price_trend_pct'] = trend_df['price_trend_pct'].fillna(0)
-    
-    # Fill missing metadata with 'Other' so the chart doesn't break
-    trend_df.fillna({'item_class': 'Other', 'item_subclass': 'Other'}, inplace=True)
-    
-    return trend_df
-            except Exception as e:
-                st.error(f"Macro Query Failed: {e}")
+                                go.
