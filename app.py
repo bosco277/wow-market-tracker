@@ -129,92 +129,76 @@ tab1, tab2 = st.tabs(["Item Lookup", "Overall Market Trends"])
 # ==========================================
 # TAB 1: SPECIFIC ITEM LOOKUP
 # ==========================================
-with tab1:
-    search_id = st.text_input("Search Item ID or Name", placeholder="e.g., Linen Cloth or 2589")
-    search_term = search_id.strip()
-    
-    if st.button(f"Fetch Item Data for {selected_display_name}"):
-        if not search_term:
-            st.warning("Please enter an Item ID or Item Name in the search box to view its historical dashboard.")
-        else:
-            with st.spinner(f"Compiling historical market data for {search_term}..."):
-                query = f"""
-                    SELECT 
-                        COALESCE(dict.name, 'Unknown Item') as Item_Name,
-                        auc.item.id as Item_ID, 
-                        (auc.{price_col} / 10000.0) as Gold_Price, 
-                        auc.quantity as Quantity,
-                        COALESCE(auc.scan_timestamp, make_timestamp(year, month, day, 0, 0, 0)) as timestamp
-                    FROM read_parquet('{s3_path}', hive_partitioning=1, union_by_name=True) as auc
-                    LEFT JOIN read_parquet('{dict_path}') as dict 
-                        ON auc.item.id = dict.id
-                    WHERE dict.name ILIKE '%{search_term}%' OR auc.item.id = TRY_CAST('{search_term}' AS BIGINT)
-                    ORDER BY timestamp ASC;
-                """
-                
-                try:
-                    df = db.execute(query).df()
-                    
-                    if not df.empty:
-                        df['Hour'] = df['timestamp'].dt.hour
-                        df['Day_of_Week'] = df['timestamp'].dt.day_name()
-                        day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-                        
-                        st.divider()
-                        header_col1, header_col2, header_col3, header_col4 = st.columns([2, 1, 1, 1])
-                        
-                        with header_col1:
-                            st.markdown(f"### {df['Item_Name'].iloc[0]}")
-                            st.caption(f"Item ID: {df['Item_ID'].iloc[0]}")
-                        with header_col2:
-                            current_price = df['Gold_Price'].iloc[-1]
-                            st.metric("Market Value", f"{current_price:,.2f}g")
-                        with header_col3:
-                            start_price = df['Gold_Price'].iloc[0]
-                            trend = ((current_price - start_price) / start_price) * 100 if start_price else 0
-                            st.metric("Trend", f"{trend:+.2f}%")
-                        with header_col4:
-                            current_qty = df['Quantity'].iloc[-1]
-                            st.metric("Available Quantity", f"{current_qty:,}")
-                        
-                        st.divider()
-                        main_col, side_col = st.columns([3, 1])
-                        
-                        with main_col:
+with main_col:
                             st.subheader("Price & Quantity History")
-                            fig_price = px.line(
-                                df, x='timestamp', y='Gold_Price', 
-                                color_discrete_sequence=['#2B4C59'],
-                                labels={'timestamp': '', 'Gold_Price': 'Gold'}
+                            
+                            # 1. Aggregate data: Min Price and Total Quantity per scan
+                            agg_df = df.groupby('timestamp').agg(
+                                Min_Price=('Gold_Price', 'min'),
+                                Total_Quantity=('Quantity', 'sum')
+                            ).reset_index()
+
+                            # 2. Setup dual-axis figure
+                            fig_price = make_subplots(specs=[[{"secondary_y": True}]])
+
+                            # 3. Add Total Quantity Bars (Accent Color)
+                            fig_price.add_trace(
+                                go.Bar(
+                                    x=agg_df['timestamp'], 
+                                    y=agg_df['Total_Quantity'], 
+                                    name='Total Quantity',
+                                    marker_color='#C98A4B', # Warm amber for supporting bars
+                                    opacity=0.4
+                                ),
+                                secondary_y=True,
                             )
-                            fig_price.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(l=0, r=0, t=10, b=0))
+
+                            # 4. Add Minimum Price Line (Primary Color)
+                            fig_price.add_trace(
+                                go.Scatter(
+                                    x=agg_df['timestamp'], 
+                                    y=agg_df['Min_Price'], 
+                                    name='Min Price',
+                                    mode='lines',
+                                    line=dict(color='#2B4C59', width=2) # Deep slate blue
+                                ),
+                                secondary_y=False,
+                            )
+
+                            # 5. Calculate and Add Trend Line
+                            if len(agg_df) > 1:
+                                x_numeric = pd.to_numeric(agg_df['timestamp'])
+                                z = np.polyfit(x_numeric, agg_df['Min_Price'], 1)
+                                p = np.poly1d(z)
+                                
+                                fig_price.add_trace(
+                                    go.Scatter(
+                                        x=agg_df['timestamp'], 
+                                        y=p(x_numeric), 
+                                        name='Price Trend',
+                                        mode='lines',
+                                        line=dict(color='#2B4C59', width=2, dash='dot') # Deep slate blue for main trend line
+                                    ),
+                                    secondary_y=False,
+                                )
+
+                            # 6. Layout adjustments
+                            # Force bars to sit at the bottom by expanding the secondary Y-axis range
+                            max_qty = agg_df['Total_Quantity'].max()
+                            fig_price.update_yaxes(title_text="Gold", secondary_y=False, rangemode='tozero')
+                            fig_price.update_yaxes(showgrid=False, secondary_y=True, range=[0, max_qty * 4], showticklabels=False)
+
+                            fig_price.update_layout(
+                                plot_bgcolor='rgba(0,0,0,0)', 
+                                paper_bgcolor='rgba(0,0,0,0)', 
+                                margin=dict(l=0, r=0, t=10, b=0),
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                            )
+                            
                             st.plotly_chart(fig_price, use_container_width=True)
                             
                             st.subheader("Price Heatmap")
                             heatmap_df = df.groupby(['Day_of_Week', 'Hour'])['Gold_Price'].mean().reset_index()
-                            fig_heat = go.Figure(data=go.Heatmap(
-                                z=heatmap_df['Gold_Price'],
-                                x=heatmap_df['Hour'],
-                                y=heatmap_df['Day_of_Week'],
-                                colorscale=[[0, '#F2EDE4'], [1, '#2B4C59']]
-                            ))
-                            fig_heat.update_yaxes(categoryorder='array', categoryarray=day_order[::-1])
-                            fig_heat.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(l=0, r=0, t=10, b=0))
-                            st.plotly_chart(fig_heat, use_container_width=True)
-
-                        with side_col:
-                            st.subheader("Auction Stats")
-                            st.markdown(f"""
-                            **Min Buyout:** {df['Gold_Price'].min():,.2f}g  
-                            **Max Buyout:** {df['Gold_Price'].max():,.2f}g  
-                            **Average Price:** {df['Gold_Price'].mean():,.2f}g  
-                            **Total Scans:** {len(df):,}  
-                            """)
-                    else:
-                        st.warning("No historical data found for that item.")
-                except Exception as e:
-                    st.error(f"Query Failed: {e}")
-
 
 # ==========================================
 # TAB 2: OVERALL MARKET TRENDS (TREEMAP)
