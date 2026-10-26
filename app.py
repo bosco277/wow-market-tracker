@@ -207,4 +207,118 @@ with tab1:
 
                             # 3. Add Total Quantity Bars (Accent Color)
                             fig_price.add_trace(
-                                go.
+                                go.Bar(
+                                    x=agg_df['timestamp'], 
+                                    y=agg_df['Total_Quantity'], 
+                                    name='Total Quantity',
+                                    marker_color='#C98A4B', # Warm amber for supporting bars
+                                    opacity=0.4
+                                ),
+                                secondary_y=True,
+                            )
+
+                            # 4. Add Minimum Price Line (Primary Color)
+                            fig_price.add_trace(
+                                go.Scatter(
+                                    x=agg_df['timestamp'], 
+                                    y=agg_df['Min_Price'], 
+                                    name='Min Price',
+                                    mode='lines',
+                                    line=dict(color='#2B4C59', width=2) # Deep slate blue
+                                ),
+                                secondary_y=False,
+                            )
+
+                            # 5. Calculate and Add Trend Line
+                            if len(agg_df) > 1:
+                                x_numeric = pd.to_numeric(agg_df['timestamp'])
+                                z = np.polyfit(x_numeric, agg_df['Min_Price'], 1)
+                                p = np.poly1d(z)
+                                
+                                fig_price.add_trace(
+                                    go.Scatter(
+                                        x=agg_df['timestamp'], 
+                                        y=p(x_numeric), 
+                                        name='Price Trend',
+                                        mode='lines',
+                                        line=dict(color='#2B4C59', width=2, dash='dot') # Deep slate blue for main trend line
+                                    ),
+                                    secondary_y=False,
+                                )
+
+                            # 6. Layout adjustments
+                            # Force bars to sit at the bottom by expanding the secondary Y-axis range
+                            max_qty = agg_df['Total_Quantity'].max()
+                            fig_price.update_yaxes(title_text="Gold", secondary_y=False, rangemode='tozero')
+                            fig_price.update_yaxes(showgrid=False, secondary_y=True, range=[0, max_qty * 4], showticklabels=False)
+
+                            fig_price.update_layout(
+                                plot_bgcolor='rgba(0,0,0,0)', 
+                                paper_bgcolor='rgba(0,0,0,0)', 
+                                margin=dict(l=0, r=0, t=10, b=0),
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                            )
+                            
+                            st.plotly_chart(fig_price, use_container_width=True)
+                            
+                            st.subheader("Price Heatmap")
+                            heatmap_df = df.groupby(['Day_of_Week', 'Hour'])['Gold_Price'].mean().reset_index()
+                            fig_heat = go.Figure(data=go.Heatmap(
+                                z=heatmap_df['Gold_Price'],
+                                x=heatmap_df['Hour'],
+                                y=heatmap_df['Day_of_Week'],
+                                colorscale=[[0, '#F2EDE4'], [1, '#2B4C59']]
+                            ))
+                            fig_heat.update_yaxes(categoryorder='array', categoryarray=day_order[::-1])
+                            fig_heat.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', margin=dict(l=0, r=0, t=10, b=0))
+                            st.plotly_chart(fig_heat, use_container_width=True)
+
+                        with side_col:
+                            st.subheader("Auction Stats")
+                            st.markdown(f"""
+                            **Min Buyout:** {df['Gold_Price'].min():,.2f}g  
+                            **Max Buyout:** {df['Gold_Price'].max():,.2f}g  
+                            **Average Price:** {df['Gold_Price'].mean():,.2f}g  
+                            **Total Scans:** {len(df):,}  
+                            """)
+                    else:
+                        st.warning("No historical data found for that item.")
+                except Exception as e:
+                    st.error(f"Query Failed: {e}")
+
+# ==========================================
+# TAB 2: OVERALL MARKET TRENDS (TREEMAP)
+# ==========================================
+with tab2:
+    st.subheader(f"Market Trends for {selected_display_name}")
+    st.write("Click on a category block to drill down into specific subcategories and items. Color indicates price trend, while block size indicates available quantity.")
+    
+    if st.button(f"Generate Heatmap for {selected_display_name}"):
+        with st.spinner("Aggregating overall market data. This may take a moment..."):
+            
+            # Query the entire realm/category without the WHERE filter
+            macro_query = f"""
+                SELECT 
+                    COALESCE(dict.name, 'Unknown Item') as Item_Name,
+                    auc.item.id as Item_ID, 
+                    (auc.{price_col} / 10000.0) as Gold_Price, 
+                    auc.quantity as Quantity,
+                    COALESCE(auc.scan_timestamp, make_timestamp(year, month, day, 0, 0, 0)) as timestamp
+                FROM read_parquet('{s3_path}', hive_partitioning=1, union_by_name=True) as auc
+                LEFT JOIN read_parquet('{dict_path}') as dict 
+                    ON auc.item.id = dict.id
+            """
+            try:
+                macro_df = db.execute(macro_query).df()
+                
+                if not macro_df.empty:
+                    # Prepare the data and build the Treemap
+                    trend_data = prep_treemap_data(macro_df, meta_df)
+                    treemap_fig = create_market_treemap(trend_data)
+                    
+                    # Display the Treemap
+                    st.plotly_chart(treemap_fig, use_container_width=True)
+                else:
+                    st.warning("No data found for this realm/category.")
+            except Exception as e:
+                st.error(f"Macro Query Failed: {e}")
