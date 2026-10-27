@@ -23,7 +23,7 @@ s3 = boto3.client(
 hf_api = HfApi(token=HF_TOKEN)
 
 def compact_folder(folder_prefix):
-    """Merges all hourly files in a folder, drops duplicates, and deletes the originals."""
+    """Merges all hourly files in a folder, drops exact duplicates, and deletes the originals."""
     # 1. Find all files in yesterday's folder
     response = s3.list_objects_v2(Bucket=B2_BUCKET_NAME, Prefix=folder_prefix)
     if 'Contents' not in response:
@@ -47,10 +47,12 @@ def compact_folder(folder_prefix):
 
     merged_df = pd.concat(dataframes, ignore_index=True)
     
-    # 3. Deduplicate (Keep the most recent update for each auction ID)
+    # 3. Deduplicate (Drop exact row matches only, preserving the same auction across different hours)
     original_count = len(merged_df)
-    merged_df.drop_duplicates(subset=['id'], keep='last', inplace=True)
-    print(f"Reduced from {original_count} rows to {len(merged_df)} unique auctions.")
+    # Cast to string strictly to identify duplicates of nested dicts, then apply mask
+    non_duplicate_mask = ~merged_df.astype(str).duplicated()
+    merged_df = merged_df[non_duplicate_mask].reset_index(drop=True)
+    print(f"Reduced from {original_count} rows to {len(merged_df)} unique records.")
 
     # 4. Upload Daily File
     daily_filename = f"{folder_prefix}daily.parquet"
