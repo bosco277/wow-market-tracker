@@ -212,18 +212,18 @@ with tab1:
             query = f"""
                 SELECT 
                     COALESCE(dict.name, 'Unknown Item') as Item_Name,
-                    auc.item.id as Item_ID, 
+                    COALESCE(auc.clean_item_id, auc.item.id) as Item_ID, 
                     (auc.{price_col} / 10000.0) as Gold_Price, 
                     auc.quantity as Quantity,
                     COALESCE(auc.scan_timestamp, make_timestamp(year, month, day, 0, 0, 0)) as timestamp,
                     tsm.tsm_market_value
                 FROM read_parquet('{s3_path}', hive_partitioning=1, union_by_name=True) as auc
                 LEFT JOIN read_parquet('{dict_path}') as dict 
-                    ON auc.item.id = dict.id
+                    ON COALESCE(auc.clean_item_id, auc.item.id) = dict.id
                 LEFT JOIN read_parquet('s3://wow-market-data-lake/{target_folder}/system/tsm_master.parquet') as tsm
-                    ON auc.item.id = tsm.Item_ID 
+                    ON COALESCE(auc.clean_item_id, auc.item.id) = tsm.clean_item_id 
                     AND CAST(COALESCE(auc.scan_timestamp, make_timestamp(year, month, day, 0, 0, 0)) AS DATE) = tsm.date
-                WHERE dict.name ILIKE '%{safe_search}%' OR auc.item.id = TRY_CAST('{safe_search}' AS BIGINT)
+                WHERE dict.name ILIKE '%{safe_search}%' OR COALESCE(auc.clean_item_id, auc.item.id) = TRY_CAST('{safe_search}' AS BIGINT)
                 ORDER BY timestamp ASC;
             """
             
@@ -348,8 +348,8 @@ with tab1:
                             qty_floor = min_qty * 0.90
                             qty_ceiling = qty_floor + ((max_qty - qty_floor) * 4)
 
-                            fig_price.update_yaxes(title_text="Gold", secondary_y=False, rangemode='tozero')
-                            fig_price.update_yaxes(showgrid=False, secondary_y=True, range=[qty_floor, qty_ceiling], showticklabels=False)
+                        fig_price.update_yaxes(title_text="Gold", secondary_y=False, rangemode='tozero')
+                        fig_price.update_yaxes(showgrid=False, secondary_y=True, range=[qty_floor, qty_ceiling], showticklabels=False)
 
                         fig_price.update_layout(
                             plot_bgcolor='rgba(0,0,0,0)', 
@@ -402,13 +402,13 @@ with tab2:
             macro_query = f"""
                 SELECT 
                     COALESCE(dict.name, 'Unknown Item') as Item_Name,
-                    auc.item.id as Item_ID, 
+                    COALESCE(auc.clean_item_id, auc.item.id) as Item_ID, 
                     (auc.{price_col} / 10000.0) as Gold_Price, 
                     auc.quantity as Quantity,
                     COALESCE(auc.scan_timestamp, make_timestamp(year, month, day, 0, 0, 0)) as timestamp
                 FROM read_parquet('{s3_path}', hive_partitioning=1, union_by_name=True) as auc
                 LEFT JOIN read_parquet('{dict_path}') as dict 
-                    ON auc.item.id = dict.id
+                    ON COALESCE(auc.clean_item_id, auc.item.id) = dict.id
             """
             try:
                 macro_df = db.execute(macro_query).df()
