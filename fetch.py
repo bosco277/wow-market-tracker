@@ -5,10 +5,9 @@ import pandas as pd
 import boto3
 from datetime import datetime
 import botocore.exceptions
-from huggingface_hub import HfApi # 1. ADD THIS IMPORT
+from huggingface_hub import HfApi 
 
 # --- CONFIGURATION ---
-# Replace these with the 5 Realm IDs you pulled from the get_realms script
 REALM_IDS = [73, 96, 118] 
 
 # Credentials pulled securely from GitHub Secrets
@@ -19,10 +18,9 @@ B2_APP_KEY = os.environ.get("B2_APP_KEY")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
 B2_BUCKET_NAME = "wow-market-data-lake"
-# IMPORTANT: Update with your Hugging Face username!
 HF_REPO_ID = "bosco277/wow-market-data-lake" 
 
-# Initialize the S3 client globally (Using your confirmed us-east-005 endpoint)
+# Initialize the S3 client globally
 s3 = boto3.client(
     "s3",
     endpoint_url="https://s3.us-east-005.backblazeb2.com",
@@ -40,20 +38,60 @@ def get_blizzard_token():
     return response.json()["access_token"]
 
 def get_last_timestamp(tracker_name):
-    """Reads the last known update time from Backblaze for a specific dataset."""
+    """Reads the last known update time. Tries Backblaze first, falls back to Hugging Face."""
     file_key = f"system/last_update_{tracker_name}.txt"
+    
+    # 1. Try Backblaze B2 First
     try:
         response = s3.get_object(Bucket=B2_BUCKET_NAME, Key=file_key)
         return response['Body'].read().decode('utf-8')
     except botocore.exceptions.ClientError as e:
         if e.response['Error']['Code'] == 'NoSuchKey':
+            return None # The file genuinely doesn't exist yet
+        print(f"B2 Read Error (Cap likely hit): {e}. Falling back to Hugging Face...")
+    except Exception as e:
+        print(f"B2 Unexpected Error: {e}. Falling back to Hugging Face...")
+
+    # 2. Fallback to Hugging Face (Direct HTTP GET)
+    try:
+        url = f"https://huggingface.co/datasets/{HF_REPO_ID}/raw/main/{file_key}"
+        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        hf_response = requests.get(url, headers=headers)
+        
+        if hf_response.status_code == 200:
+            print("Successfully recovered timestamp from Hugging Face.")
+            return hf_response.text.strip()
+        elif hf_response.status_code == 404:
             return None
-        raise e
+        else:
+            print(f"HF Read Error: HTTP {hf_response.status_code}")
+            return None
+    except Exception as e:
+        print(f"HF Request Failed: {e}")
+        return None
 
 def save_new_timestamp(tracker_name, timestamp_string):
-    """Saves Blizzard's newest update time to Backblaze."""
+    """Saves Blizzard's newest update time to both Backblaze and Hugging Face."""
     file_key = f"system/last_update_{tracker_name}.txt"
-    s3.put_object(Bucket=B2_BUCKET_NAME, Key=file_key, Body=timestamp_string.encode('utf-8'))
+    timestamp_bytes = timestamp_string.encode('utf-8')
+    
+    # 1. Upload to Backblaze
+    try:
+        s3.put_object(Bucket=B2_BUCKET_NAME, Key=file_key, Body=timestamp_bytes)
+    except Exception as e:
+        print(f"Failed to save timestamp to B2: {e}")
+
+    # 2. Upload to Hugging Face
+    try:
+        api = HfApi(token=HF_TOKEN)
+        api.upload_file(
+            path_or_fileobj=io.BytesIO(timestamp_bytes),
+            path_in_repo=file_key,
+            repo_id=HF_REPO_ID,
+            repo_type="dataset"
+        )
+    except Exception as e:
+        print(f"Failed to save timestamp to HF: {e}")
 
 def fetch_blizzard_data(url, token, last_modified_date):
     """Fetches data using secure Header authorization and If-Modified-Since logic."""
@@ -83,23 +121,22 @@ def process_and_upload(auctions_json, folder_name):
     df = pd.DataFrame(auctions_json)
     now = datetime.utcnow()
     
-    # ADD THIS LINE: Explicitly stamp every row with the exact time
     df['scan_timestamp'] = now 
     
     filename = f"{folder_name}/year={now.year}/month={now.month:02d}/day={now.day:02d}/hour_{now.hour:02d}_{now.minute:02d}.parquet"
     
-    # Create the initial buffer and save the Parquet data
     parquet_buffer = io.BytesIO()
     df.to_parquet(parquet_buffer, index=False, compression="snappy")
-    
-    # EXTRACT THE RAW BYTES SO NO LIBRARY CAN CLOSE OUR STREAM
     parquet_bytes = parquet_buffer.getvalue()
     
-    # 1. Upload to Backblaze B2 (using a fresh wrapper)
-    s3.upload_fileobj(io.BytesIO(parquet_bytes), B2_BUCKET_NAME, filename)
-    print(f"Successfully uploaded to B2: {filename}")
+    # 1. Upload to Backblaze B2 with try/except safety
+    try:
+        s3.upload_fileobj(io.BytesIO(parquet_bytes), B2_BUCKET_NAME, filename)
+        print(f"Successfully uploaded to B2: {filename}")
+    except Exception as e:
+        print(f"Failed to upload to B2: {e}")
 
-    # 2. Upload to Hugging Face (using a fresh wrapper)
+    # 2. Upload to Hugging Face 
     try:
         api = HfApi(token=HF_TOKEN)
         api.upload_file(
