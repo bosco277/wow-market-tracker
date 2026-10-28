@@ -47,11 +47,18 @@ def compact_folder(folder_prefix):
 
     merged_df = pd.concat(dataframes, ignore_index=True)
     
-    # 3. Deduplicate (Drop exact row matches only, preserving the same auction across different hours)
+    # 3. Deduplicate (Optimized logic)
     original_count = len(merged_df)
-    # Cast to string strictly to identify duplicates of nested dicts, then apply mask
-    non_duplicate_mask = ~merged_df.astype(str).duplicated()
-    merged_df = merged_df[non_duplicate_mask].reset_index(drop=True)
+    
+    # Extract the item ID into a clean column
+    merged_df['clean_item_id'] = merged_df['item'].apply(lambda x: x.get('id') if isinstance(x, dict) else x)
+    
+    # Drop the unhashable nested dictionary to prevent the memory crash
+    merged_df = merged_df.drop(columns=['item'])
+    
+    # Deduplicate instantly (Pandas can now natively hash the entire row)
+    merged_df = merged_df.drop_duplicates().reset_index(drop=True)
+    
     print(f"Reduced from {original_count} rows to {len(merged_df)} unique records.")
 
     # 4. Upload Daily File
