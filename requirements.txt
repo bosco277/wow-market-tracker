@@ -6,3 +6,4 @@ huggingface_hub
 streamlit
 duckdb
 plotly
+numpy
