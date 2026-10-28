@@ -144,7 +144,7 @@ realm_options = {
 selected_display_name = st.selectbox("Select Realm/Category", list(realm_options.keys()))
 target_folder = realm_options[selected_display_name]
 
-s3_path = f"s3://wow-market-data-lake/{target_folder}/**/*.parquet"
+s3_path = f"s3://wow-market-data-lake/{target_folder}/year=*/**/*.parquet"
 dict_path = "s3://wow-market-data-lake/system/item_dictionary.parquet"
 price_col = "unit_price" if target_folder == "commodities" else "buyout"
 
