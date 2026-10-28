@@ -71,7 +71,11 @@ def build_tsm_master():
         
         # 2. Group by Item ID and apply TSM logic
         tsm_results = []
-        for item_id, item_data in raw_df.groupby('item.id'):
+        # Safely extract the ID from the dictionary into a clean column
+        raw_df['clean_item_id'] = raw_df['item'].apply(lambda x: x.get('id') if isinstance(x, dict) else x)
+
+        # Group by the newly extracted column
+        for item_id, item_data in raw_df.groupby('clean_item_id'):
             item_tsm = apply_tsm_curation(item_data)
             if not item_tsm.empty:
                 item_tsm['Item_ID'] = item_id
