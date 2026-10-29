@@ -129,6 +129,7 @@ with tab_screener:
             ),
             use_container_width=True,
             hide_index=True,
+        )
             # ... keep your existing column_config dictionary below this ...
             
         st.dataframe(
