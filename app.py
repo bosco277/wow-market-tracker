@@ -119,6 +119,18 @@ with tab_screener:
         if 'floor_price' in display_df.columns:
             grid_columns.insert(4, 'floor_price')
             
+        # FAILSAFE: Strip out any columns that don't actually exist in the dataframe
+        grid_columns = [col for col in grid_columns if col in display_df.columns]
+            
+        st.dataframe(
+            display_df[grid_columns].sort_values(
+                by='discount_to_vwap' if 'discount_to_vwap' in display_df.columns else 'item_id', 
+                ascending=False
+            ),
+            use_container_width=True,
+            hide_index=True,
+            # ... keep your existing column_config dictionary below this ...
+            
         st.dataframe(
             display_df[grid_columns].sort_values('discount_to_vwap', ascending=False),
             use_container_width=True,
