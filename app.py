@@ -55,9 +55,14 @@ def load_dashboard_payloads():
                 return pd.read_parquet(file_path)
                 
             except Exception as hf_error:
-                # Total Failure
-                st.error(f"Critical Data Outage for {filename}.\nB2 Error: {b2_error}\nHF Error: {hf_error}")
-                return pd.DataFrame()
+                # Handle missing dictionary gracefully without breaking the UI
+                if "item_dictionary" in filename:
+                    st.warning(f"Warning: {filename} is missing from Hugging Face backup. Using items.json fallback.")
+                    return pd.DataFrame()
+                else:
+                    # Only throw a critical error if the core market data is missing
+                    st.error(f"Critical Data Outage for {filename}.\nB2 Error: {b2_error}\nHF Error: {hf_error}")
+                    return pd.DataFrame()
 
     screener = fetch_parquet("dashboard_screener.parquet")
     charts = fetch_parquet("dashboard_charts.parquet")
