@@ -1,11 +1,18 @@
 name: Hourly Auction Extractor
 
 on:
-  workflow_dispatch: 
+  workflow_dispatch:
+
+# Never run two extractions at once: overlapping runs could write the same hour_HH_MM file
+# and race on the pending-copy manifests. A newer queued run replaces an older queued one.
+concurrency:
+  group: auction-extract
+  cancel-in-progress: false
 
 jobs:
   extract-data:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository files
@@ -26,5 +33,7 @@ jobs:
           BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
           B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
           B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }} # Add this line!
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Optional: add a DISCORD_WEBHOOK_URL repository secret to get failure alerts. Unset = no alerts.
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python fetch.py
