@@ -19,12 +19,15 @@ def format_gsc(gold_float):
         return "0g"
     return f"{gold_float:,.2f}g"
 
+from huggingface_hub import hf_hub_download
+import duckdb
+
 # ---------------------------------------------------------
-# 2. Data Ingestion (Direct from B2 via DuckDB)
+# 2. Data Ingestion (B2 Primary with Hugging Face Fallback)
 # ---------------------------------------------------------
 @st.cache_data(ttl=600)
 def load_dashboard_payloads():
-    # Spin up DuckDB and configure the B2 connection
+    # Configure DuckDB for Backblaze B2 (Primary Hot Storage)
     con = duckdb.connect(database=':memory:')
     con.execute("INSTALL httpfs; LOAD httpfs;")
     con.execute(f"""
@@ -35,13 +38,26 @@ def load_dashboard_payloads():
     """)
     
     def fetch_parquet(filename):
+        # Attempt 1: Fetch from Backblaze B2
         try:
-            # Tell DuckDB to read directly from the B2 bucket root
             query = f"SELECT * FROM read_parquet('s3://wow-market-data-lake/{filename}')"
             return con.execute(query).df()
-        except Exception as e:
-            st.error(f"Error loading {filename}: {e}")
-            return pd.DataFrame()
+        
+        except Exception as b2_error:
+            # Attempt 2: Seamless Failover to Hugging Face Cold Storage
+            try:
+                file_path = hf_hub_download(
+                    repo_id="bosco277/wow-market-data-lake", 
+                    repo_type="dataset", 
+                    filename=filename,
+                    token=st.secrets.get("HF_TOKEN")
+                )
+                return pd.read_parquet(file_path)
+                
+            except Exception as hf_error:
+                # Total Failure
+                st.error(f"Critical Data Outage for {filename}.\nB2 Error: {b2_error}\nHF Error: {hf_error}")
+                return pd.DataFrame()
 
     screener = fetch_parquet("dashboard_screener.parquet")
     charts = fetch_parquet("dashboard_charts.parquet")
@@ -61,11 +77,11 @@ def load_metadata():
     except Exception:
         return pd.DataFrame(columns=['item_id', 'item_name', 'item_class', 'item_subclass'])
 
-# Add a manual refresh button so you don't have to wait 10 minutes
+# Manual refresh button
 if st.sidebar.button("Force Refresh Data"):
     st.cache_data.clear()
 
-with st.spinner("Fetching live market payloads..."):
+with st.spinner("Fetching live market payloads (checking B2 first, fallback to HF)..."):
     screener_df, charts_df, dict_df = load_dashboard_payloads()
     meta_df = load_metadata()
 
