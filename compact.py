@@ -2,6 +2,7 @@ import os
 import io
 import pandas as pd
 import boto3
+import duckdb
 from datetime import datetime, timedelta
 from huggingface_hub import HfApi
 
@@ -95,6 +96,110 @@ def compact_folder(folder_prefix):
             
     print(f"Successfully compacted {folder_prefix}")
 
+
+def generate_dashboard_payloads():
+    """Fetches the last 7 days of daily parquets, calculates VWAP, and exports to HF."""
+    print("Generating Dashboard Payloads...")
+    
+    dataframes = []
+    folders_to_check = ["commodities/"] + [f"realm_{r_id}/" for r_id in REALM_IDS]
+    
+    # Fetch the daily.parquet files from the last 7 days
+    for i in range(1, 8):
+        d = datetime.utcnow() - timedelta(days=i)
+        date_path = f"year={d.year}/month={d.month:02d}/day={d.day:02d}/"
+        
+        for folder in folders_to_check:
+            key = f"{folder}{date_path}daily.parquet"
+            try:
+                obj = s3.get_object(Bucket=B2_BUCKET_NAME, Key=key)
+                df = pd.read_parquet(io.BytesIO(obj['Body'].read()))
+                dataframes.append(df)
+            except Exception:
+                pass # File doesn't exist for this day/folder yet
+                
+    if not dataframes:
+        print("No daily files found for the last 7 days. Skipping dashboard generation.")
+        return
+        
+    raw_df = pd.concat(dataframes, ignore_index=True)
+    
+    # Standardize schema for DuckDB (handles both commodity 'unit_price' and realm 'buyout')
+    if 'unit_price' in raw_df.columns and 'buyout' in raw_df.columns:
+        raw_df['gold_price'] = raw_df['unit_price'].fillna(raw_df['buyout']) / 10000
+    elif 'unit_price' in raw_df.columns:
+        raw_df['gold_price'] = raw_df['unit_price'] / 10000
+    else:
+        raw_df['gold_price'] = raw_df['buyout'] / 10000
+        
+    raw_df['item_id'] = raw_df['clean_item_id']
+    
+    # Isolate necessary columns for memory efficiency
+    micro_lake_df = raw_df[['item_id', 'scan_timestamp', 'gold_price', 'quantity']]
+    
+    # Run the DuckDB VWAP logic
+    con = duckdb.connect(database=':memory:')
+    con.register('micro_lake_df', micro_lake_df)
+    
+    vwap_query = """
+    WITH HourlyVolume AS (
+        SELECT 
+            item_id,
+            scan_timestamp,
+            MIN(gold_price) as floor_price,
+            SUM(quantity) as volume
+        FROM micro_lake_df
+        GROUP BY item_id, scan_timestamp
+    ),
+    RollingVelocity AS (
+        SELECT 
+            item_id,
+            scan_timestamp,
+            floor_price,
+            volume,
+            SUM(volume) OVER (
+                PARTITION BY item_id 
+                ORDER BY scan_timestamp 
+                RANGE BETWEEN INTERVAL 24 HOURS PRECEDING AND CURRENT ROW
+            ) as rolling_24h_sales
+        FROM HourlyVolume
+    )
+    SELECT 
+        item_id,
+        scan_timestamp,
+        rolling_24h_sales as target_volume,
+        SUM(floor_price * volume) OVER (
+            PARTITION BY item_id 
+            ORDER BY scan_timestamp 
+            RANGE BETWEEN INTERVAL 24 HOURS PRECEDING AND CURRENT ROW
+        ) / NULLIF(rolling_24h_sales, 0) as liquidity_adjusted_vwap
+    FROM RollingVelocity
+    WHERE rolling_24h_sales > 0
+    """
+    vwap_df = con.execute(vwap_query).df()
+    
+    # Generate the Screener Payload (Latest Targets)
+    latest_targets = vwap_df.sort_values('scan_timestamp').groupby('item_id').tail(1).copy()
+    latest_targets['buy_threshold'] = latest_targets['liquidity_adjusted_vwap'] * 0.90
+    latest_targets['sell_threshold'] = latest_targets['liquidity_adjusted_vwap'] * 0.98
+    
+    # Helper to upload directly to Hugging Face via in-memory buffer
+    def upload_to_hf(df, filename):
+        buf = io.BytesIO()
+        df.to_parquet(buf, index=False, compression="snappy")
+        buf.seek(0)
+        hf_api.upload_file(
+            path_or_fileobj=buf,
+            path_in_repo=filename,
+            repo_id=HF_REPO_ID,
+            repo_type="dataset"
+        )
+        
+    upload_to_hf(latest_targets, "dashboard_screener.parquet")
+    upload_to_hf(vwap_df, "dashboard_charts.parquet")
+    print("Successfully generated and uploaded Dashboard Payloads to Hugging Face.")
+
+
 def main():
     # Target yesterday's date
     yesterday = datetime.utcnow() - timedelta(days=1)
@@ -102,9 +207,13 @@ def main():
 
     folders_to_check = ["commodities/"] + [f"realm_{r_id}/" for r_id in REALM_IDS]
 
+    # Run the daily compaction
     for folder in folders_to_check:
         prefix = f"{folder}{date_path}"
         compact_folder(prefix)
+        
+    # Generate the web dashboard payloads after compaction is complete
+    generate_dashboard_payloads()
 
 if __name__ == "__main__":
     main()
