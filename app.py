@@ -20,27 +20,34 @@ def format_gsc(gold_float):
     return f"{gold_float:,.2f}g"
 
 # ---------------------------------------------------------
-# 2. Data Ingestion (Direct from B2)
+# 2. Data Ingestion (Direct from B2 via DuckDB)
 # ---------------------------------------------------------
-@st.cache_data(ttl=600) # Cache for 10 minutes to minimize B2 read operations
+@st.cache_data(ttl=600)
 def load_dashboard_payloads():
-    s3 = boto3.client(
-        "s3",
-        endpoint_url="https://s3.us-east-005.backblazeb2.com",
-        aws_access_key_id=st.secrets["B2_KEY_ID"],
-        aws_secret_access_key=st.secrets["B2_APP_KEY"]
-    )
+    # Spin up DuckDB and configure the B2 connection
+    con = duckdb.connect(database=':memory:')
+    con.execute("INSTALL httpfs; LOAD httpfs;")
+    con.execute(f"""
+        CREATE OR REPLACE SECRET b2_secret (
+            TYPE S3, KEY_ID '{st.secrets["B2_KEY_ID"]}', SECRET '{st.secrets["B2_APP_KEY"]}',
+            ENDPOINT 's3.us-east-005.backblazeb2.com', URL_STYLE 'path'
+        );
+    """)
     
-    def fetch_parquet(key):
+    def fetch_parquet(filename):
         try:
-            obj = s3.get_object(Bucket="wow-market-data-lake", Key=key)
-            return pd.read_parquet(io.BytesIO(obj['Body'].read()))
-        except Exception:
+            # Tell DuckDB to read directly from the B2 bucket root
+            query = f"SELECT * FROM read_parquet('s3://wow-market-data-lake/{filename}')"
+            return con.execute(query).df()
+        except Exception as e:
+            st.error(f"Error loading {filename}: {e}")
             return pd.DataFrame()
 
     screener = fetch_parquet("dashboard_screener.parquet")
     charts = fetch_parquet("dashboard_charts.parquet")
     dict_df = fetch_parquet("system/item_dictionary.parquet")
+    
+    con.close()
     return screener, charts, dict_df
 
 @st.cache_data
@@ -54,28 +61,13 @@ def load_metadata():
     except Exception:
         return pd.DataFrame(columns=['item_id', 'item_name', 'item_class', 'item_subclass'])
 
+# Add a manual refresh button so you don't have to wait 10 minutes
+if st.sidebar.button("Force Refresh Data"):
+    st.cache_data.clear()
+
 with st.spinner("Fetching live market payloads..."):
     screener_df, charts_df, dict_df = load_dashboard_payloads()
     meta_df = load_metadata()
-
-# Merge naming and category dictionaries into the screener payload
-if not screener_df.empty:
-    if not dict_df.empty:
-        screener_df = pd.merge(screener_df, dict_df, left_on='item_id', right_on='id', how='left')
-        screener_df.rename(columns={'name': 'item_name'}, inplace=True)
-    if not meta_df.empty:
-        screener_df = pd.merge(screener_df, meta_df[['item_id', 'item_class', 'item_subclass']], on='item_id', how='left')
-        
-    # Calculate Arbitrage Metrics
-    if 'floor_price' in screener_df.columns:
-        screener_df['discount_to_vwap'] = ((screener_df['liquidity_adjusted_vwap'] - screener_df['floor_price']) / screener_df['liquidity_adjusted_vwap']) * 100
-        screener_df['discount_to_vwap'] = screener_df['discount_to_vwap'].fillna(0).round(2)
-        screener_df['action_signal'] = screener_df.apply(lambda x: 'BUY (DISCOUNT)' if x['floor_price'] <= x['buy_threshold'] else ('OVERPRICED' if x['floor_price'] > x['liquidity_adjusted_vwap'] else 'HOLD'), axis=1)
-    else:
-        screener_df['discount_to_vwap'] = 0.0
-        screener_df['action_signal'] = 'DATA PENDING'
-        
-    screener_df['item_name'] = screener_df['item_name'].fillna('Unknown Item')
 
 # ---------------------------------------------------------
 # 3. Terminal Interface
