@@ -155,6 +155,7 @@ def generate_dashboard_payloads():
     SELECT 
         item_id,
         scan_timestamp,
+        floor_price,   -- <--- ADD THIS EXACT LINE HERE
         rolling_24h_sales as target_volume,
         SUM(floor_price * volume) OVER (
             PARTITION BY item_id 
