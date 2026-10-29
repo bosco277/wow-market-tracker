@@ -205,27 +205,33 @@ with tab_portfolio:
         }
     )
     
-    # Process portfolio metrics
-    if not edited_portfolio.empty and not screener_df.empty:
-        st.session_state["portfolio"] = edited_portfolio
+# Merge naming and category dictionaries into the screener payload
+if not screener_df.empty:
+    if not dict_df.empty and 'id' in dict_df.columns:
+        screener_df = pd.merge(screener_df, dict_df, left_on='item_id', right_on='id', how='left')
+        screener_df.rename(columns={'name': 'item_name'}, inplace=True)
         
-        # Merge portfolio inputs with live algorithms
-        ledger = pd.merge(edited_portfolio, screener_df[['item_id', 'item_name', 'liquidity_adjusted_vwap', 'floor_price']], on='item_id', how='left')
+    if not meta_df.empty:
+        # If the primary dictionary failed, grab 'item_name' from items.json instead
+        cols_to_merge = ['item_id', 'item_class', 'item_subclass']
+        if 'item_name' not in screener_df.columns:
+            cols_to_merge.append('item_name')
+        screener_df = pd.merge(screener_df, meta_df[cols_to_merge], on='item_id', how='left')
         
-        # Financial Math (Accounting for 5% AH Tax and demanding 2% profit)
-        ledger['minimum_profitable_price'] = ledger['avg_cost_basis'] / 0.95
-        ledger['target_sell_price'] = ledger['minimum_profitable_price'] * 1.02
+    # Calculate Arbitrage Metrics
+    if 'floor_price' in screener_df.columns and 'liquidity_adjusted_vwap' in screener_df.columns:
+        screener_df['discount_to_vwap'] = ((screener_df['liquidity_adjusted_vwap'] - screener_df['floor_price']) / screener_df['liquidity_adjusted_vwap']) * 100
+        screener_df['discount_to_vwap'] = screener_df['discount_to_vwap'].fillna(0).round(2)
+        screener_df['action_signal'] = screener_df.apply(lambda x: 'BUY (DISCOUNT)' if x['floor_price'] <= x['buy_threshold'] else ('OVERPRICED' if x['floor_price'] > x['liquidity_adjusted_vwap'] else 'HOLD'), axis=1)
+    else:
+        screener_df['discount_to_vwap'] = 0.0
+        screener_df['action_signal'] = 'DATA PENDING'
         
-        if 'floor_price' in ledger.columns:
-            ledger['current_revenue'] = (ledger['quantity'] * ledger['floor_price']) * 0.95
-            ledger['total_cost'] = ledger['quantity'] * ledger['avg_cost_basis']
-            ledger['unrealized_profit'] = ledger['current_revenue'] - ledger['total_cost']
-            ledger['roi_pct'] = (ledger['unrealized_profit'] / ledger['total_cost']) * 100
-            
-            ledger['execution_signal'] = ledger.apply(
-                lambda x: 'EXECUTE SELL' if (x['floor_price'] >= (x['liquidity_adjusted_vwap'] * 0.98)) and (x['floor_price'] >= x['target_sell_price']) else 'HOLD', 
-                axis=1
-            )
+    # Safely ensure item_name exists to prevent KeyErrors
+    if 'item_name' not in screener_df.columns:
+        screener_df['item_name'] = 'Unknown Item'
+    else:
+        screener_df['item_name'] = screener_df['item_name'].fillna('Unknown Item')
         
         st.markdown("#### Live Portfolio Execution Targets")
         display_ledger = ledger[['item_name', 'quantity', 'avg_cost_basis', 'target_sell_price', 'floor_price', 'unrealized_profit', 'roi_pct', 'execution_signal']]
