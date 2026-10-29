@@ -1,5 +1,7 @@
 import os
 import io
+import json
+import numpy as np
 import pandas as pd
 import boto3
 import duckdb
@@ -24,6 +26,23 @@ s3 = boto3.client(
 )
 # Connect to Hugging Face (Secondary Cold Storage)
 hf_api = HfApi(token=HF_TOKEN)
+
+def _to_jsonable(obj):
+    """Converts pandas/pyarrow nested values (dicts, numpy arrays, numpy scalars) into plain JSON types."""
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, np.ndarray)):
+        return [_to_jsonable(v) for v in obj]
+    if isinstance(obj, np.generic):
+        return obj.item()
+    return obj
+
+def item_to_json(item):
+    """Serializes the full Blizzard item struct (id, context, bonus_lists, modifiers, pet fields...) to a
+    stable JSON string so compaction no longer throws the variant data away."""
+    if not isinstance(item, dict):
+        return None
+    return json.dumps(_to_jsonable(item), sort_keys=True, separators=(",", ":"))
 
 def compact_folder(folder_prefix):
     """Merges all hourly files in a folder, drops exact duplicates, and deletes the originals."""
@@ -53,6 +72,10 @@ def compact_folder(folder_prefix):
     # 3. Deduplicate 
     original_count = len(merged_df)
     merged_df['clean_item_id'] = merged_df['item'].apply(lambda x: x.get('id') if isinstance(x, dict) else x)
+    # STOPGAP: keep the full item struct as JSON (bonus_lists, modifiers, context...) and record which
+    # folder (commodities / realm_N) each row came from, instead of discarding both.
+    merged_df['item_json'] = merged_df['item'].apply(item_to_json)
+    merged_df['source'] = folder_prefix.split('/')[0]
     merged_df = merged_df.drop(columns=['item'])
     merged_df = merged_df.drop_duplicates().reset_index(drop=True)
     
