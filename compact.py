@@ -15,17 +15,19 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 B2_BUCKET_NAME = "wow-market-data-lake"
 HF_REPO_ID = "bosco277/wow-market-data-lake" # UPDATE THIS
 
+# Connect to Backblaze B2 (Primary Hot Storage)
 s3 = boto3.client(
     "s3",
     endpoint_url="https://s3.us-east-005.backblazeb2.com",
     aws_access_key_id=B2_KEY_ID,
     aws_secret_access_key=B2_APP_KEY
 )
+# Connect to Hugging Face (Secondary Cold Storage)
 hf_api = HfApi(token=HF_TOKEN)
 
 def compact_folder(folder_prefix):
     """Merges all hourly files in a folder, drops exact duplicates, and deletes the originals."""
-    # 1. Find all files in yesterday's folder
+    # 1. Find all files in yesterday's folder on B2
     response = s3.list_objects_v2(Bucket=B2_BUCKET_NAME, Prefix=folder_prefix)
     if 'Contents' not in response:
         print(f"No files found in {folder_prefix}")
@@ -39,7 +41,7 @@ def compact_folder(folder_prefix):
 
     print(f"Compacting {len(file_keys)} files in {folder_prefix}...")
 
-    # 2. Download and Merge
+    # 2. Download from B2 and Merge
     dataframes = []
     for key in file_keys:
         obj = s3.get_object(Bucket=B2_BUCKET_NAME, Key=key)
@@ -48,16 +50,10 @@ def compact_folder(folder_prefix):
 
     merged_df = pd.concat(dataframes, ignore_index=True)
     
-    # 3. Deduplicate (Optimized logic)
+    # 3. Deduplicate 
     original_count = len(merged_df)
-    
-    # Extract the item ID into a clean column
     merged_df['clean_item_id'] = merged_df['item'].apply(lambda x: x.get('id') if isinstance(x, dict) else x)
-    
-    # Drop the unhashable nested dictionary to prevent the memory crash
     merged_df = merged_df.drop(columns=['item'])
-    
-    # Deduplicate instantly (Pandas can now natively hash the entire row)
     merged_df = merged_df.drop_duplicates().reset_index(drop=True)
     
     print(f"Reduced from {original_count} rows to {len(merged_df)} unique records.")
@@ -66,14 +62,12 @@ def compact_folder(folder_prefix):
     daily_filename = f"{folder_prefix}daily.parquet"
     parquet_buffer = io.BytesIO()
     merged_df.to_parquet(parquet_buffer, index=False, compression="snappy")
-    
-    # Extract raw bytes
     parquet_bytes = parquet_buffer.getvalue()
     
-    # Upload to B2
+    # Upload to B2 (Primary)
     s3.upload_fileobj(io.BytesIO(parquet_bytes), B2_BUCKET_NAME, daily_filename)
     
-    # Upload to HF
+    # Upload to HF (Backup)
     try:
         hf_api.upload_file(
             path_or_fileobj=io.BytesIO(parquet_bytes),
@@ -86,9 +80,7 @@ def compact_folder(folder_prefix):
 
     # 5. Delete the Hourly Files
     for key in file_keys:
-        # Delete from B2
         s3.delete_object(Bucket=B2_BUCKET_NAME, Key=key)
-        # Delete from HF
         try:
             hf_api.delete_file(path_in_repo=key, repo_id=HF_REPO_ID, repo_type="dataset")
         except Exception:
@@ -98,13 +90,13 @@ def compact_folder(folder_prefix):
 
 
 def generate_dashboard_payloads():
-    """Fetches the last 7 days of daily parquets, calculates VWAP, and exports to HF."""
+    """Fetches the last 7 days of daily parquets from B2, calculates VWAP, and exports to B2 and HF."""
     print("Generating Dashboard Payloads...")
     
     dataframes = []
     folders_to_check = ["commodities/"] + [f"realm_{r_id}/" for r_id in REALM_IDS]
     
-    # Fetch the daily.parquet files from the last 7 days
+    # Fetch the daily.parquet files from the last 7 days from B2
     for i in range(1, 8):
         d = datetime.utcnow() - timedelta(days=i)
         date_path = f"year={d.year}/month={d.month:02d}/day={d.day:02d}/"
@@ -116,15 +108,14 @@ def generate_dashboard_payloads():
                 df = pd.read_parquet(io.BytesIO(obj['Body'].read()))
                 dataframes.append(df)
             except Exception:
-                pass # File doesn't exist for this day/folder yet
+                pass 
                 
     if not dataframes:
-        print("No daily files found for the last 7 days. Skipping dashboard generation.")
+        print("No daily files found for the last 7 days in B2. Skipping dashboard generation.")
         return
         
     raw_df = pd.concat(dataframes, ignore_index=True)
     
-    # Standardize schema for DuckDB (handles both commodity 'unit_price' and realm 'buyout')
     if 'unit_price' in raw_df.columns and 'buyout' in raw_df.columns:
         raw_df['gold_price'] = raw_df['unit_price'].fillna(raw_df['buyout']) / 10000
     elif 'unit_price' in raw_df.columns:
@@ -133,11 +124,8 @@ def generate_dashboard_payloads():
         raw_df['gold_price'] = raw_df['buyout'] / 10000
         
     raw_df['item_id'] = raw_df['clean_item_id']
-    
-    # Isolate necessary columns for memory efficiency
     micro_lake_df = raw_df[['item_id', 'scan_timestamp', 'gold_price', 'quantity']]
     
-    # Run the DuckDB VWAP logic
     con = duckdb.connect(database=':memory:')
     con.register('micro_lake_df', micro_lake_df)
     
@@ -178,41 +166,44 @@ def generate_dashboard_payloads():
     """
     vwap_df = con.execute(vwap_query).df()
     
-    # Generate the Screener Payload (Latest Targets)
     latest_targets = vwap_df.sort_values('scan_timestamp').groupby('item_id').tail(1).copy()
     latest_targets['buy_threshold'] = latest_targets['liquidity_adjusted_vwap'] * 0.90
     latest_targets['sell_threshold'] = latest_targets['liquidity_adjusted_vwap'] * 0.98
     
-    # Helper to upload directly to Hugging Face via in-memory buffer
-    def upload_to_hf(df, filename):
+    # Standardized upload targeting B2 as primary, HF as secondary
+    def export_payload(df, filename):
         buf = io.BytesIO()
         df.to_parquet(buf, index=False, compression="snappy")
-        buf.seek(0)
-        hf_api.upload_file(
-            path_or_fileobj=buf,
-            path_in_repo=filename,
-            repo_id=HF_REPO_ID,
-            repo_type="dataset"
-        )
+        parquet_bytes = buf.getvalue()
         
-    upload_to_hf(latest_targets, "dashboard_screener.parquet")
-    upload_to_hf(vwap_df, "dashboard_charts.parquet")
-    print("Successfully generated and uploaded Dashboard Payloads to Hugging Face.")
-
+        # Upload to B2 (Hot Storage)
+        s3.upload_fileobj(io.BytesIO(parquet_bytes), B2_BUCKET_NAME, filename)
+        
+        # Upload to HF (Cold Storage Backup)
+        try:
+            hf_api.upload_file(
+                path_or_fileobj=io.BytesIO(parquet_bytes),
+                path_in_repo=filename,
+                repo_id=HF_REPO_ID,
+                repo_type="dataset"
+            )
+        except Exception as e:
+            print(f"HF Upload Warning for {filename}: {e}")
+            
+    export_payload(latest_targets, "dashboard_screener.parquet")
+    export_payload(vwap_df, "dashboard_charts.parquet")
+    print("Successfully generated and uploaded Dashboard Payloads to B2 and Hugging Face.")
 
 def main():
-    # Target yesterday's date
     yesterday = datetime.utcnow() - timedelta(days=1)
     date_path = f"year={yesterday.year}/month={yesterday.month:02d}/day={yesterday.day:02d}/"
 
     folders_to_check = ["commodities/"] + [f"realm_{r_id}/" for r_id in REALM_IDS]
 
-    # Run the daily compaction
     for folder in folders_to_check:
         prefix = f"{folder}{date_path}"
         compact_folder(prefix)
         
-    # Generate the web dashboard payloads after compaction is complete
     generate_dashboard_payloads()
 
 if __name__ == "__main__":
