@@ -94,6 +94,7 @@ class MarketSimulator:
         seed: int = 0,
         buckets: Optional[TimeLeftBuckets] = None,
         fifo_within_tier: bool = True,
+        lifo_within_tier: bool = False,
         diurnal_amplitude: float = 0.4,
         drift_sigma_per_hr: float = 0.004,
         mean_revert_per_hr: float = 0.02,
@@ -106,6 +107,7 @@ class MarketSimulator:
         self.rng = np.random.default_rng(seed)
         self.buckets = buckets or TimeLeftBuckets()
         self.fifo = fifo_within_tier
+        self.lifo = lifo_within_tier  # newest listing at a price is bought first (overrides fifo)
         self.diurnal = diurnal_amplitude
         self.drift_sigma = drift_sigma_per_hr
         self.mean_revert = mean_revert_per_hr
@@ -164,7 +166,9 @@ class MarketSimulator:
         book = self._books[prof.item_id]
         if not book:
             return
-        if self.fifo:
+        if self.lifo:
+            key = lambda kv: (kv[1][1], -kv[0])
+        elif self.fifo:
             key = lambda kv: (kv[1][1], kv[0])
         else:
             key = lambda kv: (kv[1][1], self.rng.random())

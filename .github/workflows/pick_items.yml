@@ -1,8 +1,10 @@
 name: Pick experiment items
 
 # One-click: reads your recent commodity snapshots from the Hugging Face mirror (NOT Backblaze, so your B2 download
-# cap is untouched), checks the data, and writes a shortlist of items for the buy/list experiment.
-# Put this file in .github/workflows/ . Run it from the Actions tab -> "Pick experiment items" -> Run workflow.
+# cap is untouched). Put this file in .github/workflows/ . Run it from the Actions tab -> "Pick experiment items".
+#  - default:            checks the data and writes the shortlist of items for the buy/list experiment
+#  - plan_only:          only counts files and MB (downloads nothing)
+#  - check_order:        looks for which listing at the same price gets bought first (newest = LIFO, oldest = FIFO)
 
 on:
   workflow_dispatch:
@@ -12,6 +14,10 @@ on:
         default: "3"
       plan_only:
         description: "Only count files and MB (downloads nothing)"
+        type: boolean
+        default: false
+      check_order:
+        description: "Check whether newest or oldest listing at a price is bought first"
         type: boolean
         default: false
       max_position_gold:
@@ -51,8 +57,16 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python tools/lake.py plan --store hf --days ${{ inputs.days }}
 
+      - name: Check which listing at a price is bought first
+        if: ${{ !inputs.plan_only && inputs.check_order }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python tools/lake.py order --store hf --days ${{ inputs.days }} | tee out.txt
+          { echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Pick items
-        if: ${{ !inputs.plan_only }}
+        if: ${{ !inputs.plan_only && !inputs.check_order }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
@@ -66,7 +80,7 @@ jobs:
         if: ${{ !inputs.plan_only }}
         uses: actions/upload-artifact@v4
         with:
-          name: experiment-shortlist
+          name: experiment-results
           path: |
             out/
             out.txt

@@ -37,6 +37,16 @@ class TestCli(unittest.TestCase):
             self.assertIn("buy_units", back.columns)
             self.assertIn("Test Herb", set(back["name"]))
 
+    def test_order_command_runs(self):
+        snaps = MarketSimulator(default_profiles(), seed=9, lifo_within_tier=True).run(60).snapshots
+        with tempfile.TemporaryDirectory() as d:
+            for s in snaps:
+                write(os.path.join(d, "lake"), key_for(s.ts), as_fetch_v2_frame([s]))
+            args = argparse.Namespace(store="local", root=os.path.join(d, "lake"), days=3, end=str(snaps[-1].ts.date()),
+                                      cache=os.path.join(d, "cache"))
+            ev = lake.run_order(LocalStore(args.root), args, reader=fake_reader)
+            self.assertGreater(ev.lifo_consistent, ev.fifo_consistent)
+
 
 if __name__ == "__main__":
     unittest.main()

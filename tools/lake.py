@@ -2,6 +2,7 @@
 
     python tools/lake.py plan --days 3          # how many files / MB would this touch? downloads nothing
     python tools/lake.py pick --days 3          # load recent commodity data, check it, write the experiment shortlist
+    python tools/lake.py order --days 3         # is the oldest or the newest listing at a price bought first?
 
 Defaults read from Hugging Face (no daily download cap). Use --store b2 only if you must; it is counted against a budget.
 Environment: HF_TOKEN (private repo), B2_KEY_ID / B2_APP_KEY (only for --store b2),
@@ -17,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd  # noqa: E402
 
 from engine.loader import B2Store, HFStore, LocalStore, MB, coverage_report, load_snapshots, plan_load  # noqa: E402
+from engine.ordercheck import tier_order_evidence  # noqa: E402
 from engine.picker import PickerConfig, explain, item_stats, pick, publish_minutes  # noqa: E402
 
 HF_REPO = "bosco277/wow-market-data-lake"
@@ -119,6 +121,18 @@ def run_pick(store, args, reader=None, names_fn=fetch_names):
     return short
 
 
+def run_order(store, args, reader=None):
+    start, end = date_range(args)
+    res = load_snapshots(store, "commodities", start, end, cache_dir=args.cache, on_error="skip", reader=reader,
+                         progress=print)
+    print(res.plan.describe())
+    print(f"{len(res.snapshots)} snapshots loaded, {len(res.skipped)} files skipped")
+    ev = tier_order_evidence(res.snapshots)
+    print("\n== WHICH LISTING AT THE SAME PRICE IS BOUGHT FIRST? ==")
+    print("  " + ev.describe())
+    return ev
+
+
 def _has_tabulate():
     try:
         import tabulate  # noqa: F401
@@ -129,7 +143,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "pick"])
+    ap.add_argument("command", choices=["plan", "pick", "order"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -143,7 +157,7 @@ def main(argv=None):
     ap.add_argument("--max-units", type=int, default=300)
     args = ap.parse_args(argv)
     store = make_store(args)
-    return (run_plan if args.command == "plan" else run_pick)(store, args)
+    return {"plan": run_plan, "pick": run_pick, "order": run_order}[args.command](store, args)
 
 
 if __name__ == "__main__":

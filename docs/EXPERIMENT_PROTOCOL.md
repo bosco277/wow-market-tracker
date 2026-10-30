@@ -39,10 +39,18 @@ Do this for each item on the shortlist:
 1. **Check last session's listings.** Open your mail / sales history. Write down, for each item, how many units sold,
    how many came back unsold, and the gold you received. (First session: skip this step.)
 2. **Buy** the shortlist's `buy_units`. Write down the time, units, and total price you paid.
-3. **List half at the front.** Post half the units at **1 copper below the lowest price**. Write down the time, units, price.
-4. **List half at the back.** Post the other half at the price where about `back_lane_units_ahead` units are listed
-   below you. Write down the time, units, price. (Add up the quantities in the AH list from the cheapest price upward.)
-5. Units that came back unsold in step 1: list them too, half front, half back. Log them as extra LIST rows.
+3. **List half "under".** Post half the units at **1 copper below the lowest price**. Write down the time, units, price.
+4. **List half "same".** Post the other half at **exactly the lowest price** (the same price as the cheapest listing).
+   Write down the time, units, price.
+5. Units that came back unsold in step 1: list them too, half under, half same. Log them as extra LIST rows.
+
+Why these two? We were told the game now sells the **newest** listing at a price first (last in, first out). If that is
+true, the "same" listing is just as far forward as the "under" one, and both sell quickly. If it is not true, the "same"
+listing sits behind everyone already at that price and barely sells. That difference answers the question for us,
+using your own listings.
+
+If the lowest price has only a handful of units on it, or the live price looks different from the cheat sheet,
+still do the same two listings, and put what you saw in notes ("lowest price had 40 units").
 
 That is all. **Do not** cancel listings, change prices mid-session, or buy anything else from the shortlist items in between.
 The experiment only works if we know exactly what you did and when.
@@ -56,10 +64,10 @@ One row per action. Columns:
 | date | Day you did it |
 | time | Clock time you see, to the minute |
 | tz | `EDT` or `EST`. **The clocks go back on Sunday Nov 1**, so tick this carefully on Nov 1 and after |
-| action | `BUY`, `LIST_FRONT`, `LIST_BACK`, or `RESULT` |
+| action | `BUY`, `LIST_UNDER`, `LIST_SAME`, `LIST_OTHER` (anything else; say what in notes), or `RESULT` |
 | item_id | From the shortlist |
 | units | Units bought, listed, or (for RESULT) sold |
-| price_copper | BUY: total copper paid. LIST: price per unit in copper. RESULT: total copper received |
+| price_gold | BUY: total gold paid. LIST: price per unit. RESULT: total gold received. Write gold with decimals: 1 silver = 0.01, 1 copper = 0.0001 (so 1g 24s 99c = 1.2499) |
 | units_returned | RESULT rows only: units that came back unsold |
 | notes | Anything odd: the item vanished from the AH, the price spiked, you were late, you made a mistake |
 
@@ -79,7 +87,7 @@ guesses, and every number will come with a "how sure are we" attached.
 ## What I will do with the log
 
 1. Match each of your BUY rows to the snapshot interval it fell in, and compare the units the classifier credits with what you really bought.
-2. Compare predicted sales for your front and back listings with your RESULT rows.
+2. Compare how fast your "under" and "same" listings sold with what each queue rule predicts, which tells us newest-first or oldest-first.
 3. Count how many of your listings never appeared in any snapshot (the invisible sales) to put a real number on the blind spot.
 4. Adjust the engine's settings (`cancel_share`, the blind-spot correction) from what we learn, re-run the validation, and report the new bounds.
 

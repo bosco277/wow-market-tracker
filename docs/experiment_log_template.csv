@@ -1,5 +1,6 @@
-date,time,tz,action,item_id,units,price_copper,units_returned,notes
-2026-10-30,20:05,EDT,BUY,123456,60,1250000,,example row: total copper paid for the units
-2026-10-30,20:09,EDT,LIST_FRONT,123456,30,20832,,example row: price per unit in copper
-2026-10-30,20:11,EDT,LIST_BACK,123456,30,21500,,example row
-2026-10-31,08:05,EDT,RESULT,123456,52,1050000,8,example row: units sold / total copper received / units returned unsold
+date,time,tz,action,item_id,units,price_gold,units_returned,notes
+2026-10-30,20:05,EDT,BUY,42253,90,92.5,,example row: TOTAL gold paid for all the units
+2026-10-30,20:09,EDT,LIST_UNDER,42253,45,0.9999,,example row: 1 copper BELOW the lowest price; price PER UNIT in gold
+2026-10-30,20:11,EDT,LIST_SAME,42253,45,1.0,,example row: EXACTLY the lowest price
+2026-10-30,20:12,EDT,LIST_OTHER,42253,10,1.01,,example row: 1 silver above lowest; there were 1200 units at the lowest price
+2026-10-31,08:05,EDT,RESULT,42253,82,81.3,8,example row: units sold / TOTAL gold received / units that came back unsold
