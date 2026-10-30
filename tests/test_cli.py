@@ -78,6 +78,27 @@ class TestCli(unittest.TestCase):
             self.assertTrue(inv)
             self.assertFalse(os.path.exists(os.path.join(d, "cache")))
 
+    def test_inspect_shows_timestamps_and_rows_without_an_item_id(self):
+        import contextlib
+        import io
+        snaps = MarketSimulator(default_profiles(), seed=9).run(8).snapshots
+        frame = as_fetch_v2_frame(snaps)
+        frame.loc[frame["snapshot_ts"] == snaps[2].ts, ["item_id", "item"]] = [float("nan"), None]
+        r = lake.inspect_frame(frame)
+        self.assertEqual(len(r["table"]), len(snaps))
+        self.assertEqual(r["rows"], len(frame))
+        self.assertLess(r["kept_by_loader"], r["rows"])
+        self.assertTrue((r["table"]["from_snapshot_ts"]).all())
+        with tempfile.TemporaryDirectory() as d:
+            for day in sorted({x.ts.date() for x in snaps}):
+                ds = [x for x in snaps if x.ts.date() == day]
+                write(os.path.join(d, "lake"), key_for(ds[0].ts, "daily"), as_fetch_v2_frame(ds))
+            args = argparse.Namespace(store="local", root=os.path.join(d, "lake"), days=3, end=str(snaps[-1].ts.date()))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                lake.run_inspect(LocalStore(args.root), args, reader=fake_reader)
+            self.assertIn("different snapshot timestamps", buf.getvalue())
+
     def test_pick_survives_a_big_hole_in_the_data_and_says_so(self):
         """The real failure: ~21 h with no snapshots made every item look like 'too little data'."""
         import contextlib

@@ -9,6 +9,7 @@ import pandas as pd
 from helpers import T0  # noqa: F401  (sets sys.path)
 from engine import classify_series
 from engine.loader import (
+    Cache,
     B2Store, BudgetExceeded, ByteBudget, HFStore, LoaderError, LocalStore, ObjectInfo, RangeFile,
     choose_files, coverage_report, load_snapshots, plan_load,
 )
@@ -225,6 +226,32 @@ class TestLoading(LakeCase):
         r = load_snapshots(LocalStore(self.lake), SRC, *self.span, cache_dir=self.cache, reader=fake_reader)
         self.assertEqual(len(r.snapshots), 2)
         self.assertEqual(r.duplicates_dropped, 1)
+
+    def _mixed_day(self, day_snaps):
+        """A compacted day that mixes layouts: older hours (clean_item_id, no snapshot_ts), newer hours (item_id, snapshot_ts)."""
+        half = len(day_snaps) // 2
+        old = as_fetch_v2_frame(day_snaps[:half])
+        old["clean_item_id"] = old["item"].map(lambda x: x["id"])
+        old = old.drop(columns=["item_id", "variant_key", "snapshot_ts", "schema_version", "item"])
+        old["scan_timestamp"] = [t for t in pd.concat([pd.Series([x.ts] * len(x.book)) for x in day_snaps[:half]], ignore_index=True)]
+        new = as_fetch_v2_frame(day_snaps[half:])
+        new["clean_item_id"] = float("nan")
+        return pd.concat([old, new], ignore_index=True)
+
+    def test_mixed_layout_day_keeps_the_older_rows(self):
+        """The suspected real failure: item_id present for new rows made the loader ignore clean_item_id for old rows."""
+        day = self.snaps[:12]
+        write(self.lake, key_for(day[0].ts, "daily"), self._mixed_day(day))
+        r = load_snapshots(LocalStore(self.lake), SRC, day[0].ts.date(), day[-1].ts.date(), cache_dir=self.cache, reader=fake_reader)
+        got = [x.ts for x in r.snapshots if x.ts.date() == day[0].ts.date()]
+        want = [x.ts for x in day if x.ts.date() == day[0].ts.date()]
+        self.assertEqual(got, want)
+        first = r.snapshots[0]
+        self.assertEqual(len(first.book), len(day[0].book))
+
+    def test_a_cache_written_by_the_old_loader_is_not_reused(self):
+        c = Cache(self.cache, "local")
+        self.assertTrue(c._path("a/b.parquet", "ALL").endswith(".v2.pkl"))
 
     def test_daily_file_with_many_snapshots(self):
         for day in sorted({s.ts.date() for s in self.snaps}):

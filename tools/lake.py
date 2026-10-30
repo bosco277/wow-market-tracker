@@ -2,6 +2,7 @@
 
     python tools/lake.py plan --days 3          # how many files / MB would this touch? downloads nothing
     python tools/lake.py files --days 5         # which files exist, day by day (downloads nothing)
+    python tools/lake.py inspect --days 4       # downloads each DAILY file and shows what is inside (timestamps, empty cells)
     python tools/lake.py pick --days 4          # load recent commodity data, check it, write the experiment shortlist
     python tools/lake.py order --days 3         # is the oldest or the newest listing at a price bought first?
     python tools/lake.py item --ids 192841 --days 2   # hourly price, depth and estimated sales for one or more items
@@ -20,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd  # noqa: E402
 
-from engine.loader import B2Store, HFStore, LocalStore, MB, coverage_report, day_inventory, choose_files, load_snapshots, plan_load  # noqa: E402
+from engine.loader import ByteBudget, NEEDED_COLUMNS, RangeFile, normalize_frame, read_parquet_file, B2Store, HFStore, LocalStore, MB, coverage_report, day_inventory, choose_files, load_snapshots, plan_load  # noqa: E402
 from engine.itemview import detect_flips, gaps_in, item_history, revert_share_within  # noqa: E402
 from engine.ordercheck import tier_order_evidence  # noqa: E402
 from engine.picker import PickerConfig, explain, item_stats, pick, publish_minutes  # noqa: E402
@@ -160,6 +161,52 @@ def run_files(store, args, reader=None):
     return inv
 
 
+def inspect_frame(df, source="commodities"):
+    """What is really inside one stored file: columns, empty cells, and one line per snapshot timestamp."""
+    ts = None
+    if "snapshot_ts" in df.columns:
+        ts = pd.to_datetime(df["snapshot_ts"])
+    if "scan_timestamp" in df.columns:
+        sc = pd.to_datetime(df["scan_timestamp"])
+        ts = sc if ts is None else ts.fillna(sc)
+    ids = pd.Series(float("nan"), index=df.index)
+    for c in ("item_id", "clean_item_id"):
+        if c in df.columns:
+            ids = ids.fillna(pd.to_numeric(df[c], errors="coerce"))
+    if "item" in df.columns:
+        ids = ids.fillna(pd.to_numeric(df["item"].map(lambda x: x.get("id") if isinstance(x, dict) else None), errors="coerce"))
+    by = pd.DataFrame({"ts": ts, "has_id": ids.notna(),
+                       "from_snapshot_ts": df["snapshot_ts"].notna() if "snapshot_ts" in df.columns else False})
+    table = by.groupby("ts").agg(rows=("has_id", "size"), rows_with_item_id=("has_id", "sum"),
+                                 from_snapshot_ts=("from_snapshot_ts", "all")).reset_index().sort_values("ts")
+    nulls = {c: int(df[c].isna().sum()) for c in ("snapshot_ts", "scan_timestamp", "item_id", "clean_item_id", "id", "unit_price",
+                                                  "buyout", "quantity", "time_left") if c in df.columns}
+    kept = len(normalize_frame(df, source))
+    return dict(columns={c: str(t) for c, t in df.dtypes.items()}, rows=len(df), nulls=nulls, kept_by_loader=kept, table=table)
+
+
+def run_inspect(store, args, reader=None):
+    """Downloads the DAILY file of each day in range and shows what is inside (HF only; B2 would use your cap)."""
+    start, end = date_range(args)
+    objs = store.list("commodities/")
+    inv = day_inventory(objs, "commodities", start, end)
+    reader = reader or read_parquet_file
+    budget = ByteBudget(store.name, None, None)
+    for day in sorted(inv):
+        for o in inv[day]["daily"]:
+            print(f"\n== {o.key} ({o.size / MB:.0f} MB) ==")
+            df = reader(RangeFile(store, o.key, o.size, budget, 4 * MB), None)
+            r = inspect_frame(df)
+            print(f"  columns read: {', '.join(f'{c}:{t}' for c, t in r['columns'].items())}")
+            print(f"  rows: {r['rows']:,}; rows the loader keeps: {r['kept_by_loader']:,}; empty cells: {r['nulls']}")
+            t = r["table"]
+            print(f"  {len(t)} different snapshot timestamps (US Eastern; 'from' says which column supplied the time):")
+            for _, x in t.iterrows():
+                flag = "" if x["rows_with_item_id"] == x["rows"] else f"  <-- {x['rows'] - x['rows_with_item_id']:,.0f} rows have no item id"
+                print(f"    {_et(x['ts'])}  rows {x['rows']:>8,.0f}  from {'snapshot_ts' if x['from_snapshot_ts'] else 'scan_timestamp (fetch time)'}{flag}")
+    return inv
+
+
 def _print_holes(snapshots):
     g = gaps_in(snapshots)
     print("\n== HOLES IN THE DATA (no snapshots for over 2 hours; US Eastern) ==")
@@ -273,7 +320,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "pick", "order", "item", "flips"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "pick", "order", "item", "flips"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -290,7 +337,7 @@ def main(argv=None):
     ap.add_argument("--min-coverage", type=float, default=0.5, help="pick: share of the window that must have been observed")
     args = ap.parse_args(argv)
     store = make_store(args)
-    return {"plan": run_plan, "files": run_files, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips}[args.command](store, args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips}[args.command](store, args)
 
 
 if __name__ == "__main__":

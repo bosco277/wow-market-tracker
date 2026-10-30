@@ -337,7 +337,7 @@ class Cache:
         self.root, self.store_name = root, store_name
 
     def _path(self, key: str, sig: str) -> str:
-        return os.path.join(self.root, self.store_name, key.replace("/", "__") + f".{sig}.pkl")
+        return os.path.join(self.root, self.store_name, key.replace("/", "__") + f".{sig}.v2.pkl")
 
     def get(self, key: str, item_ids: Optional[Set[int]]):
         """Returns the cached frame or None. An ALL entry can serve any item request (the caller filters)."""
@@ -413,13 +413,21 @@ def read_parquet_file(fileobj, item_ids: Optional[Set[int]]) -> pd.DataFrame:
 def normalize_frame(df: pd.DataFrame, source: str) -> pd.DataFrame:
     """Upgrades any stored layout (fetch v1 hourly, v2 hourly, compacted daily) to what snapshots_from_blizzard_v2 needs."""
     out = df.copy()
-    if "item_id" not in out.columns:
-        if "clean_item_id" in out.columns:
-            out["item_id"] = out["clean_item_id"]
-        elif "item" in out.columns:
-            out["item_id"] = out["item"].map(lambda x: x.get("id") if isinstance(x, dict) else None)
-        else:
-            raise LoaderError("file has no item id column (item_id / clean_item_id / item)")
+    # A compacted day can mix layouts (older hours: clean_item_id / item struct; newer hours: item_id), so the item id is
+    # taken from EVERY column that has one, row by row. v0.4.2 and earlier only looked at clean_item_id when there was
+    # no item_id column at all, which silently dropped the older rows of a mixed day.
+    ids = pd.Series(np.nan, index=out.index, dtype="float64")
+    found = False
+    for c in ("item_id", "clean_item_id"):
+        if c in out.columns:
+            ids = ids.fillna(pd.to_numeric(out[c], errors="coerce"))
+            found = True
+    if "item" in out.columns:
+        ids = ids.fillna(pd.to_numeric(out["item"].map(lambda x: x.get("id") if isinstance(x, dict) else None), errors="coerce"))
+        found = True
+    if not found:
+        raise LoaderError("file has no item id column (item_id / clean_item_id / item)")
+    out["item_id"] = ids
     out = out[out["item_id"].notna()].copy()
     out["item_id"] = out["item_id"].astype("int64")
     if "variant_key" not in out.columns:
@@ -478,7 +486,10 @@ def load_snapshots(
                 frame = hit
             else:
                 say(f"[{n}/{len(plan.files)}] downloading {obj.key} ({obj.size / MB:.1f} MB)")
-                frame = normalize_frame(reader(RangeFile(store, obj.key, obj.size, budget, block_size), ids), source)
+                raw = reader(RangeFile(store, obj.key, obj.size, budget, block_size), ids)
+                frame = normalize_frame(raw, source)
+                if len(frame) < len(raw):
+                    say(f"  WARNING {obj.key}: {len(raw) - len(frame):,} of {len(raw):,} rows had no usable item id and were dropped")
                 if ids is not None:
                     frame = frame[frame["item_id"].isin(ids)]
                 cache.put(obj.key, ids, frame)

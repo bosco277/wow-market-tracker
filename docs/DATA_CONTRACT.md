@@ -106,6 +106,14 @@ the **low** bound. Verify them before trusting low bounds. Everything is paramet
 
 ### Holes in our own data
 
+**Mixed-layout days (v0.4.4):** a compacted daily file can mix older hours (item id in `clean_item_id`, no `snapshot_ts`)
+with newer hours (`item_id`, `snapshot_ts`). v0.4.3 and earlier read `clean_item_id` only when the file had NO `item_id`
+column, so on a mixed day every older row was dropped without a warning. The loader now takes the item id row by row from
+`item_id`, then `clean_item_id`, then the `item` struct, and prints a warning if any rows still have none. Cached files
+from older versions are ignored (cache names now end in `.v2.pkl`). `tools/lake.py inspect` (workflow mode "inspect")
+downloads each daily file and prints its columns, empty cells and one line per snapshot time. Status: the bug is proven in
+a test; that it caused the Oct 28-29 hole in the real data is NOT yet confirmed.
+
 **Loader rule (v0.4.3):** per UTC day the loader uses the hourly files, and ALSO that day's daily file when the hourly files
 cover fewer than 22 of the 24 hours. v0.4.2 and earlier used the daily file only when the day had NO hourly files, so
 hourly files that were partly deleted hid hours the daily file still held. Snapshots stored twice are merged when they are
