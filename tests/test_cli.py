@@ -110,6 +110,29 @@ class TestCli(unittest.TestCase):
             self.assertTrue((out["daily_est"] <= out["daily_high"] + 1e-9).all())
             self.assertTrue(os.path.exists(os.path.join(d, "out", "rates.csv")))
 
+    def test_market_and_profile_commands_run_and_write_files(self):
+        import contextlib
+        import io
+        snaps = MarketSimulator(default_profiles(), seed=9).run(80).snapshots
+        with tempfile.TemporaryDirectory() as d:
+            args = self._lake(d, snaps)
+            args.ids, args.window_hours, args.horizon_hours, args.trade_units, args.max_position_gold = "1002,1004", 72.0, 4.0, 50.0, 1e9
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                out = lake.run_market(LocalStore(args.root), args, reader=fake_reader, names_fn=lambda ids: {1002: "Test Herb"})
+            text = buf.getvalue()
+            self.assertEqual(list(out["item_id"]), [1002, 1004])
+            for needle in ("PRICE WALL", "TSM-style market value", "does the exact sales rate change", "Typical range"):
+                self.assertIn(needle, text)
+            self.assertTrue(os.path.exists(os.path.join(d, "out", "market.csv")))
+            self.assertTrue((out["wall_low"] <= out["wall_est"]).all() and (out["wall_est"] <= out["wall_high"]).all())
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                lake.run_profile(LocalStore(args.root), args, reader=fake_reader, names_fn=lambda ids: {})
+            self.assertIn("HOUR OF DAY", buf.getvalue())
+            self.assertIn("DRAFT", buf.getvalue())
+            self.assertTrue(os.path.exists(os.path.join(d, "out", "profile_1002.csv")))
+
     def test_pick_survives_a_big_hole_in_the_data_and_says_so(self):
         """The real failure: ~21 h with no snapshots made every item look like 'too little data'."""
         import contextlib

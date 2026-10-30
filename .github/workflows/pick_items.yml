@@ -7,6 +7,8 @@ name: Market tools
 #   files  lists the files that exist, day by day, and which hours are missing (downloads nothing)
 #   inspect downloads each DAILY file and shows what is inside it (columns, empty cells, one line per snapshot time)
 #   rates  one line per item id you type in: our estimated units sold per day, price and depth (use days=4)
+#   market  per item id: price bands, TSM-style value, price wall, flip shelf (use days=8)
+#   profile per item id: hour-of-day table and day-of-week grid of price and quantity (use days=8)
 #   plan   only counts files and MB (downloads nothing)
 #   order  checks whether the newest or the oldest listing at a price is bought first
 #   item   hourly price, depth and estimated sales for the item ids you type in
@@ -18,7 +20,7 @@ on:
       mode:
         description: "What to run"
         type: choice
-        options: [pick, files, inspect, rates, plan, order, item, flips]
+        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips]
         default: pick
       days:
         description: "How many days of data to load (pick looks back 72 h, so 4 or more)"
@@ -38,6 +40,12 @@ on:
       n_items:
         description: "pick: how many items to shortlist"
         default: "6"
+      trade_units:
+        description: "market: the biggest trade you would make, in units"
+        default: "500"
+      horizon_hours:
+        description: "market: hours of sales the price wall must cover"
+        default: "4"
 
 jobs:
   run:
@@ -72,9 +80,11 @@ jobs:
           MINFLOOR: ${{ inputs.min_floor_gold }}
           MAXUNITS: ${{ inputs.max_units }}
           NITEMS: ${{ inputs.n_items }}
+          TRADE: ${{ inputs.trade_units }}
+          HORIZON: ${{ inputs.horizon_hours }}
         run: |
           mkdir -p out
-          python tools/lake.py "$MODE" --store hf --days "$DAYS" --ids "$IDS" --max-position-gold "$MAXPOS" --min-floor-gold "$MINFLOOR" --max-units "$MAXUNITS" --n-items "$NITEMS" | tee out.txt
+          python tools/lake.py "$MODE" --store hf --days "$DAYS" --ids "$IDS" --max-position-gold "$MAXPOS" --min-floor-gold "$MINFLOOR" --max-units "$MAXUNITS" --n-items "$NITEMS" --trade-units "$TRADE" --horizon-hours "$HORIZON" | tee out.txt
           { echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save results

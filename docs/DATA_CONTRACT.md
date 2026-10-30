@@ -133,6 +133,37 @@ within 10 minutes of each other. `tools/lake.py files` (workflow mode "files") l
 (`flag_long_gap`), so the picker looks back 72 h (was 48) and needs 50% coverage (was 60%); with the hole the 48 h window
 had 0.52 coverage, which rejected every item as "too little data".
 
+## 2d. Market rate, price walls and profiles (`engine/market.py`, v0.5.0)
+
+Built on LISTINGS only, so it should carry over to any market whose auction house publishes its book. Sales rates come
+from the classifier as low / best / high units per hour, are a floor, and are poor for very fast items (see section 7).
+
+- **Price bands** (`lake.py market`): percentiles of the hourly lowest price with short spikes and dips left out
+  (`flag_spikes`: 1.5x the centred 25-hour median, episodes up to 10 hours; longer moves are a new level, not a spike).
+  Reports where the current price sits in its own range. The first real example of why: Sorrowmoss on TSM shows one ~99 gold
+  spike that makes a single Friday 4-5 PM slot look like a weekly peak.
+- **TSM-style market value** (baseline, from our own book): cheapest 30% of auctions, cut at the first 20%+ jump after the
+  first 15%, drop prices 1.5 SD from the mean, average. TSM then smooths over 14 days (half-life ~2 days); we do not. TSM's
+  public CSV (`public-data.tradeskillmaster.com/retail/us/commodities.csv`) has marketValue, minBuyout, recent, historical
+  and NO sales fields, so it can validate prices, not sales.
+- **Price wall:** walk up the book until `sales rate x horizon` units are added; that price is the wall. Reported at the
+  low / best / high rate. A listing at the wall waits `units at LOWER prices / (sales rate - new cheaper listings per hour)`
+  under newest-first selling (same-price units are behind you). New cheaper listings keep joining the queue ahead of you,
+  so the no-inflow wait is a best case. Measured net drain is not affected by the blind spot (a listing posted and sold
+  inside one hour adds and removes the same units), which is why `reach_stats` (history of how often and how fast the lowest
+  price reached a level, refills included) is the better tool for very deep markets.
+- **Two flags per item:** `deep_market` (units at or below the wall >= 20x your trade size) and `velocity_matters` (False
+  when a listing at the wall sells within 12 h even at our LOW rate, so a precise rate would not change the decision).
+  Real examples: Linen Cloth (about 18,800 units below a 9 silver wall) and Eternal Crystal (about 1,960 below 2.29 g)
+  are both velocity-insensitive although our rates for them are 14-26x below TSM's.
+- **Hour-of-week profile** (`lake.py profile`): medians of price, listed quantity and estimated sales by hour of day, plus a
+  day-of-week x 4-hour grid. Every profile states how many weeks it rests on and is a DRAFT until there are 3 or more;
+  with one week each day-of-week slot has one observation. Quantity shows a stable weekly shape faster than price does.
+- **Flip shelf** (`find_shelf`): the units below a 30%+ price gap, total cost under a cap, net margin (relist price x 0.95 /
+  average paid - 1) of 25%+. Relist at the next tier (newest-first puts you first there). A snapshot is up to an hour old
+  and fast items lose shelves in minutes (the real Eternal Crystal shelf of 90 units at 0.99-1.00 was gone within the hour),
+  so this is a candidate list to check live, not a signal to act on.
+
 ## 3. What the API can and cannot tell us
 
 The Auction House API publishes **listings, not sales**. There is no receipt. Everything below is inference from how the

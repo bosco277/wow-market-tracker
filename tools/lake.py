@@ -4,6 +4,8 @@
     python tools/lake.py files --days 5         # which files exist, day by day (downloads nothing)
     python tools/lake.py inspect --days 4       # downloads each DAILY file and shows what is inside (timestamps, empty cells)
     python tools/lake.py rates --ids 13466,42253 --days 4   # our estimated units sold per day for those items
+    python tools/lake.py market --ids 13466 --days 8   # price bands, TSM-style value, price wall, flip shelf
+    python tools/lake.py profile --ids 13466 --days 8  # hour of day and day of week profile of price and quantity
     python tools/lake.py pick --days 4          # load recent commodity data, check it, write the experiment shortlist
     python tools/lake.py order --days 3         # is the oldest or the newest listing at a price bought first?
     python tools/lake.py item --ids 192841 --days 2   # hourly price, depth and estimated sales for one or more items
@@ -23,7 +25,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd  # noqa: E402
 
 from engine.loader import ByteBudget, NEEDED_COLUMNS, RangeFile, normalize_frame, read_parquet_file, B2Store, HFStore, LocalStore, MB, coverage_report, day_inventory, choose_files, load_snapshots, plan_load  # noqa: E402
-from engine.itemview import detect_flips, gaps_in, item_history, revert_share_within  # noqa: E402
+from engine.itemview import detect_flips, gaps_in, item_history, revert_share_within
+from engine.market import (find_shelf, flag_spikes, item_series, price_bands, profile, reach_stats, tsm_style_market_value,
+                           wall_report)  # noqa: E402
 from engine.ordercheck import tier_order_evidence  # noqa: E402
 from engine.picker import PickerConfig, explain, item_stats, pick, publish_minutes  # noqa: E402
 
@@ -295,6 +299,135 @@ def run_rates(store, args, reader=None, names_fn=fetch_names):
     return out
 
 
+def _rates_from_series(df, window_hours):
+    """Units per HOUR (low / est / high) from the last `window_hours` of observed (not flagged) time of one item's series."""
+    d = df[pd.to_datetime(df["ts"]) > pd.to_datetime(df["ts"]).max() - pd.Timedelta(hours=window_hours)]
+    d = d[~(d["flag_long_gap"].fillna(False).astype(bool) | d["flag_wipe"].fillna(False).astype(bool))].dropna(subset=["gap_minutes"])
+    hours = d["gap_minutes"].sum() / 60.0
+    if hours <= 0:
+        return None
+    return dict(low=float(d["sold_low"].sum() / hours), est=float(d["sold_est"].sum() / hours), high=float(d["sold_high"].sum() / hours)), hours
+
+
+def _g(x):
+    return "n/a" if x is None or (isinstance(x, float) and (x != x)) else f"{x:,.2f}"
+
+
+def _h(x):
+    return "never" if x == float("inf") else f"{x:.1f} h"
+
+
+def run_market(store, args, reader=None, names_fn=fetch_names):
+    """Market rate, price bands, price wall and flip shelf for the item ids you give."""
+    ids = [int(x) for x in str(args.ids).replace(" ", "").split(",") if x]
+    snaps = _load_all(store, args, reader)
+    _print_holes(snaps)
+    names = names_fn(ids)
+    series = item_series(snaps, ids)
+    last = snaps[-1]
+    rows = []
+    for i in ids:
+        df = series.get(i)
+        print(f"\n== ITEM {i}: {names.get(i, '')} (as of the snapshot at {_et(last.ts)} ET) ==")
+        if df is None or df.empty:
+            print("  not in the loaded data")
+            continue
+        sp = flag_spikes(df["floor_gold"])
+        b = price_bands(df, sp)
+        book_i = last.book[last.book["item_id"] == i]
+        if book_i.empty:
+            print("  not listed in the latest snapshot")
+            continue
+        now = float(book_i["unit_price"].min()) / 10000.0
+        r = dict(item_id=i, name=names.get(i, ""), floor_now=now, **{k: v for k, v in b.items() if k.startswith("p") or k.startswith("n")})
+        print(f"  lowest price now {_g(now)} g. Typical range over {len(df)} hours (spikes and dips left out): "
+              f"10%-90% = {_g(b['p10'])} - {_g(b['p90'])}, median {_g(b['p50'])}. Right now is at the {b['now_percentile']:.0%} mark of that range.")
+        print(f"  {b['n_spike_hours']} spike hours and {b['n_dip_hours']} dip hours were left out (short jumps or drops that are not the normal level).")
+        tsm = tsm_style_market_value(book_i) / 10000.0
+        r["tsm_style_value"] = tsm
+        print(f"  TSM-style market value from this book: {_g(tsm)} g (their 'cheapest 30%' method, without their 14-day smoothing)")
+        rv = _rates_from_series(df, args.window_hours)
+        if rv is None:
+            print("  not enough observed time for a sales rate")
+            rows.append(r)
+            continue
+        vel, hrs = rv
+        r.update({f"per_day_{k}": v * 24 for k, v in vel.items()})
+        print(f"  our sales estimate (units per day, low / best / high): {vel['low'] * 24:,.0f} / {vel['est'] * 24:,.0f} / {vel['high'] * 24:,.0f} "
+              f"(a floor; last {hrs:.0f} observed hours)")
+        w = wall_report(book_i, vel, horizon_hours=args.horizon_hours, trade_units=args.trade_units)
+        r.update({k: v for k, v in w.items() if k != "horizon_hours"})
+        print(f"  PRICE WALL ({args.horizon_hours:g}-hour horizon): at the low / best / high sales rate = "
+              f"{_g(w['wall_low'] / 10000)} / {_g(w['wall_est'] / 10000)} / {_g(w['wall_high'] / 10000)} g "
+              f"({w['units_est']:,} units at or below the best wall)")
+        print(f"  a listing AT the best wall waits (newest-first, no new cheaper listings): {_h(w['wait_high'])} / {_h(w['wait_est'])} / {_h(w['wait_low'])} "
+              f"at high / best / low sales rate")
+        print(f"  deep market for a {args.trade_units:,.0f}-unit trade: {'YES' if w['deep_market'] else 'no'}; "
+              f"does the exact sales rate change what you would do? {'YES, it matters' if w['velocity_matters'] else 'no (sells inside 12 h even at the low rate)'}")
+        rs = reach_stats(df, w["wall_est"] / 10000.0, horizon_hours=12.0)
+        if rs["n"]:
+            print(f"  history: the lowest price reached {_g(w['wall_est'] / 10000)} g within 12 h in {rs['share_reached']:.0%} of {rs['n']} starting hours"
+                  + (f" (median {rs['median_hours']:.1f} h)" if rs["share_reached"] == rs["share_reached"] and rs["median_hours"] == rs["median_hours"] else ""))
+            r.update(reach_share_12h=rs["share_reached"], reach_n=rs["n"])
+        shelves = find_shelf(book_i, max_cost_gold=args.max_position_gold)
+        if shelves:
+            sh = shelves[0]
+            print(f"  FLIP SHELF in this snapshot: {sh['units']:,} units cost {_g(sh['cost_gold'])} g (avg {_g(sh['avg_price_gold'])}), next price {_g(sh['next_price_gold'])} g "
+                  f"(+{sh['gap']:.0%}); net margin after the 5% cut {sh['net_margin']:.0%}, about {_g(sh['net_profit_gold'])} g. Check the live book: fast items lose these in minutes.")
+            r.update(shelf_units=sh["units"], shelf_net_margin=sh["net_margin"])
+        else:
+            print("  no flip shelf in this snapshot (needs a 30%+ gap above cheap units, cost under the cap, 25%+ net margin)")
+        rows.append(r)
+    os.makedirs(args.out, exist_ok=True)
+    out = pd.DataFrame(rows)
+    out.to_csv(os.path.join(args.out, "market.csv"), index=False)
+    return out
+
+
+def _grid(pivot, label, fmt):
+    print(f"    {label} (Mon..Sun x 4-hour blocks starting at the hour shown, US Eastern)")
+    print("          " + "".join(f"{h:>7d}h" for h in pivot.columns))
+    for dname, row in pivot.iterrows():
+        print(f"    {dname:<5} " + "".join(f"{fmt(v):>8}" for v in row))
+
+
+def run_profile(store, args, reader=None, names_fn=fetch_names):
+    """Hour-of-day table and a day-of-week grid of price and listed quantity for the item ids you give."""
+    ids = [int(x) for x in str(args.ids).replace(" ", "").split(",") if x]
+    snaps = _load_all(store, args, reader)
+    _print_holes(snaps)
+    names = names_fn(ids)
+    series = item_series(snaps, ids)
+    os.makedirs(args.out, exist_ok=True)
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    for i in ids:
+        df = series.get(i)
+        print(f"\n== ITEM {i}: {names.get(i, '')} ==")
+        if df is None or df.empty:
+            print("  not in the loaded data")
+            continue
+        sp = flag_spikes(df["floor_gold"])
+        hod = profile(df, sp, by="none")
+        weeks = int(hod["weeks"].iloc[0])
+        print(f"  {len(df)} hourly observations over {weeks} calendar week(s) of data; spike and dip hours ({int((sp != 0).sum())}) are left out. "
+              f"{'DRAFT: ' if weeks < 3 else ''}the day-of-week grid has about {max(1, round(len(df) / (7 * 24)))} observation(s) per slot.")
+        show = hod[["block", "n_obs", "price_median", "price_p25", "price_p75", "units_median", "sold_per_hour"]].round(2)
+        show.columns = ["hour", "obs", "price_med", "price_p25", "price_p75", "units_listed_med", "est_sold_per_hour"]
+        print("  HOUR OF DAY (US Eastern, medians across days):")
+        print(show.to_string(index=False))
+        how = profile(df, sp, by="dow", block_hours=4)
+        how.to_csv(os.path.join(args.out, f"profile_{i}.csv"), index=False)
+        for col, label in (("price_median", "price vs this item's overall median (%)"), ("units_median", "listed quantity vs its overall median (%)")):
+            base = float(how[col].median())
+            if not base or base != base:
+                continue
+            pv = how.pivot(index="dow", columns="block", values=col)
+            pv = (pv / base - 1.0) * 100.0
+            pv.index = [days[d] for d in pv.index]
+            _grid(pv, label, lambda v: "." if v != v else f"{v:+.0f}")
+    return series
+
+
 def run_flips(store, args, reader=None, names_fn=fetch_names):
     snaps = _load_all(store, args, reader)
     _print_holes(snaps)
@@ -349,7 +482,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "pick", "order", "item", "flips"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -362,11 +495,13 @@ def main(argv=None):
     ap.add_argument("--ids", default="", help="item ids, comma separated (for the item command)")
     ap.add_argument("--min-floor-gold", type=float, default=1.0)
     ap.add_argument("--max-units", type=int, default=300)
+    ap.add_argument("--horizon-hours", type=float, default=4.0, help="market: how many hours of sales the price wall must cover")
+    ap.add_argument("--trade-units", type=float, default=500.0, help="market: the biggest trade you would make (for the deep-market test)")
     ap.add_argument("--window-hours", type=float, default=72.0, help="pick: how far back item statistics look")
     ap.add_argument("--min-coverage", type=float, default=0.5, help="pick: share of the window that must have been observed")
     args = ap.parse_args(argv)
     store = make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips}[args.command](store, args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips}[args.command](store, args)
 
 
 if __name__ == "__main__":
