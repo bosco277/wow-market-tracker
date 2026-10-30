@@ -107,22 +107,27 @@ class TestBudget(unittest.TestCase):
 
 
 class TestPlanning(unittest.TestCase):
-    def test_prefers_hourly_over_daily_and_respects_source_and_dates(self):
+    def test_hourly_preferred_when_nearly_complete_daily_added_when_hours_are_missing(self):
+        full = [f"commodities/year=2026/month=10/day=29/hour_{h:02d}_33.parquet" for h in range(24)]
         objs = [ObjectInfo(k, 10) for k in [
             "commodities/year=2026/month=10/day=27/daily.parquet",
             "commodities/year=2026/month=10/day=28/hour_00_05.parquet",
             "commodities/year=2026/month=10/day=28/hour_01_05.parquet",
             "commodities/year=2026/month=10/day=28/daily.parquet",
+            "commodities/year=2026/month=10/day=29/daily.parquet",
             "commodities/year=2026/month=10/day=30/hour_00_05.parquet",
             "realm_73/year=2026/month=10/day=28/daily.parquet",
             "commodities/not_a_snapshot.txt",
-        ]]
+        ] + full]
         got = [o.key for o in choose_files(objs, "commodities", date(2026, 10, 27), date(2026, 10, 29))]
-        self.assertEqual(got, [
+        self.assertEqual(got[:4], [
             "commodities/year=2026/month=10/day=27/daily.parquet",
+            "commodities/year=2026/month=10/day=28/daily.parquet",       # only 2 hourly hours: daily is needed too
             "commodities/year=2026/month=10/day=28/hour_00_05.parquet",
             "commodities/year=2026/month=10/day=28/hour_01_05.parquet",
         ])
+        self.assertEqual(got[4:], sorted(full))                          # a complete day of hourly files: daily not downloaded
+        self.assertNotIn("commodities/year=2026/month=10/day=29/daily.parquet", got)
 
 
 class TestLoading(LakeCase):
@@ -198,6 +203,27 @@ class TestLoading(LakeCase):
         write(self.lake, key_for(s.ts).replace(f"hour_{s.ts.hour:02d}", "hour_23"), as_fetch_v2_frame([s]))
         r = load_snapshots(LocalStore(self.lake), SRC, *self.span, cache_dir=self.cache, reader=fake_reader)
         self.assertEqual(len(r.snapshots), len(self.snaps))
+        self.assertEqual(r.duplicates_dropped, 1)
+
+    def test_hours_missing_from_the_hourly_files_are_recovered_from_the_daily_file(self):
+        """The real failure: some hourly files of a day deleted, the daily file (all hours) was ignored."""
+        for day in sorted({x.ts.date() for x in self.snaps}):
+            day_snaps = [x for x in self.snaps if x.ts.date() == day]
+            write(self.lake, key_for(day_snaps[0].ts, "daily"), as_fetch_v2_frame(day_snaps))
+        self.write_hourly(snaps=self.snaps[::7])          # only a few hourly files survive
+        r = load_snapshots(LocalStore(self.lake), SRC, *self.span, cache_dir=self.cache, reader=fake_reader)
+        self.assertEqual([x.ts for x in r.snapshots], [x.ts for x in self.snaps])
+        self.assertGreater(r.duplicates_dropped, 0)
+
+    def test_the_same_snapshot_a_few_minutes_apart_is_still_one_snapshot(self):
+        s0, s1 = self.snaps[3], self.snaps[4]
+        write(self.lake, key_for(s0.ts), as_fetch_v2_frame([s0]))
+        shifted = as_fetch_v2_frame([s0])
+        shifted["snapshot_ts"] = shifted["snapshot_ts"] + pd.Timedelta(minutes=4)
+        write(self.lake, key_for(s0.ts).replace(f"hour_{s0.ts.hour:02d}", "hour_23"), shifted)
+        write(self.lake, key_for(s1.ts), as_fetch_v2_frame([s1]))
+        r = load_snapshots(LocalStore(self.lake), SRC, *self.span, cache_dir=self.cache, reader=fake_reader)
+        self.assertEqual(len(r.snapshots), 2)
         self.assertEqual(r.duplicates_dropped, 1)
 
     def test_daily_file_with_many_snapshots(self):

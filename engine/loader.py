@@ -284,18 +284,42 @@ def _parse_key(key: str):
     return m["source"], date(int(m["y"]), int(m["m"]), int(m["d"])), m["file"]
 
 
-def choose_files(objects: Iterable[ObjectInfo], source: str, start: date, end: date) -> List[ObjectInfo]:
-    """Keeps files of `source` within [start, end] (inclusive UTC dates). Per day: hourly files if any, else daily."""
+def _hours_present(files: List[ObjectInfo]) -> Set[int]:
+    out = set()
+    for o in files:
+        m = re.search(r"hour_(\d{2})_\d{2}\.parquet$", o.key)
+        if m:
+            out.add(int(m.group(1)))
+    return out
+
+
+def day_inventory(objects: Iterable[ObjectInfo], source: str, start: date, end: date) -> Dict[date, dict]:
+    """Per UTC day: which hours have an hourly file, and whether a daily file exists (used by `choose_files` and `lake.py files`)."""
     by_day: Dict[date, Dict[str, List[ObjectInfo]]] = {}
     for o in objects:
         p = _parse_key(o.key)
         if not p or p[0] != source or not (start <= p[1] <= end):
             continue
-        kind = "daily" if p[2] == "daily" else "hourly"
-        by_day.setdefault(p[1], {}).setdefault(kind, []).append(o)
+        by_day.setdefault(p[1], {}).setdefault("daily" if p[2] == "daily" else "hourly", []).append(o)
+    return {d: dict(hourly=sorted(v.get("hourly", []), key=lambda o: o.key), daily=sorted(v.get("daily", []), key=lambda o: o.key),
+                    hours=sorted(_hours_present(v.get("hourly", [])))) for d, v in by_day.items()}
+
+
+def choose_files(objects: Iterable[ObjectInfo], source: str, start: date, end: date, min_hourly_hours: int = 22) -> List[ObjectInfo]:
+    """Keeps files of `source` within [start, end] (inclusive UTC dates).
+
+    Per day: the hourly files; PLUS the day's daily file when it exists and the hourly files cover fewer than
+    `min_hourly_hours` of the 24 hours. (v0.4.1 ignored the daily file whenever ANY hourly file existed, so a day whose
+    hourly files had been partly deleted lost the hours that only the daily file still held.) Snapshots stored in both
+    are de-duplicated when loading.
+    """
     chosen: List[ObjectInfo] = []
-    for day in sorted(by_day):
-        files = by_day[day].get("hourly") or by_day[day].get("daily") or []
+    inv = day_inventory(objects, source, start, end)
+    for day in sorted(inv):
+        d = inv[day]
+        files = list(d["hourly"])
+        if d["daily"] and len(d["hours"]) < min_hourly_hours:
+            files += d["daily"]
         chosen.extend(sorted(files, key=lambda o: o.key))
     return chosen
 
@@ -472,14 +496,15 @@ def load_snapshots(
     for frame in frames:
         if len(frame):
             snaps.extend(snapshots_from_blizzard_v2(frame))
-    # the same Blizzard snapshot can be stored twice (e.g. an hourly file and a daily file); keep one
-    seen, unique, dups = set(), [], 0
+    # the same Blizzard snapshot can be stored twice (an hourly file and a daily file), possibly with timestamps a few
+    # minutes apart (fetch time vs publish time); keep one. Real snapshots are about an hour apart, so 10 minutes is safe.
+    unique, dups, last = [], 0, {}
     for s in sorted(snaps, key=lambda s: (s.source, s.ts)):
-        k = (s.source, s.ts)
-        if k in seen:
+        prev = last.get(s.source)
+        if prev is not None and (s.ts - prev).total_seconds() < 600:
             dups += 1
             continue
-        seen.add(k)
+        last[s.source] = s.ts
         unique.append(s)
     lo = pd.Timestamp(start)
     hi = pd.Timestamp(end) + pd.Timedelta(days=1)

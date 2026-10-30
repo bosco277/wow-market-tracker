@@ -1,6 +1,4 @@
-date,time,tz,action,item_id,units,price_gold,units_returned,units_still_listed,notes
-2026-10-30,21:05,EDT,BUY,42253,90,92.5,,,example row: TOTAL gold paid for all the units
-2026-10-30,21:09,EDT,LIST_UNDER,42253,45,0.9999,,,example row: 1 copper BELOW the lowest price; price PER UNIT in gold
-2026-10-30,21:11,EDT,LIST_SAME,42253,45,1.0,,,example row: EXACTLY the lowest price
-2026-10-31,08:05,EDT,RESULT,42253,52,51.4,,38,example row: 52 sold since last check / 51.4 gold received / nothing returned yet / 38 still listed
-2026-10-31,09:20,EDT,RESULT,42253,30,29.6,8,0,example row: after expiry. 30 more sold / 29.6 gold / 8 came back unsold / nothing listed. Safe to start the next cycle
+date,time_posted,tz,item_id,lane,list_price,quantity,units_sold,units_expired,note
+2026-10-30,21:05,EDT,42253,UNDER,0.99,45,45,0,example row: 1 silver below the lowest price
+2026-10-30,21:07,EDT,42253,SAME,1.00,45,30,15,example row: exactly the lowest price; 30 of 45 sold, 15 came back
+2026-10-31,09:20,EDT,192841,UNDER,13.56,40,,,example row: abnormal market (price flipped); results not in yet

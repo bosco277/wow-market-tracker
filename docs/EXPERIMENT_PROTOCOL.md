@@ -32,61 +32,59 @@ will line it up with the snapshots afterwards.
 
 ## How it works: one cycle per item
 
-An item's **cycle** is: BUY, then LIST (half "under", half "same", 12 hours), then wait until all of its listings are
-gone (sold or expired), collect, and start the next cycle. **Never start a new cycle for an item while it still has
-listings up**, because then we cannot tell which listing sold.
+An item's **cycle** is: buy, then list (half "under", half "same", 12 hours), then wait until all of its listings are
+gone (sold or expired), fill in the results, and start the next cycle. **Never start a new cycle for an item while it
+still has listings up**, because then we cannot tell which listing sold.
 
-Check in about twice a day. Best is a little **after your listings expire** (listings posted at 9pm run out at 9am).
-Each time you check in, do this for each item on the shortlist:
+**Starting a cycle for an item:**
+1. **Buy** the shortlist's `buy_units`. You do not need to write down what you paid. (We can work out the cost from the
+   book at that moment.) Buying and posting within a few minutes of each other is exactly right.
+2. **List half "under":** **1 silver below the lowest price** (the smallest step the AH allows).
+3. **List half "same":** at **exactly the lowest price**.
+4. Add one log row per listing (see below). Always set the listing length to **12 hours**.
+5. Units that came back unsold from the last cycle: list them too, half and half, and write "relist of returned units"
+   in notes.
 
-1. **Look at the mailbox and My Auctions, and log a RESULT row** (details below).
-2. **Nothing of this item still listed?** Start its next cycle now:
-   - **Buy** the shortlist's `buy_units`. Write down the time, units and total gold paid.
-   - **List half "under":** at **1 copper below the lowest price**. Write down time, units, price.
-   - **List half "same":** at **exactly the lowest price**. Write down time, units, price.
-   - Units that came back unsold: list them too, half and half, as extra LIST rows.
-3. **Still some of it listed?** Leave it alone. Do not cancel it, buy it back, or repost it. It will expire by itself
-   and you collect it at your next check-in.
-
-Always set the listing length to **12 hours**.
+**Checking in (about twice a day, best a little after your listings expire):** for each item, open the mailbox and My
+Auctions and fill in `units_sold` and `units_expired` on that item's rows. Then:
+- **Nothing of this item still listed?** Start its next cycle now.
+- **Some still listed?** Leave it alone. Do not cancel, buy back or repost it.
 
 Why "under" and "same"? In retail, and per your beta experience in Forever, the **newest** listing at a price is bought
 first. So the "same" listing should sell almost as fast as the "under" one. If it does not, something is different from
 what we think, and we want to know.
 
-If the lowest price has only a handful of units on it, or the live price looks different from the cheat sheet, still do
-the same two listings, and put what you saw in notes ("lowest price had 40 units").
+**Odd markets are welcome.** If an item's price has been flipped or has jumped, keep listing it and write "abnormal
+market" in notes. I will analyse those cycles separately from the normal ones, and they are exactly the data we need to
+learn about flips.
 
-**Do not** change prices mid-cycle or buy more of the shortlist items in between. The experiment only works if we know
-exactly what you did and when.
+**Mistakes happen** (for example posting the wrong amount at one price and fixing it by buying and posting more). Just
+add a row for what you really did and say so in notes.
 
 ## What the log can and cannot tell us
 
 You cannot see when a sale happened while you are offline, and mail only shows what sold, not the clock time. That is
-fine. **The log tells us how many units really sold in each cycle. It does not need to tell us when.** The "when" comes
-from the hourly snapshots: your "under" listing sits at its own price (1 copper below everyone), so we can watch it shrink
-in the data hour by hour. The log is the answer key we check that against.
+fine. **The log tells us how many units really sold from each listing. It does not need to tell us when.** The "when"
+comes from the hourly snapshots: your "under" listing sits at its own price, so we can watch it shrink in the data hour by
+hour. The log is the answer key we check that against.
 
-## What to write in the log
-
-One row per action. Columns:
+## What to write in the log: one row per listing
 
 | Column | What to put |
 |---|---|
-| date | Day you did it |
-| time | Clock time you see, to the minute |
-| tz | `EDT` or `EST`. **The clocks go back on Sunday Nov 1**, so tick this carefully on Nov 1 and after |
-| action | `BUY`, `LIST_UNDER`, `LIST_SAME`, `LIST_OTHER` (anything else; say what in notes), or `RESULT` |
+| date | Day you posted it |
+| time_posted | Clock time to the nearest few minutes (it matters more than it sounds; "about 9 PM" is a bit too loose) |
+| tz | `EDT` or `EST`. **The clocks go back on Sunday Nov 1** |
 | item_id | From the shortlist |
-| units | BUY / LIST: units bought or listed. RESULT: units that **sold since your last check**, from the sale mails (add up the quantities) |
-| price_gold | BUY: total gold paid. LIST: price per unit. RESULT: total gold received since your last check. Write gold with decimals: 1 silver = 0.01, 1 copper = 0.0001 (so 1g 24s 99c = 1.2499) |
-| units_returned | RESULT only: units that came back unsold by mail (expired) since your last check |
-| units_still_listed | RESULT only: units of this item still on the AH in My Auctions right now |
-| notes | Anything odd. If the sale mails show different prices for one item, say so (for example "two sales: 20 at 0.9999 and 5 at 1.0000"). The order the mails arrived in is a nice extra if it is easy, not required |
+| lane | `UNDER`, `SAME`, or `OTHER` (anything else; say what in notes) |
+| list_price | Price per unit in gold, as shown on the AH (for example 1.49) |
+| quantity | Units in that listing |
+| units_sold | Filled in later: units of this listing that sold (from the sale mails) |
+| units_expired | Filled in later: units that came back unsold |
+| notes | Anything odd: "abnormal market", "relist of returned units", "price moved before I posted", mistakes |
 
-Partial sales are expected. A listing of 45 that sold 30 is just "30 sold" plus 15 either still listed or returned.
-
-If you are late or make a mistake, **write it in notes. Do not fix it quietly.** A honest mistake we know about is fine; a hidden one ruins the row.
+A partly sold listing is normal: quantity 45, units_sold 30, units_expired 15. Mail gold amounts are not needed (they
+appear to include the returned deposit, so I cannot use them).
 
 ## Schedule (launch is Wed Nov 4)
 
@@ -98,7 +96,7 @@ guesses, and every number will come with a "how sure are we" attached.
 
 ## What I will do with the log
 
-1. Match each of your BUY rows to the snapshot interval it fell in, and compare the units the classifier credits with what you really bought.
+1. Match each cycle's purchase (the units you listed, at the time you posted) to the snapshot interval it fell in, and compare the units the classifier credits with what you really bought.
 2. Compare how fast your "under" and "same" listings sold with what each queue rule predicts, which tells us newest-first or oldest-first.
 3. Count how many of your listings never appeared in any snapshot (the invisible sales) to put a real number on the blind spot.
 4. Adjust the engine's settings (`cancel_share`, the blind-spot correction) from what we learn, re-run the validation, and report the new bounds.

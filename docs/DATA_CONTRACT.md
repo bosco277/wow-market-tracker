@@ -83,15 +83,38 @@ the **low** bound. Verify them before trusting low bounds. Everything is paramet
 
 - `tools/lake.py item --ids ...`: hourly lowest price, units at the floor / within 10% of it / listed, new units, and the
   sold_low / sold_est / sold_high bounds for one or more items.
-- `tools/lake.py flips`: finds intervals where an item's lowest price jumped by 30% or more AND at least 80% of the units
-  that used to sit below the new lowest price are gone. If those units could not have expired (LONG / VERY_LONG time left),
-  it is labelled a buyout; otherwise "probably expiry or cancels". For each buyout it reports how long until the price came
-  back near the old level and the estimated units sold while the price was elevated.
+- `tools/lake.py flips`: three layers, each stricter than the last (v0.4.2; the first real run showed layer 2 alone is far too loose):
+  1. **Jump:** the item's lowest price rose by 30% or more AND at least 80% of the units below the new lowest price are gone.
+  2. **Buyout:** those units could not have expired (LONG / VERY_LONG time left). First real run: 4,538 of these in 3 days
+     across 10,066 items, about 75 an hour, 44% on items under 1 gold. That is ordinary buyers eating a thin cheap level,
+     not flippers, so layer 2 is NOT a flip count.
+  3. **Likely flip:** also at least 3x the item's normal hour (75th percentile of its estimated hourly sales) AND at least
+     half of the removed units reappear as NEW listings within 25% of the new lowest price in the same interval.
+     Heuristic and not yet validated: the one known real flip (Mystic Sapphire, Thu 10-29 22:33 ET, 1.49 -> 197.00 gold) is
+     the first thing to check against it.
+  - **Follow-up only counts observed time.** `ended_by` is `reverted` (price came back within 10% of the old level),
+    `hole` (our data stopped for over 2 hours first: return time UNKNOWN, left blank), or `end_of_data` (still up at the
+    last snapshot). v0.4.1 ignored holes: 1,319 of 4,538 events had follow-up across the 21-hour hole, which inflated the
+    revert times and gave nonsense volumes (median "units sold while elevated" 493 for those vs 37 for the rest).
+  - Revert statistics use `revert_share_within(events, hours)`: only events watched at least that long (or reverted
+    sooner) are counted, so a hole or the end of the data is never counted as "still up" or as "came back".
 - **This describes past flips. It is not a recommendation to flip.** Before any flip recommendation is trustworthy we need:
   (1) how often and how fast elevated prices get undercut or sit unsold, measured from many past flips; (2) the true cost of
   the buyout sweep (exact partial-tier VWAP, already built); (3) the effect of newest-first ordering: a rival who lists at
   your exact price sells BEFORE your units, so an elevated price is easier to attack than under oldest-first; (4) real
   sell-through from your own experiment. Outputs would be a range (low / est / high), never one profit number.
+
+### Holes in our own data
+
+**Loader rule (v0.4.3):** per UTC day the loader uses the hourly files, and ALSO that day's daily file when the hourly files
+cover fewer than 22 of the 24 hours. v0.4.2 and earlier used the daily file only when the day had NO hourly files, so
+hourly files that were partly deleted hid hours the daily file still held. Snapshots stored twice are merged when they are
+within 10 minutes of each other. `tools/lake.py files` (workflow mode "files") lists what exists per day, downloading nothing.
+
+`pick` and `flips` print the holes (over 2 hours with no snapshot). First real data had one of about 21 hours (Wed 10-28
+~17:00 ET to Thu 10-29 ~13:00 ET) plus two shorter ones. The classifier leaves hole intervals out of every rate
+(`flag_long_gap`), so the picker looks back 72 h (was 48) and needs 50% coverage (was 60%); with the hole the 48 h window
+had 0.52 coverage, which rejected every item as "too little data".
 
 ## 3. What the API can and cannot tell us
 

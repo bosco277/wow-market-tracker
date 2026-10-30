@@ -1,7 +1,8 @@
 """Command line for the loader and the item picker.
 
     python tools/lake.py plan --days 3          # how many files / MB would this touch? downloads nothing
-    python tools/lake.py pick --days 3          # load recent commodity data, check it, write the experiment shortlist
+    python tools/lake.py files --days 5         # which files exist, day by day (downloads nothing)
+    python tools/lake.py pick --days 4          # load recent commodity data, check it, write the experiment shortlist
     python tools/lake.py order --days 3         # is the oldest or the newest listing at a price bought first?
     python tools/lake.py item --ids 192841 --days 2   # hourly price, depth and estimated sales for one or more items
     python tools/lake.py flips --days 3         # find market flips (cheap side bought out, price jumped) and what followed
@@ -19,8 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd  # noqa: E402
 
-from engine.loader import B2Store, HFStore, LocalStore, MB, coverage_report, load_snapshots, plan_load  # noqa: E402
-from engine.itemview import detect_flips, item_history  # noqa: E402
+from engine.loader import B2Store, HFStore, LocalStore, MB, coverage_report, day_inventory, choose_files, load_snapshots, plan_load  # noqa: E402
+from engine.itemview import detect_flips, gaps_in, item_history, revert_share_within  # noqa: E402
 from engine.ordercheck import tier_order_evidence  # noqa: E402
 from engine.picker import PickerConfig, explain, item_stats, pick, publish_minutes  # noqa: E402
 
@@ -88,6 +89,7 @@ def run_pick(store, args, reader=None, names_fn=fetch_names):
     print("\n== DATA HEALTH ==")
     for k, v in rep.items():
         print(f"  {k}: {v}")
+    _print_holes(res.snapshots)
     if len(res.snapshots) < 3:
         print("Not enough snapshots to continue.")
         return None
@@ -104,9 +106,14 @@ def run_pick(store, args, reader=None, names_fn=fetch_names):
         print("  " + ", ".join(f":{int(m):02d} x{int(c)}" for m, c in mins.items()))
 
     cfg = PickerConfig(max_position_gold=args.max_position_gold, n_items=args.n_items,
-                       min_floor_gold=args.min_floor_gold, max_units=args.max_units)
+                       min_floor_gold=args.min_floor_gold, max_units=args.max_units,
+                       window_hours=args.window_hours, min_coverage=args.min_coverage)
     stats = item_stats(res.snapshots, cfg=cfg)
     short = pick(stats, cfg)
+    if not stats.empty:
+        print(f"\n== HOW MUCH DATA THE ITEMS HAD ==\n  window {cfg.window_hours:.0f} h; a typical item was observed for "
+              f"{stats['observed_hours'].median():.0f} h of it (coverage {stats['coverage'].median():.2f}; needs {cfg.min_coverage:.2f} "
+              f"and {cfg.min_observed_hours:.0f} h)")
     print("\n== WHY ITEMS WERE REJECTED ==")
     for k, v in explain(stats, cfg).items():
         print(f"  {k}: {v}")
@@ -126,6 +133,43 @@ def run_pick(store, args, reader=None, names_fn=fetch_names):
         body = show.to_markdown(index=False) if _has_tabulate() else show.to_string(index=False)
         fh.write("# Experiment shortlist\n\n" + body + "\n")
     return short
+
+
+def run_files(store, args, reader=None):
+    """Lists what is in the store, day by day (UTC), WITHOUT downloading anything."""
+    start, end = date_range(args)
+    objs = store.list("commodities/")
+    inv = day_inventory(objs, "commodities", start, end)
+    used = {o.key for o in choose_files(objs, "commodities", start, end)}
+    print(f"== FILES IN {args.store.upper()} FOR commodities, {start} to {end} (UTC days; ET = UTC minus 4 h until Nov 1, then minus 5 h) ==")
+    d = start
+    while d <= end:
+        v = inv.get(d)
+        if not v:
+            print(f"  {d}: NOTHING")
+        else:
+            hrs = v["hours"]
+            missing = [h for h in range(24) if h not in hrs] if d < end else []
+            daily = f"daily file {sum(o.size for o in v['daily']) / MB:.0f} MB" if v["daily"] else "no daily file"
+            use = "hourly" + (" + daily" if any(o.key in used for o in v["daily"]) else "") if v["hourly"] else "daily only"
+            line = f"  {d}: {len(v['hourly'])} hourly files ({len(hrs)} different UTC hours), {daily}; loader uses: {use}"
+            if missing and d < end:
+                line += f"\n        UTC hours with no hourly file: {', '.join(f'{h:02d}' for h in missing)}"
+            print(line)
+        d += timedelta(days=1)
+    return inv
+
+
+def _print_holes(snapshots):
+    g = gaps_in(snapshots)
+    print("\n== HOLES IN THE DATA (no snapshots for over 2 hours; US Eastern) ==")
+    if g.empty:
+        print("  none")
+        return g
+    for _, r in g.iterrows():
+        print(f"  {_et(r['start'])} -> {_et(r['end'])}  ({r['hours']:.1f} h with nothing recorded)")
+    print(f"  total: {g['hours'].sum():.1f} h. Sales inside a hole cannot be measured, so those hours are left out of every rate.")
+    return g
 
 
 def run_order(store, args, reader=None):
@@ -177,26 +221,42 @@ def run_item(store, args, reader=None, names_fn=fetch_names):
 
 def run_flips(store, args, reader=None, names_fn=fetch_names):
     snaps = _load_all(store, args, reader)
+    _print_holes(snaps)
     ev = detect_flips(snaps)
-    print("\n== MARKET FLIPS: lowest price jumped 30%+ and most of the cheap units vanished ==")
+    print("\n== MARKET FLIPS ==")
     if ev.empty:
         print("  none found")
         return ev
-    flips = ev[ev["verdict"] == "flip / buyout"]
-    print(f"  {len(ev)} jumps found: {len(flips)} look like buyouts, {len(ev) - len(flips)} are probably expiry or cancels")
-    if len(flips):
-        rev = flips["revert_hours"].dropna()
-        print(f"  buyouts whose price came back down within the data: {len(rev)} of {len(flips)}"
-              + (f"; median {rev.median():.1f} h, 25th pct {rev.quantile(.25):.1f} h, 75th pct {rev.quantile(.75):.1f} h" if len(rev) else ""))
-        print(f"  median price jump: {flips['jump'].median():.2f}x; median units bought out: {flips['units_removed'].median():.0f}")
-        print(f"  median units sold while elevated (estimate): {flips['sold_est_while_elevated'].median():.0f}")
-    names = names_fn(flips.sort_values("t1", ascending=False).head(25)["item_id"].tolist())
-    show = flips.sort_values("t1", ascending=False).head(25).copy()
+    buy = ev[ev["verdict"] == "flip / buyout"]
+    likely = ev[ev["likely_flip"]]
+    print("  How many price jumps survive each test (each test is stricter):")
+    print(f"    1. lowest price rose 30%+ and most cheap units vanished: {len(ev):,}")
+    print(f"    2. ...and those units could not have just expired:        {len(buy):,}")
+    print(f"       (ordinary buyers eating a thin cheap price level look like this too)")
+    print(f"    3. ...and far bigger than the item's normal hour, and relisted near the new price: {len(likely):,}  <- likely flips")
+    if likely.empty:
+        print("  No likely flips found.")
+    else:
+        print(f"\n  LIKELY FLIPS ({likely['item_id'].nunique()} different items; median jump {likely['jump'].median():.2f}x, "
+              f"median units bought out {likely['units_removed'].median():.0f})")
+        for h in (3, 6, 12, 24):
+            share, n = revert_share_within(likely, h)
+            if n:
+                print(f"    price back near the old level within {h:>2} h: {share:.0%} of the {n} flips we watched that long")
+        sold = likely["sold_est_while_elevated"].dropna()
+        if len(sold):
+            print(f"    units the market bought while the price was up (estimate, watched time only): median {sold.median():.0f}, "
+                  f"25th-75th pct {sold.quantile(.25):.0f}-{sold.quantile(.75):.0f}")
+        cut = likely["ended_by"].value_counts().to_dict()
+        print(f"    how each ended: {cut}  (hole = our data stopped before we could tell; end_of_data = still up at the last snapshot)")
+    print("  These describe what prices did. They are NOT profit: nothing here says what a flipper paid or whether their units sold.")
+    show = (likely if len(likely) else buy).sort_values("units_removed", ascending=False).head(15).copy()
+    names = names_fn(show["item_id"].tolist())
     show.insert(0, "when_et", show["t1"].map(_et))
     show.insert(1, "name", show["item_id"].map(lambda i: names.get(int(i), "")))
-    cols = ["when_et", "item_id", "name", "floor_before_gold", "floor_after_gold", "jump", "units_removed",
-            "revert_hours", "still_elevated_at_end", "sold_est_while_elevated"]
-    print("\n  most recent buyouts:")
+    cols = ["when_et", "item_id", "name", "floor_before_gold", "floor_after_gold", "jump", "units_removed", "size_vs_normal",
+            "relisted_share", "ended_by", "followup_hours", "sold_est_while_elevated"]
+    print(f"\n  largest {'likely flips' if len(likely) else 'buyouts'}:")
     print(show[cols].round(2).to_string(index=False))
     os.makedirs(args.out, exist_ok=True)
     ev.to_csv(os.path.join(args.out, "flips.csv"), index=False)
@@ -213,7 +273,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "pick", "order", "item", "flips"])
+    ap.add_argument("command", choices=["plan", "files", "pick", "order", "item", "flips"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -226,9 +286,11 @@ def main(argv=None):
     ap.add_argument("--ids", default="", help="item ids, comma separated (for the item command)")
     ap.add_argument("--min-floor-gold", type=float, default=1.0)
     ap.add_argument("--max-units", type=int, default=300)
+    ap.add_argument("--window-hours", type=float, default=72.0, help="pick: how far back item statistics look")
+    ap.add_argument("--min-coverage", type=float, default=0.5, help="pick: share of the window that must have been observed")
     args = ap.parse_args(argv)
     store = make_store(args)
-    return {"plan": run_plan, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips}[args.command](store, args)
+    return {"plan": run_plan, "files": run_files, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips}[args.command](store, args)
 
 
 if __name__ == "__main__":

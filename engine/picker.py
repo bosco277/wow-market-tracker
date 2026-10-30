@@ -27,9 +27,9 @@ from .schema import COPPER_PER_GOLD, Snapshot
 
 @dataclass(frozen=True)
 class PickerConfig:
-    window_hours: float = 48.0
+    window_hours: float = 72.0
     min_observed_hours: float = 20.0
-    min_coverage: float = 0.6            # share of the window that was actually observed
+    min_coverage: float = 0.5            # share of the window that was actually observed (holes in our data count against it)
     min_daily_est: float = 100.0         # units/day: slower than this and we wait too long for sales
     max_daily_est: float = 8000.0
     max_price_cv: float = 0.15           # std/mean of the hourly floor price

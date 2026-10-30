@@ -4,6 +4,7 @@ name: Market tools
 # download cap is untouched). Put this file in .github/workflows/ . Run it from the Actions tab -> "Market tools".
 # Choose a mode:
 #   pick   writes the shortlist of items for the buy/list experiment
+#   files  lists the files that exist, day by day, and which hours are missing (downloads nothing)
 #   plan   only counts files and MB (downloads nothing)
 #   order  checks whether the newest or the oldest listing at a price is bought first
 #   item   hourly price, depth and estimated sales for the item ids you type in
@@ -15,11 +16,11 @@ on:
       mode:
         description: "What to run"
         type: choice
-        options: [pick, plan, order, item, flips]
+        options: [pick, files, plan, order, item, flips]
         default: pick
       days:
-        description: "How many days of data to look at"
-        default: "3"
+        description: "How many days of data to load (pick looks back 72 h, so 4 or more)"
+        default: "4"
       item_ids:
         description: "For mode=item: item ids separated by commas (e.g. 192841,42253)"
         default: ""
