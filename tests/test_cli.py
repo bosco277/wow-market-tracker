@@ -1,0 +1,42 @@
+import argparse
+import os
+import pickle
+import sys
+import tempfile
+import unittest
+
+import pandas as pd
+
+from helpers import T0  # noqa: F401
+from engine.loader import LocalStore
+from engine.simulator import MarketSimulator, default_profiles
+from test_loader import fake_reader, key_for, write
+from test_pipeline import as_fetch_v2_frame
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+import lake  # noqa: E402
+
+
+class TestCli(unittest.TestCase):
+    def test_pick_end_to_end_on_local_files(self):
+        snaps = MarketSimulator(default_profiles(), seed=9).run(60).snapshots
+        with tempfile.TemporaryDirectory() as d:
+            for s in snaps:
+                write(os.path.join(d, "lake"), key_for(s.ts), as_fetch_v2_frame([s]))
+            args = argparse.Namespace(
+                store="local", root=os.path.join(d, "lake"), days=3, end=str(snaps[-1].ts.date()),
+                cache=os.path.join(d, "cache"), out=os.path.join(d, "out"), max_gb=0.8,
+                max_position_gold=1e9, n_items=8)
+            plan = lake.run_plan(LocalStore(args.root), args)
+            self.assertEqual(len(plan.files), len(snaps))
+            short = lake.run_pick(LocalStore(args.root), args, reader=fake_reader, names_fn=lambda ids: {1002: "Test Herb"})
+            self.assertIsNotNone(short)
+            self.assertGreater(len(short), 0)
+            self.assertTrue(os.path.exists(os.path.join(d, "out", "experiment_shortlist.csv")))
+            back = pd.read_csv(os.path.join(d, "out", "experiment_shortlist.csv"))
+            self.assertIn("buy_units", back.columns)
+            self.assertIn("Test Herb", set(back["name"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

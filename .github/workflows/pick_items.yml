@@ -1,0 +1,66 @@
+name: Pick experiment items
+
+# One-click: reads your recent commodity snapshots from the Hugging Face mirror (NOT Backblaze, so your B2 download
+# cap is untouched), checks the data, and writes a shortlist of items for the buy/list experiment.
+# Put this file in .github/workflows/ . Run it from the Actions tab -> "Pick experiment items" -> Run workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "How many days of data to look at"
+        default: "3"
+      plan_only:
+        description: "Only count files and MB (downloads nothing)"
+        type: boolean
+        default: false
+      max_position_gold:
+        description: "Most gold in play for any one item"
+        default: "150"
+
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pandas numpy pyarrow requests tabulate
+
+      - name: Keep downloaded files between runs
+        uses: actions/cache@v4
+        with:
+          path: .lake_cache
+          key: lake-cache-${{ github.run_id }}
+          restore-keys: lake-cache-
+
+      - name: Plan (no download)
+        if: ${{ inputs.plan_only }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python tools/lake.py plan --store hf --days ${{ inputs.days }}
+
+      - name: Pick items
+        if: ${{ !inputs.plan_only }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+        run: |
+          python tools/lake.py pick --store hf --days ${{ inputs.days }} --max-position-gold ${{ inputs.max_position_gold }} | tee out.txt
+          mkdir -p out
+          { echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save results
+        if: ${{ !inputs.plan_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: experiment-shortlist
+          path: |
+            out/
+            out.txt

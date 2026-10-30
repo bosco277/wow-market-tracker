@@ -1,0 +1,5 @@
+date,time,tz,action,item_id,units,price_copper,units_returned,notes
+2026-10-30,20:05,EDT,BUY,123456,60,1250000,,example row: total copper paid for the units
+2026-10-30,20:09,EDT,LIST_FRONT,123456,30,20832,,example row: price per unit in copper
+2026-10-30,20:11,EDT,LIST_BACK,123456,30,21500,,example row
+2026-10-31,08:05,EDT,RESULT,123456,52,1050000,8,example row: units sold / total copper received / units returned unsold
