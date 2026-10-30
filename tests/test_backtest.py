@@ -143,6 +143,18 @@ class TestSafety(unittest.TestCase):
         self.assertEqual({v.summary["n_trades"] for v in r.values()}.__len__(), 1)  # same entries under every assumption
 
 
+class TestTierOrder(unittest.TestCase):
+    def test_newest_first_never_lists_lower_than_oldest_first_for_the_same_entries(self):
+        res = MarketSimulator(default_profiles(), seed=11).run(72)
+        out = {}
+        for rule in ("fifo", "lifo"):
+            cfg = BacktestConfig(warmup_hours=24, hold_hours=4, tier_order=rule)
+            out[rule] = run_backtest(res.snapshots, BuyWhenFree(1002, 5), cfg).trades.sort_values("entry_ts").reset_index(drop=True)
+        self.assertEqual(len(out["fifo"]), len(out["lifo"]))
+        self.assertTrue((out["fifo"]["cost"] == out["lifo"]["cost"]).all())  # identical entries
+        self.assertTrue((out["lifo"]["list_price"] >= out["fifo"]["list_price"] - 1e-9).all())
+
+
 class TestSummary(unittest.TestCase):
     def test_drawdown_and_hit_rate(self):
         trades = pd.DataFrame({

@@ -58,6 +58,7 @@ class BacktestConfig:
     warmup_hours: float = 24.0           # no trading until this much history exists
     buy_depth_assumption: str = "high"   # depth used for the reference buy VWAP in metrics_history
     blind_spot_correction: float = 1.0
+    tier_order: str = "fifo"             # how buyers pick among listings at the same price; retail data shows "lifo"
     classifier: ClassifierParams = field(default_factory=ClassifierParams)
 
 
@@ -120,7 +121,7 @@ def run_backtest(snapshots: List[Snapshot], strategy: Strategy, config: Optional
         expected_units = float(e["expected_units"].iloc[0]) if len(e) else 0.0
         floor = float(item_book["unit_price"].min()) if len(item_book) else 0.0
         if len(item_book):
-            q = sell_clearing_price(item_book, expected_units, pos["units"])
+            q = sell_clearing_price(item_book, expected_units, pos["units"], cfg.tier_order)
             list_price, filled = q.list_price, min(q.expected_filled, pos["units"])
         else:
             list_price, filled = float("nan"), 0.0

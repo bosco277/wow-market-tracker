@@ -39,6 +39,10 @@ class ClassifierParams:
     # Validation (tools/fifo_check.py) shows False costs almost nothing if the market IS first-in-first-out and
     # protects the high bound if it is not. We cannot verify the real tie-break rule, so False is the safe default.
     fifo_within_tier: bool = False
+    # Order in which buyers take listings at the SAME price: "unknown" (default, safest), "fifo" (oldest first) or
+    # "lifo" (newest first = highest auction id first). Retail data shows LIFO (tools/lake.py order). If this is not
+    # "unknown" it takes precedence over fifo_within_tier.
+    tier_order: str = "unknown"
     # Heuristic share of sweep-consistent disappearances that were cancels. Feeds sold_est only. Uncalibrated.
     cancel_share: float = 0.10
     # How much of the "new listings priced at/below the vanished price" volume to attribute to cancel-and-relist
@@ -98,7 +102,11 @@ def classify_transitions(prev: Snapshot, curr: Snapshot, params: Optional[Classi
         p = p[p["item_id"].isin(scope)]
         c = c[c["item_id"].isin(scope)]
 
-    p = p.sort_values(["item_id", "unit_price", "auction_id"], kind="mergesort").reset_index(drop=True)
+    order = params.tier_order if params.tier_order != "unknown" else ("fifo" if params.fifo_within_tier else "unknown")
+    if order not in ("unknown", "fifo", "lifo"):
+        raise ValueError(f"tier_order must be 'unknown', 'fifo' or 'lifo', got {params.tier_order!r}")
+    p = p.sort_values(["item_id", "unit_price", "auction_id"], ascending=[True, True, order != "lifo"],
+                      kind="mergesort").reset_index(drop=True)
     curr_qty = c.set_index("auction_id")["quantity"]
     p["curr_qty"] = p["auction_id"].map(curr_qty)
 
@@ -113,7 +121,7 @@ def classify_transitions(prev: Snapshot, curr: Snapshot, params: Optional[Classi
     bound_rank = p["rank"].where(same).groupby(p["item_id"]).transform("min").fillna(inf)
     bound_price = p["unit_price"].where(same).groupby(p["item_id"]).transform("min").fillna(inf)
 
-    if params.fifo_within_tier:
+    if order != "unknown":
         in_sweep = gone & (p["rank"] < bound_rank)
         tie = pd.Series(False, index=p.index)
         beyond_partial = reduced & (p["rank"] > bound_rank)

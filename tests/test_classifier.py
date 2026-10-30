@@ -128,5 +128,36 @@ class TestAggregateRates(unittest.TestCase):
         self.assertAlmostEqual(row["coverage"], 2.0 / 24.0)
 
 
+
+class TestTierOrder(unittest.TestCase):
+    """Five 100-unit listings at one price (ids 1..5, 5 newest). Buyers take 250 units."""
+    def books(self, survivors):
+        before = mk([(i, 7, 100, 1000, "LONG") for i in range(1, 6)], ts=minutes(0))
+        after = mk(survivors, ts=minutes(60))
+        return before, after
+
+    def test_lifo_knows_the_newest_were_the_ones_bought(self):
+        before, after = self.books([(1, 7, 100, 1000, "LONG"), (2, 7, 100, 1000, "LONG"), (3, 7, 50, 1000, "LONG")])
+        r = classify_transitions(before, after, ClassifierParams(tier_order="lifo")).items.iloc[0]
+        self.assertEqual(r["sold_cert"], 50)
+        self.assertEqual(r["sold_high"], 250)  # 50 partial + listings 4 and 5
+
+    def test_unknown_order_cannot_tell_but_still_brackets_the_truth(self):
+        before, after = self.books([(1, 7, 100, 1000, "LONG"), (2, 7, 100, 1000, "LONG"), (3, 7, 50, 1000, "LONG")])
+        r = classify_transitions(before, after, ClassifierParams()).items.iloc[0]
+        self.assertLessEqual(r["sold_low"], 250)
+        self.assertGreaterEqual(r["sold_high"], 250)
+
+    def test_a_wrong_fifo_assumption_is_visible_as_prefix_violations(self):
+        before, after = self.books([(1, 7, 100, 1000, "LONG"), (2, 7, 100, 1000, "LONG"), (3, 7, 50, 1000, "LONG")])
+        r = classify_transitions(before, after, ClassifierParams(tier_order="fifo")).items.iloc[0]
+        self.assertGreaterEqual(r["prefix_violations"], 1)  # survivors 1 and 2 are older than the "sold" ones
+
+    def test_bad_value_is_rejected(self):
+        before, after = self.books([(1, 7, 100, 1000, "LONG")])
+        with self.assertRaises(ValueError):
+            classify_transitions(before, after, ClassifierParams(tier_order="newest"))
+
+
 if __name__ == "__main__":
     unittest.main()

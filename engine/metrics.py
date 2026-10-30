@@ -104,25 +104,34 @@ class SellQuote:
     undercut: bool           # True if the quote is floor-1 because every existing tier is too far down the queue
 
 
-def sell_clearing_price(item_book: pd.DataFrame, expected_sales_units: float, my_units: float) -> SellQuote:
+def sell_clearing_price(item_book: pd.DataFrame, expected_sales_units: float, my_units: float,
+                        tier_order: str = "fifo") -> SellQuote:
     """Highest realistic list price for `my_units` given how many units the market is expected to absorb.
 
-    You queue BEHIND every listing priced at or below yours. Your units sell within the horizon only if
-    (units ahead of you) + my_units <= expected sales. So list at the highest existing tier whose cumulative
-    quantity still leaves room for you; if even the floor tier is too deep, undercut it by one copper.
-    Never quotes above the current highest ask (no extrapolation beyond the observed book).
+    Your units sell within the horizon only if (units ahead of you) + my_units <= expected sales.
+    - tier_order="fifo" (oldest first): you queue BEHIND every listing priced at or below yours.
+    - tier_order="lifo" (newest first, what retail does): you jump ahead of everything at your own price, so only
+      listings priced STRICTLY BELOW yours are ahead of you. Joining the floor price is already the front of the
+      line, so no undercut is ever needed.
+    List at the highest existing tier that still leaves room for you. If even the floor is out of reach under FIFO,
+    undercut it by one copper. Never quotes above the current highest ask (no extrapolation beyond the observed book).
     """
+    if tier_order not in ("fifo", "lifo"):
+        raise ValueError("tier_order must be 'fifo' or 'lifo'")
     t = ask_tiers(item_book)
     my_units = float(my_units)
     if t.empty:
         return SellQuote(float("nan"), 0.0, 0.0, False, False)
     room = float(expected_sales_units) - my_units
-    ok = t[t["cum_qty"] <= max(room, -1.0)] if room >= 0 else t.iloc[0:0]
+    ahead = t["cum_qty"] if tier_order == "fifo" else (t["cum_qty"] - t["qty"])
+    ok = t[ahead <= max(room, -1.0)] if room >= 0 else t.iloc[0:0]
     if len(ok):
         row = ok.iloc[-1]
-        return SellQuote(float(row["price"]), float(row["cum_qty"]), my_units, True, False)
+        return SellQuote(float(row["price"]), float(ahead.loc[row.name]), my_units, True, False)
     floor = float(t["price"].iloc[0])
     filled = max(0.0, min(my_units, float(expected_sales_units)))
+    if tier_order == "lifo":  # the front of the line is the floor price itself
+        return SellQuote(floor, 0.0, filled, filled + 1e-9 >= my_units, False)
     return SellQuote(max(1.0, floor - 1.0), 0.0, filled, filled + 1e-9 >= my_units, True)
 
 

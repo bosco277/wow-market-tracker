@@ -96,6 +96,22 @@ Facts the classifier relies on (commodities):
 A listing **created and sold between two snapshots** never appears in either. Observed sales are therefore a **floor**
 on true volume. In the simulator this is the dominant error on hot items (see section 7).
 
+
+### Verified: newest listing at a price is bought first (LIFO), retail commodities
+
+- **Test:** `tools/lake.py order` (`engine/ordercheck.py`). For each price tier where one listing was *partly* bought (a
+  certain sale), did the newer or the older listings at that price disappear? Listings that could have expired are ignored.
+- **Result on the real retail data (Oct 27-29, 2026):** 40,608 usable cases: 31,228 LIFO pattern (77%), 374 FIFO pattern
+  (0.9%), 9,006 mixed (22%; cancels and relists muddy some tiers). Verdict: LIFO.
+- **Outside corroboration (player reports, not official Blizzard statements):** The Lazy Goldmaker (Sep 30, 2026, from the
+  Forever beta) says Forever uses the retail AH and that at the same price "he will get the 50 that were posted most
+  recently"; a 2024 forum post says retail needs no undercutting because of "last one in = first one out".
+- **Forever itself is NOT verified from data.** Re-run the same check on the first days of Forever data before relying on it.
+- **What it changes:** `sell_clearing_price(..., tier_order="lifo")` and `BacktestConfig(tier_order="lifo")`: joining a
+  price puts you ahead of everything at that price, so only strictly cheaper listings are ahead of you and no undercut is
+  needed. **What it does not change:** the classifier stays on `tier_order="unknown"` (see `tools/lifo_check.py`: knowing
+  the rule changes coverage by about 0.002 in a newest-first market, while a wrong guess pushes 2-4% of intervals above the high bound).
+
 ## 4. Classifier output (`engine/classifier.py`)
 
 `classify_transitions(prev, curr, params)` → `TransitionResult(source, t0, t1, gap_minutes, events, items)`.

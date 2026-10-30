@@ -63,6 +63,32 @@ class TestDepth(unittest.TestCase):
         self.assertEqual(target_depth(0), 1.0)
 
 
+class TestSellSideLifo(unittest.TestCase):
+    """Newest-first at a price (retail): only strictly cheaper listings are ahead of you. BOOK tiers: 10:100, 11:100, 12:300."""
+
+    def test_joins_a_higher_tier_because_its_own_tier_is_not_ahead_of_you(self):
+        q = sell_clearing_price(BOOK, 250, 40, tier_order="lifo")  # room 210; units strictly below: 0, 100, 200
+        self.assertEqual((q.list_price, q.units_ahead, q.undercut), (12, 200, False))
+        self.assertEqual(sell_clearing_price(BOOK, 250, 40, tier_order="fifo").list_price, 11)
+
+    def test_never_needs_an_undercut(self):
+        q = sell_clearing_price(BOOK, 100, 40, tier_order="lifo")  # FIFO would undercut to 9
+        self.assertEqual((q.list_price, q.units_ahead, q.undercut, q.complete), (10, 0, False, True))
+        q = sell_clearing_price(BOOK, 30, 40, tier_order="lifo")   # market absorbs less than my stack
+        self.assertEqual((q.list_price, q.expected_filled, q.complete, q.undercut), (10, 30, False, False))
+
+    def test_lifo_price_is_never_below_fifo_and_never_above_the_top_ask(self):
+        for e in (0, 20, 60, 100, 150, 250, 400, 600, 5000):
+            lifo = sell_clearing_price(BOOK, e, 40, tier_order="lifo").list_price
+            fifo = sell_clearing_price(BOOK, e, 40, tier_order="fifo").list_price
+            self.assertGreaterEqual(lifo, fifo)
+            self.assertLessEqual(lifo, 12)
+
+    def test_rejects_unknown_rule(self):
+        with self.assertRaises(ValueError):
+            sell_clearing_price(BOOK, 100, 40, tier_order="random")
+
+
 class TestSellSide(unittest.TestCase):
     def test_joins_the_deepest_tier_that_still_leaves_room(self):
         q = sell_clearing_price(BOOK, expected_sales_units=250, my_units=40)  # room 210 -> tier 11 (cum 200)
