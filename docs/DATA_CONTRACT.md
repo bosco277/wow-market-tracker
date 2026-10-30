@@ -78,6 +78,21 @@ the **low** bound. Verify them before trusting low bounds. Everything is paramet
 - **Picker:** chooses a spread of slow/medium/fast items with steady prices, deep books and small cost, and sizes the
   purchase at about two "normal hourly sales" so it stands out in the data. See `docs/EXPERIMENT_PROTOCOL.md`.
 
+
+## 2c. Item report and flip finder (`engine/itemview.py`)
+
+- `tools/lake.py item --ids ...`: hourly lowest price, units at the floor / within 10% of it / listed, new units, and the
+  sold_low / sold_est / sold_high bounds for one or more items.
+- `tools/lake.py flips`: finds intervals where an item's lowest price jumped by 30% or more AND at least 80% of the units
+  that used to sit below the new lowest price are gone. If those units could not have expired (LONG / VERY_LONG time left),
+  it is labelled a buyout; otherwise "probably expiry or cancels". For each buyout it reports how long until the price came
+  back near the old level and the estimated units sold while the price was elevated.
+- **This describes past flips. It is not a recommendation to flip.** Before any flip recommendation is trustworthy we need:
+  (1) how often and how fast elevated prices get undercut or sit unsold, measured from many past flips; (2) the true cost of
+  the buyout sweep (exact partial-tier VWAP, already built); (3) the effect of newest-first ordering: a rival who lists at
+  your exact price sells BEFORE your units, so an elevated price is easier to attack than under oldest-first; (4) real
+  sell-through from your own experiment. Outputs would be a range (low / est / high), never one profit number.
+
 ## 3. What the API can and cannot tell us
 
 The Auction House API publishes **listings, not sales**. There is no receipt. Everything below is inference from how the

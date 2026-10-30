@@ -1,37 +1,40 @@
-name: Pick experiment items
+name: Market tools
 
-# One-click: reads your recent commodity snapshots from the Hugging Face mirror (NOT Backblaze, so your B2 download
-# cap is untouched). Put this file in .github/workflows/ . Run it from the Actions tab -> "Pick experiment items".
-#  - default:            checks the data and writes the shortlist of items for the buy/list experiment
-#  - plan_only:          only counts files and MB (downloads nothing)
-#  - check_order:        looks for which listing at the same price gets bought first (newest = LIFO, oldest = FIFO)
+# One-click tools that read your recent commodity snapshots from the Hugging Face mirror (NOT Backblaze, so your B2
+# download cap is untouched). Put this file in .github/workflows/ . Run it from the Actions tab -> "Market tools".
+# Choose a mode:
+#   pick   writes the shortlist of items for the buy/list experiment
+#   plan   only counts files and MB (downloads nothing)
+#   order  checks whether the newest or the oldest listing at a price is bought first
+#   item   hourly price, depth and estimated sales for the item ids you type in
+#   flips  finds market flips (cheap side bought out, price jumped) in the last few days and what followed
 
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "What to run"
+        type: choice
+        options: [pick, plan, order, item, flips]
+        default: pick
       days:
         description: "How many days of data to look at"
         default: "3"
-      plan_only:
-        description: "Only count files and MB (downloads nothing)"
-        type: boolean
-        default: false
-      check_order:
-        description: "Check whether newest or oldest listing at a price is bought first"
-        type: boolean
-        default: false
+      item_ids:
+        description: "For mode=item: item ids separated by commas (e.g. 192841,42253)"
+        default: ""
       max_position_gold:
-        description: "Most gold in play for any one item"
+        description: "pick: most gold in play for any one item"
         default: "150"
       min_floor_gold:
-        description: "Skip items cheaper than this (gold per unit)"
+        description: "pick: skip items cheaper than this (gold per unit)"
         default: "1"
       max_units:
-        description: "Most units to buy for any one item"
+        description: "pick: most units to buy for any one item"
         default: "300"
 
 jobs:
-  pick:
+  run:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -51,36 +54,26 @@ jobs:
           key: lake-cache-${{ github.run_id }}
           restore-keys: lake-cache-
 
-      - name: Plan (no download)
-        if: ${{ inputs.plan_only }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python tools/lake.py plan --store hf --days ${{ inputs.days }}
-
-      - name: Check which listing at a price is bought first
-        if: ${{ !inputs.plan_only && inputs.check_order }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          python tools/lake.py order --store hf --days ${{ inputs.days }} | tee out.txt
-          { echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Pick items
-        if: ${{ !inputs.plan_only && !inputs.check_order }}
+      - name: Run
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
           BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+          MODE: ${{ inputs.mode }}
+          DAYS: ${{ inputs.days }}
+          IDS: ${{ inputs.item_ids }}
+          MAXPOS: ${{ inputs.max_position_gold }}
+          MINFLOOR: ${{ inputs.min_floor_gold }}
+          MAXUNITS: ${{ inputs.max_units }}
         run: |
-          python tools/lake.py pick --store hf --days ${{ inputs.days }} --max-position-gold ${{ inputs.max_position_gold }} --min-floor-gold ${{ inputs.min_floor_gold }} --max-units ${{ inputs.max_units }} | tee out.txt
           mkdir -p out
+          python tools/lake.py "$MODE" --store hf --days "$DAYS" --ids "$IDS" --max-position-gold "$MAXPOS" --min-floor-gold "$MINFLOOR" --max-units "$MAXUNITS" | tee out.txt
           { echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save results
-        if: ${{ !inputs.plan_only }}
         uses: actions/upload-artifact@v4
         with:
-          name: experiment-results
+          name: market-tools-results
           path: |
             out/
             out.txt

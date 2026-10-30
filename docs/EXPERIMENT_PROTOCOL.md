@@ -27,33 +27,45 @@ Ways to spend less: skip the PM buy (half the cost, half the data), or use 4 ite
    and produces the shortlist (6 items). **Paste me the log output.** I will check it before you spend anything.
 4. Make a copy of `experiment_log_template.csv` as a Google Sheet or Excel file.
 
-The log output also says **which minutes of the hour the data refreshes** (for example `:03`). You will do your trading
-in the **5 to 10 minutes after** a refresh, so that what you do lands cleanly inside one snapshot interval.
+Timing note: you do **not** need to hit any particular minute. Write down the exact time of everything you do and I
+will line it up with the snapshots afterwards.
 
-## Each session (AM and PM, about 12 hours apart, 15 minutes)
+## How it works: one cycle per item
 
-Set the listing length to **12 hours** every time, so that each batch has finished by your next session.
+An item's **cycle** is: BUY, then LIST (half "under", half "same", 12 hours), then wait until all of its listings are
+gone (sold or expired), collect, and start the next cycle. **Never start a new cycle for an item while it still has
+listings up**, because then we cannot tell which listing sold.
 
-Do this for each item on the shortlist:
+Check in about twice a day. Best is a little **after your listings expire** (listings posted at 9pm run out at 9am).
+Each time you check in, do this for each item on the shortlist:
 
-1. **Check last session's listings.** Open your mail / sales history. Write down, for each item, how many units sold,
-   how many came back unsold, and the gold you received. (First session: skip this step.)
-2. **Buy** the shortlist's `buy_units`. Write down the time, units, and total price you paid.
-3. **List half "under".** Post half the units at **1 copper below the lowest price**. Write down the time, units, price.
-4. **List half "same".** Post the other half at **exactly the lowest price** (the same price as the cheapest listing).
-   Write down the time, units, price.
-5. Units that came back unsold in step 1: list them too, half under, half same. Log them as extra LIST rows.
+1. **Look at the mailbox and My Auctions, and log a RESULT row** (details below).
+2. **Nothing of this item still listed?** Start its next cycle now:
+   - **Buy** the shortlist's `buy_units`. Write down the time, units and total gold paid.
+   - **List half "under":** at **1 copper below the lowest price**. Write down time, units, price.
+   - **List half "same":** at **exactly the lowest price**. Write down time, units, price.
+   - Units that came back unsold: list them too, half and half, as extra LIST rows.
+3. **Still some of it listed?** Leave it alone. Do not cancel it, buy it back, or repost it. It will expire by itself
+   and you collect it at your next check-in.
 
-Why these two? We were told the game now sells the **newest** listing at a price first (last in, first out). If that is
-true, the "same" listing is just as far forward as the "under" one, and both sell quickly. If it is not true, the "same"
-listing sits behind everyone already at that price and barely sells. That difference answers the question for us,
-using your own listings.
+Always set the listing length to **12 hours**.
 
-If the lowest price has only a handful of units on it, or the live price looks different from the cheat sheet,
-still do the same two listings, and put what you saw in notes ("lowest price had 40 units").
+Why "under" and "same"? In retail, and per your beta experience in Forever, the **newest** listing at a price is bought
+first. So the "same" listing should sell almost as fast as the "under" one. If it does not, something is different from
+what we think, and we want to know.
 
-That is all. **Do not** cancel listings, change prices mid-session, or buy anything else from the shortlist items in between.
-The experiment only works if we know exactly what you did and when.
+If the lowest price has only a handful of units on it, or the live price looks different from the cheat sheet, still do
+the same two listings, and put what you saw in notes ("lowest price had 40 units").
+
+**Do not** change prices mid-cycle or buy more of the shortlist items in between. The experiment only works if we know
+exactly what you did and when.
+
+## What the log can and cannot tell us
+
+You cannot see when a sale happened while you are offline, and mail only shows what sold, not the clock time. That is
+fine. **The log tells us how many units really sold in each cycle. It does not need to tell us when.** The "when" comes
+from the hourly snapshots: your "under" listing sits at its own price (1 copper below everyone), so we can watch it shrink
+in the data hour by hour. The log is the answer key we check that against.
 
 ## What to write in the log
 
@@ -66,22 +78,22 @@ One row per action. Columns:
 | tz | `EDT` or `EST`. **The clocks go back on Sunday Nov 1**, so tick this carefully on Nov 1 and after |
 | action | `BUY`, `LIST_UNDER`, `LIST_SAME`, `LIST_OTHER` (anything else; say what in notes), or `RESULT` |
 | item_id | From the shortlist |
-| units | Units bought, listed, or (for RESULT) sold |
-| price_gold | BUY: total gold paid. LIST: price per unit. RESULT: total gold received. Write gold with decimals: 1 silver = 0.01, 1 copper = 0.0001 (so 1g 24s 99c = 1.2499) |
-| units_returned | RESULT rows only: units that came back unsold |
-| notes | Anything odd: the item vanished from the AH, the price spiked, you were late, you made a mistake |
+| units | BUY / LIST: units bought or listed. RESULT: units that **sold since your last check**, from the sale mails (add up the quantities) |
+| price_gold | BUY: total gold paid. LIST: price per unit. RESULT: total gold received since your last check. Write gold with decimals: 1 silver = 0.01, 1 copper = 0.0001 (so 1g 24s 99c = 1.2499) |
+| units_returned | RESULT only: units that came back unsold by mail (expired) since your last check |
+| units_still_listed | RESULT only: units of this item still on the AH in My Auctions right now |
+| notes | Anything odd. If the sale mails show different prices for one item, say so (for example "two sales: 20 at 0.9999 and 5 at 1.0000"). The order the mails arrived in is a nice extra if it is easy, not required |
+
+Partial sales are expected. A listing of 45 that sold 30 is just "30 sold" plus 15 either still listed or returned.
 
 If you are late or make a mistake, **write it in notes. Do not fix it quietly.** A honest mistake we know about is fine; a hidden one ruins the row.
 
-## Schedule (launch is Nov 4)
+## Schedule (launch is Wed Nov 4)
 
-| Day | Sessions |
-|---|---|
-| Fri Oct 30 | Pick items; do the PM session if the shortlist is ready |
-| Sat Oct 31, Sun Nov 1, Mon Nov 2, Tue Nov 3 | AM + PM |
-| Wed Nov 4 (launch day) | Collect the last results (the Nov 3 PM listings finish by morning). No more buying |
+Check in about twice a day from now until Tue Nov 3. On Wed Nov 4 collect the last results and **stop buying**.
+Items that sell out quickly can run more cycles, which is useful: more cycles means more answers.
 
-That is up to about **9 sessions**. It is a small sample, so the numbers it gives us will be rough. They are far better than
+It is a small sample, so the numbers it gives us will be rough. They are far better than
 guesses, and every number will come with a "how sure are we" attached.
 
 ## What I will do with the log

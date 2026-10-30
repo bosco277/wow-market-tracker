@@ -48,5 +48,21 @@ class TestCli(unittest.TestCase):
             self.assertGreater(ev.lifo_consistent, ev.fifo_consistent)
 
 
+    def _lake(self, d, snaps):
+        for s in snaps:
+            write(os.path.join(d, "lake"), key_for(s.ts), as_fetch_v2_frame([s]))
+        return argparse.Namespace(store="local", root=os.path.join(d, "lake"), days=3, end=str(snaps[-1].ts.date()),
+                                  cache=os.path.join(d, "cache"), out=os.path.join(d, "out"), ids="1002,1003")
+
+    def test_item_and_flips_commands_run(self):
+        snaps = MarketSimulator(default_profiles(), seed=9).run(40).snapshots
+        with tempfile.TemporaryDirectory() as d:
+            args = self._lake(d, snaps)
+            out = lake.run_item(LocalStore(args.root), args, reader=fake_reader, names_fn=lambda ids: {1002: "Test Herb"})
+            self.assertEqual(len(out), len(snaps))
+            ev = lake.run_flips(LocalStore(args.root), args, reader=fake_reader, names_fn=lambda ids: {})
+            self.assertIsNotNone(ev)
+
+
 if __name__ == "__main__":
     unittest.main()

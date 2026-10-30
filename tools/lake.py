@@ -3,6 +3,8 @@
     python tools/lake.py plan --days 3          # how many files / MB would this touch? downloads nothing
     python tools/lake.py pick --days 3          # load recent commodity data, check it, write the experiment shortlist
     python tools/lake.py order --days 3         # is the oldest or the newest listing at a price bought first?
+    python tools/lake.py item --ids 192841 --days 2   # hourly price, depth and estimated sales for one or more items
+    python tools/lake.py flips --days 3         # find market flips (cheap side bought out, price jumped) and what followed
 
 Defaults read from Hugging Face (no daily download cap). Use --store b2 only if you must; it is counted against a budget.
 Environment: HF_TOKEN (private repo), B2_KEY_ID / B2_APP_KEY (only for --store b2),
@@ -18,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd  # noqa: E402
 
 from engine.loader import B2Store, HFStore, LocalStore, MB, coverage_report, load_snapshots, plan_load  # noqa: E402
+from engine.itemview import detect_flips, item_history  # noqa: E402
 from engine.ordercheck import tier_order_evidence  # noqa: E402
 from engine.picker import PickerConfig, explain, item_stats, pick, publish_minutes  # noqa: E402
 
@@ -133,6 +136,65 @@ def run_order(store, args, reader=None):
     return ev
 
 
+def _et(ts):
+    return pd.Timestamp(ts).tz_localize("UTC").tz_convert("America/New_York").strftime("%a %m-%d %H:%M")
+
+
+def _load_all(store, args, reader=None):
+    start, end = date_range(args)
+    res = load_snapshots(store, "commodities", start, end, cache_dir=args.cache, on_error="skip", reader=reader,
+                         progress=print)
+    print(res.plan.describe())
+    print(f"{len(res.snapshots)} snapshots loaded, {len(res.skipped)} files skipped")
+    return res.snapshots
+
+
+def run_item(store, args, reader=None, names_fn=fetch_names):
+    ids = [int(x) for x in str(args.ids).replace(" ", "").split(",") if x]
+    snaps = _load_all(store, args, reader)
+    names = names_fn(ids)
+    for item in ids:
+        h = item_history(snaps, item)
+        print(f"\n== ITEM {item}: {names.get(item, '')} (times are US Eastern; sold_* are units estimated sold in the hour before) ==")
+        if h.empty:
+            print("  not in the loaded data")
+            continue
+        h = h.copy()
+        h.insert(0, "when_et", h["ts"].map(_et))
+        show = h[["when_et", "floor_gold", "units_at_floor", "units_within_10pct", "units_listed", "new_units",
+                  "sold_low", "sold_est", "sold_high"]].round(2)
+        print(show.to_string(index=False))
+    return snaps
+
+
+def run_flips(store, args, reader=None, names_fn=fetch_names):
+    snaps = _load_all(store, args, reader)
+    ev = detect_flips(snaps)
+    print("\n== MARKET FLIPS: lowest price jumped 30%+ and most of the cheap units vanished ==")
+    if ev.empty:
+        print("  none found")
+        return ev
+    flips = ev[ev["verdict"] == "flip / buyout"]
+    print(f"  {len(ev)} jumps found: {len(flips)} look like buyouts, {len(ev) - len(flips)} are probably expiry or cancels")
+    if len(flips):
+        rev = flips["revert_hours"].dropna()
+        print(f"  buyouts whose price came back down within the data: {len(rev)} of {len(flips)}"
+              + (f"; median {rev.median():.1f} h, 25th pct {rev.quantile(.25):.1f} h, 75th pct {rev.quantile(.75):.1f} h" if len(rev) else ""))
+        print(f"  median price jump: {flips['jump'].median():.2f}x; median units bought out: {flips['units_removed'].median():.0f}")
+        print(f"  median units sold while elevated (estimate): {flips['sold_est_while_elevated'].median():.0f}")
+    names = names_fn(flips.sort_values("t1", ascending=False).head(25)["item_id"].tolist())
+    show = flips.sort_values("t1", ascending=False).head(25).copy()
+    show.insert(0, "when_et", show["t1"].map(_et))
+    show.insert(1, "name", show["item_id"].map(lambda i: names.get(int(i), "")))
+    cols = ["when_et", "item_id", "name", "floor_before_gold", "floor_after_gold", "jump", "units_removed",
+            "revert_hours", "still_elevated_at_end", "sold_est_while_elevated"]
+    print("\n  most recent buyouts:")
+    print(show[cols].round(2).to_string(index=False))
+    os.makedirs(args.out, exist_ok=True)
+    ev.to_csv(os.path.join(args.out, "flips.csv"), index=False)
+    return ev
+
+
 def _has_tabulate():
     try:
         import tabulate  # noqa: F401
@@ -143,7 +205,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "pick", "order"])
+    ap.add_argument("command", choices=["plan", "pick", "order", "item", "flips"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -153,11 +215,12 @@ def main(argv=None):
     ap.add_argument("--max-gb", type=float, default=0.8, help="B2 only: stop before downloading more than this per UTC day")
     ap.add_argument("--max-position-gold", type=float, default=150.0)
     ap.add_argument("--n-items", type=int, default=6)
+    ap.add_argument("--ids", default="", help="item ids, comma separated (for the item command)")
     ap.add_argument("--min-floor-gold", type=float, default=1.0)
     ap.add_argument("--max-units", type=int, default=300)
     args = ap.parse_args(argv)
     store = make_store(args)
-    return {"plan": run_plan, "pick": run_pick, "order": run_order}[args.command](store, args)
+    return {"plan": run_plan, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips}[args.command](store, args)
 
 
 if __name__ == "__main__":
