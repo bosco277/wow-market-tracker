@@ -3,6 +3,7 @@
     python tools/lake.py plan --days 3          # how many files / MB would this touch? downloads nothing
     python tools/lake.py files --days 5         # which files exist, day by day (downloads nothing)
     python tools/lake.py inspect --days 4       # downloads each DAILY file and shows what is inside (timestamps, empty cells)
+    python tools/lake.py rates --ids 13466,42253 --days 4   # our estimated units sold per day for those items
     python tools/lake.py pick --days 4          # load recent commodity data, check it, write the experiment shortlist
     python tools/lake.py order --days 3         # is the oldest or the newest listing at a price bought first?
     python tools/lake.py item --ids 192841 --days 2   # hourly price, depth and estimated sales for one or more items
@@ -268,6 +269,32 @@ def run_item(store, args, reader=None, names_fn=fetch_names):
     return snaps
 
 
+def run_rates(store, args, reader=None, names_fn=fetch_names):
+    """One line per item: our estimated units sold per day (low / best / high), price and depth. For comparing with other sources."""
+    ids = [int(x) for x in str(args.ids).replace(" ", "").split(",") if x]
+    snaps = _load_all(store, args, reader)
+    _print_holes(snaps)
+    cfg = PickerConfig(window_hours=args.window_hours)
+    st = item_stats(snaps, cfg=cfg).set_index("item_id")
+    names = names_fn(ids)
+    rows = []
+    for i in ids:
+        if i not in st.index:
+            print(f"  item {i}: not in the loaded data")
+            continue
+        r = st.loc[i]
+        rows.append(dict(item_id=i, name=names.get(i, ""), floor_gold=r["floor_now"] / 10000.0, daily_low=r["daily_low"],
+                         daily_est=r["daily_est"], daily_high=r["daily_high"], hours_observed=r["observed_hours"],
+                         price_cv=r["price_cv"], active_share=r["active_share"], top_hour_share=r["top_interval_share"],
+                         units_near_floor=r["depth_10pct"]))
+    out = pd.DataFrame(rows)
+    print(f"\n== OUR SALES ESTIMATE PER DAY (last {cfg.window_hours:.0f} h of observed time; a FLOOR on true sales because of the blind spot) ==")
+    print(out.round(2).to_string(index=False) if len(out) else "  nothing to show")
+    os.makedirs(args.out, exist_ok=True)
+    out.to_csv(os.path.join(args.out, "rates.csv"), index=False)
+    return out
+
+
 def run_flips(store, args, reader=None, names_fn=fetch_names):
     snaps = _load_all(store, args, reader)
     _print_holes(snaps)
@@ -322,7 +349,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "pick", "order", "item", "flips"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "pick", "order", "item", "flips"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -339,7 +366,7 @@ def main(argv=None):
     ap.add_argument("--min-coverage", type=float, default=0.5, help="pick: share of the window that must have been observed")
     args = ap.parse_args(argv)
     store = make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips}[args.command](store, args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips}[args.command](store, args)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ name: Market tools
 #   pick   writes the shortlist of items for the buy/list experiment
 #   files  lists the files that exist, day by day, and which hours are missing (downloads nothing)
 #   inspect downloads each DAILY file and shows what is inside it (columns, empty cells, one line per snapshot time)
+#   rates  one line per item id you type in: our estimated units sold per day, price and depth (use days=4)
 #   plan   only counts files and MB (downloads nothing)
 #   order  checks whether the newest or the oldest listing at a price is bought first
 #   item   hourly price, depth and estimated sales for the item ids you type in
@@ -17,7 +18,7 @@ on:
       mode:
         description: "What to run"
         type: choice
-        options: [pick, files, inspect, plan, order, item, flips]
+        options: [pick, files, inspect, rates, plan, order, item, flips]
         default: pick
       days:
         description: "How many days of data to load (pick looks back 72 h, so 4 or more)"

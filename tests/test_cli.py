@@ -99,6 +99,17 @@ class TestCli(unittest.TestCase):
                 lake.run_inspect(LocalStore(args.root), args, reader=fake_reader)
             self.assertIn("different snapshot timestamps", buf.getvalue())
 
+    def test_rates_command_gives_one_line_per_item(self):
+        snaps = MarketSimulator(default_profiles(), seed=9).run(60).snapshots
+        with tempfile.TemporaryDirectory() as d:
+            args = self._lake(d, snaps)
+            args.ids, args.window_hours = "1002,1004,999999", 72.0
+            out = lake.run_rates(LocalStore(args.root), args, reader=fake_reader, names_fn=lambda ids: {1002: "Test Herb"})
+            self.assertEqual(list(out["item_id"]), [1002, 1004])
+            self.assertTrue((out["daily_low"] <= out["daily_est"] + 1e-9).all())
+            self.assertTrue((out["daily_est"] <= out["daily_high"] + 1e-9).all())
+            self.assertTrue(os.path.exists(os.path.join(d, "out", "rates.csv")))
+
     def test_pick_survives_a_big_hole_in_the_data_and_says_so(self):
         """The real failure: ~21 h with no snapshots made every item look like 'too little data'."""
         import contextlib
