@@ -91,6 +91,10 @@ def run_pick(store, args, reader=None, names_fn=fetch_names):
     if len(res.snapshots) < 3:
         print("Not enough snapshots to continue.")
         return None
+    last_book = res.snapshots[-1].book
+    whole_silver = float((last_book["unit_price"] % 100 == 0).mean())
+    print(f"\n== PRICE STEP CHECK ==\n  {whole_silver:.1%} of current listings are priced in whole silver "
+          f"(if ~100%, the smallest price step is 1 silver, not 1 copper)")
     mins = publish_minutes(res.snapshots)
     print("\n== WHEN BLIZZARD'S DATA REFRESHES (minute of the hour -> how many snapshots) ==")
     if int(mins.sum()) < 12:
@@ -161,6 +165,10 @@ def run_item(store, args, reader=None, names_fn=fetch_names):
             continue
         h = h.copy()
         h.insert(0, "when_et", h["ts"].map(_et))
+        d = h["sold_est"].dropna()
+        if len(d) and d.sum() > 0:
+            print(f"  demand shape: sales in {(d >= 1).mean():.0%} of hours; the single biggest hour is {d.max() / d.sum():.0%} of all estimated sales "
+                  f"({d.sum():.0f} units over {len(d)} hours)")
         show = h[["when_et", "floor_gold", "units_at_floor", "units_within_10pct", "units_listed", "new_units",
                   "sold_low", "sold_est", "sold_high"]].round(2)
         print(show.to_string(index=False))

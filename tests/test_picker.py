@@ -8,11 +8,12 @@ from engine.picker import PickerConfig, explain, item_stats, pick, publish_minut
 from engine.simulator import MarketSimulator, default_profiles
 
 
-def stats_row(item, daily_est=500.0, floor=10_000, cv=0.05, depth=5000, hours=40.0, cov=0.9):
+def stats_row(item, daily_est=500.0, floor=10_000, cv=0.05, depth=5000, hours=40.0, cov=0.9, top=0.15, active=0.7):
     return dict(item_id=item, daily_low=daily_est * 0.7, daily_est=daily_est, daily_high=daily_est * 1.4,
                 observed_hours=hours, coverage=cov, n_intervals=40, floor_median=floor, floor_std=floor * cv,
                 floor_mean=floor, n_floor=40, price_cv=cv, floor_now=floor, depth_10pct=depth, n_listings=30,
-                hourly_high=daily_est * 1.4 / 24, hourly_est=daily_est / 24)
+                hourly_high=daily_est * 1.4 / 24, hourly_est=daily_est / 24,
+                top_interval_share=top, active_share=active)
 
 
 class TestPick(unittest.TestCase):
@@ -27,12 +28,14 @@ class TestPick(unittest.TestCase):
             stats_row(7, daily_est=50_000),     # too fast
             stats_row(8, floor=100, daily_est=2000.0),   # 1 silver item: price too low (and would need thousands of units)
             stats_row(9, floor=10_000, daily_est=4000.0),  # fine price but would need more than 300 units
+            stats_row(10, top=0.8),             # one hour is 80% of all its sales: lumpy, a few big buyouts
+            stats_row(11, active=0.1),          # sells in only 10% of hours
         ])
         got = pick(s)
         self.assertEqual(list(got["item_id"]), [1])
         why = explain(s)
         self.assertEqual((why["too_slow"], why["price_too_jumpy"], why["too_little_data"], why["too_fast"]), (1, 1, 1, 1))
-        self.assertEqual((why["price_too_low"], why["too_many_units"]), (1, 2))  # items 7 and 9 both need > 300 units
+        self.assertEqual((why["price_too_low"], why["too_many_units"], why["lumpy_demand"]), (1, 2, 2))  # items 7 and 9 both need > 300 units
 
     def test_position_cost_and_size_rules_hold_for_everything_picked(self):
         rng = np.random.default_rng(3)

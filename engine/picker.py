@@ -41,6 +41,8 @@ class PickerConfig:
     min_depth_multiple: float = 3.0      # units within +10% of the floor must be >= this x buy_units
     n_items: int = 6
     snapshot_interval_hours: float = 1.0
+    max_top_interval_share: float = 0.5  # lumpy demand: one single hour may not be more than this share of all sales
+    min_active_share: float = 0.3        # share of hours with at least one estimated sale
 
 
 def item_stats(snapshots: Sequence[Snapshot], now: Optional[pd.Timestamp] = None, cfg: PickerConfig = PickerConfig(),
@@ -65,6 +67,14 @@ def item_stats(snapshots: Sequence[Snapshot], now: Optional[pd.Timestamp] = None
     fs = floors.groupby("item_id")["floor"].agg(floor_median="median", floor_std="std", floor_mean="mean", n_floor="count")
     fs["price_cv"] = (fs["floor_std"] / fs["floor_mean"]).fillna(0.0)
 
+    w = intervals[(intervals["t1"] > start) & (intervals["t1"] <= now) & ~(intervals["flag_wipe"] | intervals["flag_long_gap"])].copy()
+    w["active"] = w["sold_est"] >= 1.0
+    g = w.groupby("item_id")
+    lump = pd.DataFrame({
+        "top_interval_share": (g["sold_est"].max() / g["sold_est"].sum().where(g["sold_est"].sum() > 0)).fillna(1.0),
+        "active_share": g["active"].mean(),
+    })
+
     last = [s for s in snaps if s.ts <= now][-1]
     book = last.book
     cur_floor = book.groupby("item_id")["unit_price"].min().rename("floor_now")
@@ -73,7 +83,7 @@ def item_stats(snapshots: Sequence[Snapshot], now: Optional[pd.Timestamp] = None
     depth = near.groupby("item_id")["quantity"].sum().rename("depth_10pct")
     listings = book.groupby("item_id").size().rename("n_listings")
 
-    out = rates.drop(columns=["source"]).set_index("item_id").join([fs, cur_floor, depth, listings], how="inner")
+    out = rates.drop(columns=["source"]).set_index("item_id").join([fs, cur_floor, depth, listings, lump], how="inner")
     out["hourly_high"] = out["daily_high"] / 24.0 * cfg.snapshot_interval_hours
     out["hourly_est"] = out["daily_est"] / 24.0 * cfg.snapshot_interval_hours
     return out.reset_index()
@@ -102,6 +112,8 @@ def pick(stats: pd.DataFrame, cfg: PickerConfig = PickerConfig(), exclude: Seque
         & (df["position_gold"] <= cfg.max_position_gold)
         & (df["floor_now"] >= cfg.min_floor_gold * COPPER_PER_GOLD)
         & (df["buy_units"] <= cfg.max_units)
+        & (df["top_interval_share"] <= cfg.max_top_interval_share)
+        & (df["active_share"] >= cfg.min_active_share)
         & (df["depth_10pct"] >= cfg.min_depth_multiple * df["buy_units"])
     )
     cand = df[ok].copy()
@@ -128,7 +140,7 @@ def pick(stats: pd.DataFrame, cfg: PickerConfig = PickerConfig(), exclude: Seque
     short["median_floor_gold"] = short["floor_median"] / COPPER_PER_GOLD
     short["wowhead"] = "https://www.wowhead.com/item=" + short["item_id"].astype(str)
     cols = ["item_id", "speed", "floor_gold", "median_floor_gold", "price_cv", "daily_low", "daily_est", "daily_high",
-            "hourly_est", "buy_units", "back_lane_units_ahead", "position_gold", "depth_10pct", "n_listings", "observed_hours", "wowhead"]
+            "hourly_est", "active_share", "top_interval_share", "buy_units", "back_lane_units_ahead", "position_gold", "depth_10pct", "n_listings", "observed_hours", "wowhead"]
     return short[cols]
 
 
@@ -148,6 +160,7 @@ def explain(stats: pd.DataFrame, cfg: PickerConfig = PickerConfig()) -> dict:
         "position_too_expensive": int((df["position_gold"] > cfg.max_position_gold).sum()),
         "price_too_low": int((df["floor_now"] < cfg.min_floor_gold * COPPER_PER_GOLD).sum()),
         "too_many_units": int((df["buy_units"] > cfg.max_units).sum()),
+        "lumpy_demand": int(((df["top_interval_share"] > cfg.max_top_interval_share) | (df["active_share"] < cfg.min_active_share)).sum()),
         "book_too_thin": int((df["depth_10pct"] < cfg.min_depth_multiple * df["buy_units"]).sum()),
     }
 
