@@ -34,6 +34,9 @@ on:
       max_units:
         description: "pick: most units to buy for any one item"
         default: "300"
+      n_items:
+        description: "pick: how many items to shortlist"
+        default: "6"
 
 jobs:
   run:
@@ -67,9 +70,10 @@ jobs:
           MAXPOS: ${{ inputs.max_position_gold }}
           MINFLOOR: ${{ inputs.min_floor_gold }}
           MAXUNITS: ${{ inputs.max_units }}
+          NITEMS: ${{ inputs.n_items }}
         run: |
           mkdir -p out
-          python tools/lake.py "$MODE" --store hf --days "$DAYS" --ids "$IDS" --max-position-gold "$MAXPOS" --min-floor-gold "$MINFLOOR" --max-units "$MAXUNITS" | tee out.txt
+          python tools/lake.py "$MODE" --store hf --days "$DAYS" --ids "$IDS" --max-position-gold "$MAXPOS" --min-floor-gold "$MINFLOOR" --max-units "$MAXUNITS" --n-items "$NITEMS" | tee out.txt
           { echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save results

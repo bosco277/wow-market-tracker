@@ -430,10 +430,16 @@ def normalize_frame(df: pd.DataFrame, source: str) -> pd.DataFrame:
     out["item_id"] = ids
     out = out[out["item_id"].notna()].copy()
     out["item_id"] = out["item_id"].astype("int64")
+    # Older rows of a mixed day have EMPTY variant_key / source cells. Fill them: a later groupby on (source, time)
+    # silently drops rows whose key is empty, which is how a whole stretch of a day can vanish.
     if "variant_key" not in out.columns:
         out["variant_key"] = out["item_id"].astype(str)
+    else:
+        out["variant_key"] = out["variant_key"].astype(object).where(out["variant_key"].notna(), out["item_id"].astype(str))
     if "source" not in out.columns:
         out["source"] = source
+    else:
+        out["source"] = out["source"].astype(object).where(out["source"].notna(), source)
     if "unit_price" not in out.columns and "buyout" not in out.columns:
         raise LoaderError("file has neither unit_price nor buyout")
     if "snapshot_ts" not in out.columns and "scan_timestamp" not in out.columns:
@@ -454,12 +460,14 @@ class LoadResult:
     requests: int
     skipped: List[tuple] = field(default_factory=list)  # (key, reason)
     duplicates_dropped: int = 0
+    incomplete_dropped: List[tuple] = field(default_factory=list)  # (timestamp, listings, typical listings)
 
 
 def load_snapshots(
     store: Store, source: str, start: date, end: date, item_ids: Optional[Iterable[int]] = None,
     cache_dir: Optional[str] = None, max_bytes: Optional[int] = None, on_error: str = "raise",
     block_size: int = 4 * MB, reader: Optional[Callable] = None, progress: Optional[Callable[[str], None]] = None,
+    min_listing_fraction: float = 0.5,
 ) -> LoadResult:
     """Loads snapshots for `source` between two UTC dates (inclusive).
 
@@ -520,10 +528,25 @@ def load_snapshots(
     lo = pd.Timestamp(start)
     hi = pd.Timestamp(end) + pd.Timedelta(days=1)
     unique = [s for s in unique if lo <= s.ts < hi]
+    # A fetch that captured only part of the book (the first real files hold 15-30k listings where a full book has
+    # ~265k) would look like thousands of sales and new listings. Treat such a snapshot as MISSING instead.
+    incomplete: List[tuple] = []
+    if ids is None and len(unique) >= 5 and min_listing_fraction > 0:
+        sizes = pd.Series([len(x.book) for x in unique])
+        typical = float(sizes.median())
+        keep = []
+        for x, n in zip(unique, sizes):
+            if n < min_listing_fraction * typical:
+                incomplete.append((x.ts, int(n), int(typical)))
+            else:
+                keep.append(x)
+        unique = keep
+        for ts, n, t in incomplete:
+            say(f"  WARNING snapshot {ts} has only {n:,} listings (typical {t:,}): treated as missing")
     if ids is not None:
         for s in unique:
             s.covered_items = frozenset(ids)
-    return LoadResult(unique, plan, budget.session_bytes, budget.requests, skipped, dups)
+    return LoadResult(unique, plan, budget.session_bytes, budget.requests, skipped, dups, incomplete)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

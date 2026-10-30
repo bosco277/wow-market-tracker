@@ -85,6 +85,8 @@ def run_pick(store, args, reader=None, names_fn=fetch_names):
           f"{len(res.snapshots)} snapshots; {res.duplicates_dropped} duplicates dropped; {len(res.skipped)} files skipped")
     for key, why in res.skipped:
         print(f"  SKIPPED {key}: {why}")
+    if res.incomplete_dropped:
+        print(f"  {len(res.incomplete_dropped)} snapshots had far fewer listings than usual (partial fetches) and were left out")
 
     rep = coverage_report(res.snapshots)
     print("\n== DATA HEALTH ==")

@@ -228,15 +228,21 @@ class TestLoading(LakeCase):
         self.assertEqual(r.duplicates_dropped, 1)
 
     def _mixed_day(self, day_snaps):
-        """A compacted day that mixes layouts: older hours (clean_item_id, no snapshot_ts), newer hours (item_id, snapshot_ts)."""
+        """Shaped like the real 2026-10-29 daily file: older hours have item_id <NA>, an empty source / variant_key /
+        snapshot_ts and only clean_item_id + scan_timestamp; newer hours have everything."""
         half = len(day_snaps) // 2
-        old = as_fetch_v2_frame(day_snaps[:half])
-        old["clean_item_id"] = old["item"].map(lambda x: x["id"])
-        old = old.drop(columns=["item_id", "variant_key", "snapshot_ts", "schema_version", "item"])
-        old["scan_timestamp"] = [t for t in pd.concat([pd.Series([x.ts] * len(x.book)) for x in day_snaps[:half]], ignore_index=True)]
-        new = as_fetch_v2_frame(day_snaps[half:])
-        new["clean_item_id"] = float("nan")
-        return pd.concat([old, new], ignore_index=True)
+        full = as_fetch_v2_frame(day_snaps)
+        full["clean_item_id"] = full["item"].map(lambda x: x["id"]).astype("int64")
+        full["item_id"] = full["item_id"].astype("Int64")
+        full = full.drop(columns=["item"])
+        scan = pd.concat([pd.Series([x.ts] * len(x.book)) for x in day_snaps], ignore_index=True)
+        n_old = sum(len(x.book) for x in day_snaps[:half])
+        full.loc[:n_old - 1, "item_id"] = pd.NA
+        full.loc[:n_old - 1, "variant_key"] = None
+        full.loc[:n_old - 1, "source"] = None
+        full.loc[:n_old - 1, "snapshot_ts"] = pd.NaT
+        full.loc[:n_old - 1, "scan_timestamp"] = scan[:n_old].to_numpy()
+        return full
 
     def test_mixed_layout_day_keeps_the_older_rows(self):
         """The suspected real failure: item_id present for new rows made the loader ignore clean_item_id for old rows."""
@@ -248,6 +254,17 @@ class TestLoading(LakeCase):
         self.assertEqual(got, want)
         first = r.snapshots[0]
         self.assertEqual(len(first.book), len(day[0].book))
+
+    def test_a_snapshot_with_only_a_fraction_of_the_usual_listings_is_treated_as_missing(self):
+        snaps = list(self.snaps[:12])
+        part = snaps[5]
+        snaps[5] = type(part)(part.source, part.ts, part.book.iloc[: max(1, len(part.book) // 10)].reset_index(drop=True),
+                              kind=part.kind, meta=dict(part.meta))
+        self.write_hourly(snaps=snaps)
+        r = load_snapshots(LocalStore(self.lake), SRC, snaps[0].ts.date(), snaps[-1].ts.date(), cache_dir=self.cache, reader=fake_reader)
+        self.assertEqual(len(r.snapshots), 11)
+        self.assertEqual([t for t, _, _ in r.incomplete_dropped], [part.ts])
+        self.assertNotIn(part.ts, [x.ts for x in r.snapshots])
 
     def test_a_cache_written_by_the_old_loader_is_not_reused(self):
         c = Cache(self.cache, "local")

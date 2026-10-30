@@ -106,6 +106,15 @@ the **low** bound. Verify them before trusting low bounds. Everything is paramet
 
 ### Holes in our own data
 
+**CONFIRMED CAUSE of the "21-hour hole" (v0.4.5).** `inspect` on the real files showed the Oct 29 daily file holds all its
+hours (continuous hourly fetch times from Wed 10-28 21:01 ET to Thu 10-29 16:01 ET, then publish times from 16:33). It mixes
+layouts: 5,255,352 of its 6,046,896 rows (the fetch-time hours) have an empty `item_id`, `snapshot_ts`, `source` and
+`variant_key` but a full `clean_item_id`. Two loader bugs removed them: (1) `clean_item_id` was ignored because an
+`item_id` column existed; (2) even with the id recovered, rows with an EMPTY `source` were silently dropped by the grouping
+step. Real gaps are only the short ones (Tue 10-27 09:31-12:01 ET, Wed 10-28 17:01-19:50 ET). Also: the first 23 snapshots
+of the Oct 26 file (Sun 10-25 20:31 to Mon 10-26 18:31 ET) hold 13-31k listings where a full book has ~265k (partial
+fetches); the loader now treats any snapshot under 50% of the typical listing count as missing and says so.
+
 **Mixed-layout days (v0.4.4):** a compacted daily file can mix older hours (item id in `clean_item_id`, no `snapshot_ts`)
 with newer hours (`item_id`, `snapshot_ts`). v0.4.3 and earlier read `clean_item_id` only when the file had NO `item_id`
 column, so on a mixed day every older row was dropped without a warning. The loader now takes the item id row by row from
