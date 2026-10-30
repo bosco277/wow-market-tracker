@@ -14,4 +14,4 @@ from .classifier import (  # noqa: F401
     classify_transitions,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"

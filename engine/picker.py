@@ -36,6 +36,8 @@ class PickerConfig:
     detect_factor: float = 2.0           # buy this many "normal hourly sales"
     min_units: int = 10
     max_position_gold: float = 150.0     # most money in play for ONE item at once
+    min_floor_gold: float = 1.0          # below this a 1-copper undercut is meaningless and the AH rounding dominates
+    max_units: int = 300                 # most units you have to buy and post for one item (bag space, clicking)
     min_depth_multiple: float = 3.0      # units within +10% of the floor must be >= this x buy_units
     n_items: int = 6
     snapshot_interval_hours: float = 1.0
@@ -98,6 +100,8 @@ def pick(stats: pd.DataFrame, cfg: PickerConfig = PickerConfig(), exclude: Seque
         & df["daily_est"].between(cfg.min_daily_est, cfg.max_daily_est)
         & (df["price_cv"] <= cfg.max_price_cv)
         & (df["position_gold"] <= cfg.max_position_gold)
+        & (df["floor_now"] >= cfg.min_floor_gold * COPPER_PER_GOLD)
+        & (df["buy_units"] <= cfg.max_units)
         & (df["depth_10pct"] >= cfg.min_depth_multiple * df["buy_units"])
     )
     cand = df[ok].copy()
@@ -142,12 +146,15 @@ def explain(stats: pd.DataFrame, cfg: PickerConfig = PickerConfig()) -> dict:
         "too_fast": int((df["daily_est"] > cfg.max_daily_est).sum()),
         "price_too_jumpy": int((df["price_cv"] > cfg.max_price_cv).sum()),
         "position_too_expensive": int((df["position_gold"] > cfg.max_position_gold).sum()),
+        "price_too_low": int((df["floor_now"] < cfg.min_floor_gold * COPPER_PER_GOLD).sum()),
+        "too_many_units": int((df["buy_units"] > cfg.max_units).sum()),
         "book_too_thin": int((df["depth_10pct"] < cfg.min_depth_multiple * df["buy_units"]).sum()),
     }
 
 
 def publish_minutes(snapshots: Sequence[Snapshot]) -> pd.Series:
-    """How often Blizzard's data refreshes at each minute of the hour (from the snapshot times). Tells you when to
-    post so a listing lands just AFTER a refresh and we can see it in the very next one."""
-    mins = pd.Series([s.ts.minute for s in snapshots])
+    """How often Blizzard's data refreshes at each minute of the hour. ONLY snapshots that carry Blizzard's own
+    publish time count: older files only record when we fetched, which just echoes our fetch schedule."""
+    real = [s for s in snapshots if s.meta.get("ts_source") != "scan_timestamp"]
+    mins = pd.Series([s.ts.minute for s in real], dtype="int64")
     return mins.value_counts().sort_index()

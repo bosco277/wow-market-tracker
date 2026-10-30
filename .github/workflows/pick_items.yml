@@ -17,6 +17,12 @@ on:
       max_position_gold:
         description: "Most gold in play for any one item"
         default: "150"
+      min_floor_gold:
+        description: "Skip items cheaper than this (gold per unit)"
+        default: "1"
+      max_units:
+        description: "Most units to buy for any one item"
+        default: "300"
 
 jobs:
   pick:
@@ -52,7 +58,7 @@ jobs:
           BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
           BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
         run: |
-          python tools/lake.py pick --store hf --days ${{ inputs.days }} --max-position-gold ${{ inputs.max_position_gold }} | tee out.txt
+          python tools/lake.py pick --store hf --days ${{ inputs.days }} --max-position-gold ${{ inputs.max_position_gold }} --min-floor-gold ${{ inputs.min_floor_gold }} --max-units ${{ inputs.max_units }} | tee out.txt
           mkdir -p out
           { echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 

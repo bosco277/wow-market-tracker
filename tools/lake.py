@@ -88,9 +88,14 @@ def run_pick(store, args, reader=None, names_fn=fetch_names):
         return None
     mins = publish_minutes(res.snapshots)
     print("\n== WHEN BLIZZARD'S DATA REFRESHES (minute of the hour -> how many snapshots) ==")
-    print("  " + ", ".join(f":{int(m):02d} x{int(c)}" for m, c in mins.items()))
+    if int(mins.sum()) < 12:
+        print(f"  Not enough yet: only {int(mins.sum())} snapshots carry Blizzard's own publish time "
+              f"(the rest only record when we fetched). Re-run once there are 24 or more.")
+    else:
+        print("  " + ", ".join(f":{int(m):02d} x{int(c)}" for m, c in mins.items()))
 
-    cfg = PickerConfig(max_position_gold=args.max_position_gold, n_items=args.n_items)
+    cfg = PickerConfig(max_position_gold=args.max_position_gold, n_items=args.n_items,
+                       min_floor_gold=args.min_floor_gold, max_units=args.max_units)
     stats = item_stats(res.snapshots, cfg=cfg)
     short = pick(stats, cfg)
     print("\n== WHY ITEMS WERE REJECTED ==")
@@ -134,6 +139,8 @@ def main(argv=None):
     ap.add_argument("--max-gb", type=float, default=0.8, help="B2 only: stop before downloading more than this per UTC day")
     ap.add_argument("--max-position-gold", type=float, default=150.0)
     ap.add_argument("--n-items", type=int, default=6)
+    ap.add_argument("--min-floor-gold", type=float, default=1.0)
+    ap.add_argument("--max-units", type=int, default=300)
     args = ap.parse_args(argv)
     store = make_store(args)
     return (run_plan if args.command == "plan" else run_pick)(store, args)

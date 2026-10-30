@@ -26,7 +26,7 @@ class TestCli(unittest.TestCase):
             args = argparse.Namespace(
                 store="local", root=os.path.join(d, "lake"), days=3, end=str(snaps[-1].ts.date()),
                 cache=os.path.join(d, "cache"), out=os.path.join(d, "out"), max_gb=0.8,
-                max_position_gold=1e9, n_items=8)
+                max_position_gold=1e9, n_items=8, min_floor_gold=0.0, max_units=10**9)
             plan = lake.run_plan(LocalStore(args.root), args)
             self.assertEqual(len(plan.files), len(snaps))
             short = lake.run_pick(LocalStore(args.root), args, reader=fake_reader, names_fn=lambda ids: {1002: "Test Herb"})

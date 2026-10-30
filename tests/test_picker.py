@@ -25,11 +25,14 @@ class TestPick(unittest.TestCase):
             stats_row(5, depth=10),             # book too thin
             stats_row(6, hours=3, cov=0.1),     # not enough data
             stats_row(7, daily_est=50_000),     # too fast
+            stats_row(8, floor=100, daily_est=2000.0),   # 1 silver item: price too low (and would need thousands of units)
+            stats_row(9, floor=10_000, daily_est=4000.0),  # fine price but would need more than 300 units
         ])
         got = pick(s)
         self.assertEqual(list(got["item_id"]), [1])
         why = explain(s)
         self.assertEqual((why["too_slow"], why["price_too_jumpy"], why["too_little_data"], why["too_fast"]), (1, 1, 1, 1))
+        self.assertEqual((why["price_too_low"], why["too_many_units"]), (1, 2))  # items 7 and 9 both need > 300 units
 
     def test_position_cost_and_size_rules_hold_for_everything_picked(self):
         rng = np.random.default_rng(3)
@@ -73,9 +76,12 @@ class TestItemStats(unittest.TestCase):
         d = st.set_index("item_id")["daily_est"]
         self.assertGreater(d[1004], d[1003])
 
-    def test_publish_minutes(self):
+    def test_publish_minutes_ignores_snapshots_that_only_know_the_fetch_time(self):
         res = MarketSimulator(default_profiles(), seed=2).run(10)
         self.assertEqual(int(publish_minutes(res.snapshots).sum()), len(res.snapshots))
+        for s in res.snapshots[:4]:
+            s.meta["ts_source"] = "scan_timestamp"
+        self.assertEqual(int(publish_minutes(res.snapshots).sum()), len(res.snapshots) - 4)
 
 
 if __name__ == "__main__":
