@@ -1,0 +1,48 @@
+date,time_posted,tz,Item,item_id,lane,list_price,quantity,units_sold,units_expired,Note 1
+2026-10-30,8:22 AM,EDT,Iceweb Spider Silk,42253,UNDER,0.99,45,45,,sold before 11:AM
+2026-10-30,8:22 AM,EDT,Iceweb Spider Silk,42253,SAME,1,45,,45,
+2026-10-30,8:25 AM,EDT,Mystic Sapphire,192841,UNDER,13.56,40,,40,abnormal market
+2026-10-30,8:23 AM,EDT,Mystic Sapphire,192841,SAME,13.57,40,,40,abnormal market
+2026-10-30,8:24 AM,EDT,Profaned Tinderbox,221758,UNDER,2.48,35,35,,sold before 11:AM
+2026-10-30,8:24 AM,EDT,Profaned Tinderbox,221758,SAME,2.49,35,35,,sold before 11:AM
+2026-10-30,9:15 AM,EDT,Oil of Dawn,243735,UNDER,1.18,35,,35,
+2026-10-30,9:15 AM,EDT,Oil of Dawn,243735,SAME,1.19,35,,35,
+2026-10-30,9:16 AM,EDT,Denshroom Deep Roast,260274,UNDER,0.99,75,,75,
+2026-10-30,9:15 AM,EDT,Denshroom Deep Roast,260274,SAME,1,75,,75,
+2026-10-30,9:16 AM,EDT,Laribole,154124,UNDER,3.67,15,,15,
+2026-10-30,9:16 AM,EDT,Laribole,154124,SAME,3.68,15,,15,
+2026-10-30,11:07 AM,EDT,Refulgent Crystal,219952,UNDER,1.05,125,125,,"bought across two price zones, 1.05x41 and 1.06 reamining"
+2026-10-30,11:07 AM,EDT,Refulgent Crystal,219952,SAME,1.06,125,,125,"bought across two price zones, 1.05x41 and 1.06 reamining"
+2026-10-30,11:08 AM,EDT,Eternal Earth,35624,UNDER,2.18,75,75,,"bought across two price zones, 2.18x126 and 2.19 reamining"
+2026-10-30,11:08 AM,EDT,Eternal Earth,35624,SAME,2.19,75,75,,"bought across two price zones, 1.05x41 and 1.06 reamining"
+2026-10-30,11:10 AM,EDT,Algari Healing Potion,211880,UNDER,2.49,45,,45,
+2026-10-30,11:10 AM,EDT,Algari Healing Potion,211880,SAME,2.5,45,,45,
+2026-10-30,11:11 AM,EDT,Swiftness Potion,2459,UNDER,5.44,30,7,23,7 as of 3 PM
+2026-10-30,11:11 AM,EDT,Swiftness Potion,2459,SAME,5.45,30,,30,
+2026-10-30,11:12 AM,EDT,Invigorating Healing Potion,244838,UNDER,2.99,75,,75,
+2026-10-30,11:12 AM,EDT,Invigorating Healing Potion,244838,SAME,3,75,,75,
+2026-10-30,11:13 AM,EDT,Primordial Saronite,49908,UNDER,7.03,30,,30,
+2026-10-30,11:13 AM,EDT,Primordial Saronite,49908,SAME,7.04,30,,30,
+2026-10-30,11:13 AM,EDT,Algari Mana Oil,224107,UNDER,2.75,75,75,,75 as of 3 PM
+2026-10-30,11:13 AM,EDT,Algari Mana Oil,224107,SAME,2.76,75,,75,
+2026-10-30,11:14 AM,EDT,Dawnlight,130180,UNDER,10.85,10,2,8,2 as of 3 PM
+2026-10-30,11:14 AM,EDT,Dawnlight,130180,SAME,10.86,10,,10,
+2026-10-30,11:16 AM,EDT,Sorrowmoss,13466,UNDER,5.84,35,35,,
+2026-10-30,11:16 AM,EDT,Sorrowmoss,13466,SAME,5.85,35,35,,
+2026-10-30,11:18 AM,EDT,Profaned Tinderbox,221758,UNDER,2.99,35,,35,
+2026-10-30,11:18 AM,EDT,Profaned Tinderbox,221758,SAME,3,34,,34,
+2026-10-30,10:52 PM,EDT,Iceweb Spider Silk,42253,UNDER,0.99,45,45,,
+2026-10-30,10:52 PM,EDT,Iceweb Spider Silk,42253,SAME,1,45,45,,
+2026-10-30,10:54 PM,EDT,Sorrowmoss,13466,UNDER,8.98,35,15,20,
+2026-10-30,10:55 PM,EDT,Sorrowmoss,13466,SAME,8.99,40,,40,
+2026-10-30,10:55 PM,EDT,Eternal Earth,35624,UNDER,6.02,15,,15,
+2026-10-30,10:55 PM,EDT,Eternal Earth,35624,SAME,6.03,18,,18,
+2026-10-30,10:56 PM,EDT,Laribole,154124,UNDER,3.59,15,,15,
+2026-10-30,10:56 PM,EDT,Laribole,154124,SAME,3.6,15,,15,
+2026-10-30,10:57 PM,EDT,Mystic Sapphire,192841,UNDER,4.46,40,,40,abnormal market
+2026-10-30,10:57 PM,EDT,Mystic Sapphire,192841,SAME,4.47,40,,40,abnormal market
+2026-10-30,10:58 PM,EDT,Oil of Dawn,243735,UNDER,1.16,40,20,20,
+2026-10-30,10:58 PM,EDT,Oil of Dawn,243735,SAME,1.17,45,,45,
+2026-10-30,10:58 PM,EDT,Denshroom Deep Roast,260274,UNDER,0.99,75,,75,
+2026-10-30,10:58 PM,EDT,Denshroom Deep Roast,260274,SAME,1,75,,75,
+2026-10-30,3:26 PM,EDT,Eternal Crystal,172232,UNDER,2.11,306,306,,"Flipped, purchaed all for 1.73 or 1.75 gold. Left 64 auctions up at 2.09 and sold within 12 hours"
