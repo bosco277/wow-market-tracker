@@ -26,7 +26,7 @@ import pandas as pd  # noqa: E402
 
 from engine.loader import ByteBudget, NEEDED_COLUMNS, RangeFile, normalize_frame, read_parquet_file, B2Store, HFStore, LocalStore, MB, coverage_report, day_inventory, choose_files, load_snapshots, plan_load  # noqa: E402
 from engine.itemview import detect_flips, gaps_in, item_history, revert_share_within
-from engine.market import (find_shelf, flag_spikes, item_series, price_bands, profile, reach_stats, tsm_style_market_value,
+from engine.market import (find_shelf, flag_blips, flag_spikes, item_series, price_bands, profile, reach_stats, tsm_style_market_value,
                            wall_report)  # noqa: E402
 from engine.ordercheck import tier_order_evidence  # noqa: E402
 from engine.picker import PickerConfig, explain, item_stats, pick, publish_minutes  # noqa: E402
@@ -343,6 +343,9 @@ def run_market(store, args, reader=None, names_fn=fetch_names):
         print(f"  lowest price now {_g(now)} g. Typical range over {len(df)} hours (spikes and dips left out): "
               f"10%-90% = {_g(b['p10'])} - {_g(b['p90'])}, median {_g(b['p50'])}. Right now is at the {b['now_percentile']:.0%} mark of that range.")
         print(f"  {b['n_spike_hours']} spike hours and {b['n_dip_hours']} dip hours were left out (short jumps or drops that are not the normal level).")
+        if b["p10"] > 0 and b["p90"] / b["p10"] > 3.0:
+            print("  WARNING: the price lived at very different levels in this window (a lasting move, not a short spike). "
+                  "The range above mixes them; trust 'right now', the wall and the TSM-style value more than the range.")
         tsm = tsm_style_market_value(book_i) / 10000.0
         r["tsm_style_value"] = tsm
         print(f"  TSM-style market value from this book: {_g(tsm)} g (their 'cheapest 30%' method, without their 14-day smoothing)")
@@ -362,10 +365,14 @@ def run_market(store, args, reader=None, names_fn=fetch_names):
               f"({w['units_est']:,} units at or below the best wall)")
         print(f"  a listing AT the best wall waits (newest-first, no new cheaper listings): {_h(w['wait_high'])} / {_h(w['wait_est'])} / {_h(w['wait_low'])} "
               f"at high / best / low sales rate")
+        print(f"  time to FULLY sell {args.trade_units:,.0f} units listed at the best wall (units ahead + your own): "
+              f"{_h(w['sell_hours_high'])} / {_h(w['sell_hours_est'])} / {_h(w['sell_hours_low'])} at high / best / low sales rate")
         print(f"  deep market for a {args.trade_units:,.0f}-unit trade: {'YES' if w['deep_market'] else 'no'}; "
-              f"does the exact sales rate change what you would do? {'YES, it matters' if w['velocity_matters'] else 'no (sells inside 12 h even at the low rate)'}")
+              f"does the exact sales rate change what you would do? {'YES, it matters' if w['velocity_matters'] else 'no (fully sold inside 12 h even at the low rate)'}")
         rs = reach_stats(df, w["wall_est"] / 10000.0, horizon_hours=12.0)
-        if rs["n"]:
+        if 0 < rs["n"] < 10:
+            print(f"  history: only {rs['n']} starting hours with the price below {_g(w['wall_est'] / 10000)} g, too few to say how often it gets there")
+        elif rs["n"]:
             print(f"  history: the lowest price reached {_g(w['wall_est'] / 10000)} g within 12 h in {rs['share_reached']:.0%} of {rs['n']} starting hours"
                   + (f" (median {rs['median_hours']:.1f} h)" if rs["share_reached"] == rs["share_reached"] and rs["median_hours"] == rs["median_hours"] else ""))
             r.update(reach_share_12h=rs["share_reached"], reach_n=rs["n"])
@@ -407,25 +414,69 @@ def run_profile(store, args, reader=None, names_fn=fetch_names):
             print("  not in the loaded data")
             continue
         sp = flag_spikes(df["floor_gold"])
-        hod = profile(df, sp, by="none")
+        bl = flag_blips(df["units_listed"])
+        hod = profile(df, sp, by="none", blips=bl)
         weeks = int(hod["weeks"].iloc[0])
-        print(f"  {len(df)} hourly observations over {weeks} calendar week(s) of data; spike and dip hours ({int((sp != 0).sum())}) are left out. "
+        print(f"  {len(df)} hourly observations over {weeks} calendar week(s) of data; spike and dip hours ({int((sp != 0).sum())}) and "
+              f"feed-blip hours ({int(bl.sum())}) are left out. "
               f"{'DRAFT: ' if weeks < 3 else ''}the day-of-week grid has about {max(1, round(len(df) / (7 * 24)))} observation(s) per slot.")
-        show = hod[["block", "n_obs", "price_median", "price_p25", "price_p75", "units_median", "sold_per_hour"]].round(2)
-        show.columns = ["hour", "obs", "price_med", "price_p25", "price_p75", "units_listed_med", "est_sold_per_hour"]
-        print("  HOUR OF DAY (US Eastern, medians across days):")
+        show = hod[["block", "n_obs", "price_median", "price_vs_level", "units_median", "sold_per_hour", "sold_share"]].copy()
+        show["price_vs_level"] = (show["price_vs_level"] * 100).round(1)
+        show["sold_share"] = (show["sold_share"] * 100).round(1)
+        show = show.round(2)
+        show.columns = ["hour", "obs", "price_raw", "price_vs_day_%", "units_listed_med", "est_sold_per_hr", "share_of_sales_%"]
+        print("  HOUR OF DAY (US Eastern). price_vs_day_% compares each hour with that day's own level, so a week-long trend does not")
+        print("  look like an hourly effect; share_of_sales_% is each hour's part of the day's estimated sales (hourly sales are lumpy).")
         print(show.to_string(index=False))
-        how = profile(df, sp, by="dow", block_hours=4)
+        how = profile(df, sp, by="dow", block_hours=4, blips=bl)
         how.to_csv(os.path.join(args.out, f"profile_{i}.csv"), index=False)
-        for col, label in (("price_median", "price vs this item's overall median (%)"), ("units_median", "listed quantity vs its overall median (%)")):
-            base = float(how[col].median())
-            if not base or base != base:
-                continue
-            pv = how.pivot(index="dow", columns="block", values=col)
-            pv = (pv / base - 1.0) * 100.0
+        pv = how.pivot(index="dow", columns="block", values="price_vs_level") * 100.0
+        pv.index = [days[d] for d in pv.index]
+        _grid(pv, "price vs that day's own level (%)", lambda v: "." if v != v else f"{v:+.0f}")
+        base = float(how["units_median"].median())
+        if base and base == base:
+            pv = (how.pivot(index="dow", columns="block", values="units_median") / base - 1.0) * 100.0
             pv.index = [days[d] for d in pv.index]
-            _grid(pv, label, lambda v: "." if v != v else f"{v:+.0f}")
+            _grid(pv, "listed quantity vs its overall median (%)", lambda v: "." if v != v else f"{v:+.0f}")
     return series
+
+
+def run_reconcile(store, args, reader=None, names_fn=fetch_names):
+    """Compare the buy-and-list experiment log (a CSV in the repo) with the hourly snapshots."""
+    from engine.reconcile import read_log, reconcile, verdict_text
+    log = read_log(args.log)
+    if log.empty:
+        print(f"No usable rows in {args.log} (example rows and rows without a price or quantity are skipped).")
+        return pd.DataFrame()
+    for w in log.attrs.get("warnings", []):
+        print(f"  CHECK THE LOG: {w}")
+    first, last = log["posted_utc"].min(), log["posted_utc"].max()
+    print(f"Log: {len(log)} listings, first posted {_et(first)} ET, last {_et(last)} ET. Loading the snapshots around them.")
+    snaps = _load_all(store, args, reader)
+    _print_holes(snaps)
+    names = names_fn(sorted(log["item_id"].unique()))
+    per, summ = reconcile(snaps, log)
+    show = per.copy()
+    show["posted_ET"] = show["posted_utc"].map(_et)
+    show["name"] = show["item_id"].map(lambda i: str(names.get(int(i), ""))[:18])
+    cols = ["posted_ET", "name", "lane", "vs_floor_silver", "price_gold", "quantity", "units_sold", "units_expired", "appeared_share",
+            "observed_hours_to_clear", "pred_lifo_h_est", "pred_fifo_h_est", "status"]
+    cols = [c for c in cols if c in show.columns]
+    t = show[cols].copy()
+    for c in ("appeared_share",):
+        if c in t:
+            t[c] = (t[c] * 100).round(0)
+    t = t.rename(columns={"appeared_share": "seen_%", "observed_hours_to_clear": "cleared_h", "pred_lifo_h_est": "lifo_h", "pred_fifo_h_est": "fifo_h",
+                          "units_sold": "sold", "units_expired": "expired", "vs_floor_silver": "vs_floor_s", "quantity": "qty", "price_gold": "price"}).round(2)
+    print("\n== EACH LISTING (vs_floor_s = your price against the lowest price just before posting, in silver; seen_% = units that appeared at your price in the next snapshot / units you posted; cleared_h = hours until the")
+    print("   units at or below your price fell back to where they were; lifo_h / fifo_h = what each queue rule predicts at the recent sales rate) ==")
+    print(t.to_string(index=False))
+    print("\n== SUMMARY ==")
+    for line in verdict_text(summ):
+        print("  " + line)
+    os.makedirs(args.out, exist_ok=True)
+    per.to_csv(os.path.join(args.out, "reconcile.csv"), index=False)
+    return per
 
 
 def run_flips(store, args, reader=None, names_fn=fetch_names):
@@ -482,7 +533,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -497,11 +548,12 @@ def main(argv=None):
     ap.add_argument("--max-units", type=int, default=300)
     ap.add_argument("--horizon-hours", type=float, default=4.0, help="market: how many hours of sales the price wall must cover")
     ap.add_argument("--trade-units", type=float, default=500.0, help="market: the biggest trade you would make (for the deep-market test)")
+    ap.add_argument("--log", default="experiment_log.csv", help="reconcile: the experiment log CSV")
     ap.add_argument("--window-hours", type=float, default=72.0, help="pick: how far back item statistics look")
     ap.add_argument("--min-coverage", type=float, default=0.5, help="pick: share of the window that must have been observed")
     args = ap.parse_args(argv)
     store = make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips}[args.command](store, args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile}[args.command](store, args)
 
 
 if __name__ == "__main__":
