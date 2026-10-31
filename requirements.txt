@@ -1,9 +1,5 @@
-requests
+streamlit
 pandas
 pyarrow
-boto3
-huggingface_hub
-streamlit
-duckdb
 plotly
-numpy
+huggingface_hub
