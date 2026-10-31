@@ -448,6 +448,8 @@ def run_reconcile(store, args, reader=None, names_fn=fetch_names):
     if log.empty:
         print(f"No usable rows in {args.log} (example rows and rows without a price or quantity are skipped).")
         return pd.DataFrame()
+    for w in log.attrs.get("warnings", []):
+        print(f"  CHECK THE LOG: {w}")
     first, last = log["posted_utc"].min(), log["posted_utc"].max()
     print(f"Log: {len(log)} listings, first posted {_et(first)} ET, last {_et(last)} ET. Loading the snapshots around them.")
     snaps = _load_all(store, args, reader)

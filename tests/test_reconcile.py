@@ -160,5 +160,48 @@ class TestPastedLog(unittest.TestCase):
         self.assertFalse(bool(open_row["done"]))
 
 
+class TestRealSheetQuirks(unittest.TestCase):
+    """Quirks of the first real export: item_id came out as #N/A, and 'as of' notes stayed on finished rows."""
+    def test_na_item_ids_fall_back_to_the_item_name(self):
+        import io
+        csv = "\n".join([
+            "date,time_posted,tz,Item,item_id,lane,list_price,quantity,units_sold,units_expired,Note 1",
+            "2026-10-30,8:22 AM,EDT,Iceweb Spider Silk,#N/A,UNDER,0.99,45,45,,",
+            "2026-10-30,3:26 PM,EDT,Eternal Crystal,172232,UNDER,2.11,306,306,,flip",
+        ])
+        df = read_log(io.StringIO(csv))
+        self.assertEqual(sorted(df["item_id"]), [42253, 172232])
+        bad = csv.replace("Iceweb Spider Silk,#N/A", "Mystery Herb,#N/A")
+        with self.assertRaises(ValueError):
+            read_log(io.StringIO(bad))
+
+    def test_as_of_note_with_sold_plus_expired_equal_to_quantity_is_a_final_result(self):
+        import io
+        csv = "\n".join([
+            "date,time_posted,tz,Item,item_id,lane,list_price,quantity,units_sold,units_expired,Note 1",
+            "2026-10-30,11:11 AM,EDT,Swiftness Potion,2459,UNDER,5.44,30,7,23,7 as of 3 PM",
+            "2026-10-30,11:11 AM,EDT,Swiftness Potion,2459,SAME,5.45,30,7,,7 as of 3 PM",
+        ])
+        df = read_log(io.StringIO(csv)).sort_values("price_copper")
+        self.assertTrue(bool(df.iloc[0]["done"]))
+        self.assertEqual(float(df.iloc[0]["units_expired"]), 23.0)
+        self.assertTrue(bool(df.iloc[1]["in_progress"]))                       # 7 of 30 and no expired count: still running
+
+    def test_a_row_with_a_wrong_time_is_called_out(self):
+        import io
+        csv = "\n".join([
+            "date,time_posted,tz,Item,item_id,lane,list_price,quantity,units_sold,units_expired,Note 1",
+            "2026-10-30,11:16 AM,EDT,Sorrowmoss,13466,UNDER,5.84,35,35,,",
+            "2026-10-30,11:16 AM,EDT,Sorrowmoss,13466,SAME,5.85,35,35,,",
+            "2026-10-30,11:16 AM,EDT,Sorrowmoss,13466,SAME,8.99,40,,40,",
+            "2026-10-30,10:54 PM,EDT,Sorrowmoss,13466,UNDER,8.98,35,15,20,",
+        ])
+        df = read_log(io.StringIO(csv))
+        self.assertEqual(len(df.attrs["warnings"]), 1)
+        self.assertIn("13466", df.attrs["warnings"][0])
+        ok = read_log(io.StringIO(csv.replace("11:16 AM,EDT,Sorrowmoss,13466,SAME,8.99", "10:54 PM,EDT,Sorrowmoss,13466,SAME,8.99")))
+        self.assertEqual(ok.attrs["warnings"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

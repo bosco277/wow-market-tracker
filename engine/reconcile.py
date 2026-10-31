@@ -29,6 +29,13 @@ UTC_OFFSET_HOURS = {"EDT": -4, "EST": -5, "UTC": 0, "GMT": 0}
 LOG_COLUMNS = ["date", "time_posted", "tz", "item_id", "lane", "list_price", "quantity", "units_sold", "units_expired", "note"]
 
 
+ITEM_IDS_BY_NAME = {
+    "iceweb spider silk": 42253, "mystic sapphire": 192841, "profaned tinderbox": 221758, "oil of dawn": 243735,
+    "denshroom deep roast": 260274, "laribole": 154124, "refulgent crystal": 219952, "eternal earth": 35624,
+    "algari healing potion": 211880, "swiftness potion": 2459, "invigorating healing potion": 244838,
+    "primordial saronite": 49908, "algari mana oil": 224107, "dawnlight": 130180, "sorrowmoss": 13466,
+    "eternal crystal": 172232, "linen cloth": 2589,
+}
 COLUMN_ALIASES = {"note 1": "note", "notes": "note", "note1": "note", "comment": "note", "comments": "note"}
 LANE_WORDS = {"UNDER": "UNDER", "BELOW": "UNDER", "SAME": "SAME", "ABOVE": "SAME"}
 
@@ -52,11 +59,19 @@ def read_log(source) -> pd.DataFrame:
     if missing:
         raise ValueError(f"log is missing columns: {missing}")
     df = raw[LOG_COLUMNS].copy()
+    df["item_name"] = raw["item"] if "item" in raw.columns else ""
     for c in df.columns:
         df[c] = df[c].astype(str).str.strip()
     df = df[~df["note"].str.lower().str.startswith("example row")]
-    df = df[(df["item_id"] != "") & (df["quantity"] != "") & (df["list_price"] != "")].copy()
-    df["item_id"] = pd.to_numeric(df["item_id"]).astype("int64")
+    df = df[(df["quantity"] != "") & (df["list_price"] != "")].copy()
+    # item_id can arrive as "#N/A" from a failed sheet lookup: fall back to the item name
+    ids = pd.to_numeric(df["item_id"], errors="coerce")
+    by_name = df["item_name"].str.lower().map(ITEM_IDS_BY_NAME)
+    ids = ids.fillna(by_name)
+    if ids.isna().any():
+        bad = sorted(set(df.loc[ids.isna(), "item_name"].replace("", "(no name)")) | set(df.loc[ids.isna(), "item_id"]))
+        raise ValueError(f"cannot work out the item id for: {bad}; fill in item_id")
+    df["item_id"] = ids.astype("int64")
     df["quantity"] = pd.to_numeric(df["quantity"])
     df["list_price"] = pd.to_numeric(df["list_price"])
     for c in ("units_sold", "units_expired"):
@@ -74,11 +89,29 @@ def read_log(source) -> pd.DataFrame:
     sold, exp, q = df["units_sold"], df["units_expired"], df["quantity"]
     df["units_sold"] = sold.where(sold.notna(), (q - exp).where(exp.notna()))       # only expired filled in: the rest sold
     df["units_expired"] = exp.where(exp.notna(), pd.Series(0.0, index=df.index).where(df["units_sold"] >= q))
-    in_progress = as_of & (df["units_sold"] < q)
+    complete = (df["units_sold"] + df["units_expired"]) >= q - 0.5          # sold + expired accounts for every unit: final
+    in_progress = as_of & (df["units_sold"] < q) & ~complete
     df.loc[in_progress, ["units_sold", "units_expired"]] = np.nan
     df["done"] = df["units_sold"].notna()
     df["in_progress"] = in_progress
-    return df.sort_values("posted_utc").reset_index(drop=True)
+    df = df.sort_values("posted_utc").reset_index(drop=True)
+    df.attrs["warnings"] = check_log(df)
+    return df
+
+
+def check_log(df: pd.DataFrame, cluster_minutes: float = 30.0, max_spread: float = 0.10) -> List[str]:
+    """Things in the log that look like typos. Listings of one item posted within `cluster_minutes` of each other are one
+    batch (the UNDER and SAME rows); their prices should be within `max_spread` of each other."""
+    out = []
+    for item, g in df.groupby("item_id"):
+        g = g.sort_values("posted_utc")
+        cluster = (g["posted_utc"].diff() > pd.Timedelta(minutes=cluster_minutes)).cumsum()
+        for _, c in g.groupby(cluster):
+            if len(c) > 1 and c["price_copper"].max() > c["price_copper"].min() * (1 + max_spread):
+                when = c["posted_utc"].min()
+                out.append(f"item {int(item)}: listings posted together around {when:%Y-%m-%d %H:%M} UTC have prices "
+                           f"{c['list_price'].min():g} to {c['list_price'].max():g}; check the time or price of one of them")
+    return out
 
 
 def _item_books(snapshots: Sequence[Snapshot], item_ids) -> Dict[int, List[tuple]]:
