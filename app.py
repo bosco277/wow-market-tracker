@@ -28,6 +28,7 @@ def load(name: str) -> pd.DataFrame:
 
 items, hourly, prof = load("items"), load("item_hourly"), load("profile")
 cal, hist, exp, flips = load("calibration"), load("calibration_history"), load("experiment"), load("flips")
+shelves = load("shelves")
 if hist.empty:
     hist = cal
 
@@ -40,7 +41,7 @@ ver = items["engine_version"].iloc[0] if "engine_version" in items else "?"
 st.caption(f"Data {state}: built from snapshots up to {pd.Timestamp(cal['data_last_ts'].max()):%a %b %d %H:%M} UTC "
            f"({hrs:.1f} h ago) | engine {ver} | ranges are low - best - high; labels say how much to trust them")
 
-tab_market, tab_item, tab_exp, tab_conf = st.tabs(["Market", "Item", "Experiment", "Confidence"])
+tab_market, tab_flip, tab_item, tab_exp, tab_conf = st.tabs(["Market", "Flips", "Item", "Experiment", "Confidence"])
 
 # ---------------------------------------------------------------- Market
 with tab_market:
@@ -63,6 +64,36 @@ with tab_market:
             "Why": t["confidence_reason"],
         })
         st.dataframe(show, use_container_width=True, hide_index=True, height=560)
+
+# ---------------------------------------------------------------- Flips
+with tab_flip:
+    st.write("Cheap units sitting below a gap in the price tiers: buy them, relist at the tier above the gap. These are candidates to "
+             "check against the live auction house, not instructions. Limits per flip come from the engine run (units and gold).")
+    only = st.checkbox("Candidates only (hide weak)", value=False)
+    sh = lib.shelf_table(shelves, ("candidate",) if only else ("candidate", "weak"))
+    if sh.empty:
+        st.info("No shelves pass right now. That is normal; they are rare.")
+    else:
+        show = pd.DataFrame({
+            "Item": sh["name"].where(sh["name"] != "", sh["item_id"].astype(str)),
+            "Verdict": sh["verdict"],
+            "Buy (units)": sh["units"],
+            "Avg cost": sh["avg_price_gold"].map(lib.gsc),
+            "Break-even": sh["breakeven_gold"].map(lib.gsc),
+            "Relist at": sh["target_gold"].map(lib.gsc),
+            "Net margin": (sh["net_margin"] * 100).round(1).astype(str) + "%",
+            "If 10% under": (sh["net_margin_stress"] * 100).round(1).astype(str) + "%",
+            "Profit (at target / if 10% under)": [f"{lib.gsc(a)} / {lib.gsc(b)}" for a, b in zip(sh["profit_gold"], sh["profit_stress_gold"])],
+            "Hours to sell (best, high-low rate)": sh.apply(lib.shelf_hours, axis=1),
+            "Cost": sh["cost_gold"].map(lib.gsc),
+            **{c.replace("test_", "").title(): sh[c].map(lib.MARK) for c in lib.TEST_COLS},
+            "Item confidence": sh["confidence"],
+        })
+        st.dataframe(show, use_container_width=True, hide_index=True, height=520)
+        st.caption("Price: the lowest price has been at the target recently, inside its normal band. Speed: hours until your units and any cheaper "
+                   "units left ahead of you are bought, at the sales rate seen at that price. Size: your whole shelf fits the limits. "
+                   "Margin: still positive if you sell 10% under the target. Book: today's listing count is normal, not a partial snapshot. "
+                   "These do not know whether someone else will undercut you or whether the cheap units belong to another flipper.")
 
 # ---------------------------------------------------------------- Item
 with tab_item:
@@ -111,6 +142,14 @@ with tab_item:
             fig3.update_layout(barmode="group", title="By hour of day (US Eastern). A draft until a full week of data exists.", height=300,
                                margin=dict(l=10, r=10, t=40, b=10))
             st.plotly_chart(fig3, use_container_width=True)
+    if len(shelves):
+        sh1 = shelves[shelves["item_id"] == pick]
+        if len(sh1):
+            x = sh1.iloc[0]
+            st.subheader(f"Flip shelf: {x['verdict']}")
+            st.write(f"Buy {x['units']:.0f} units (avg {lib.gsc(x['avg_price_gold'])}, break-even {lib.gsc(x['breakeven_gold'])}), relist at "
+                     f"{lib.gsc(x['target_gold'])}: net margin {x['net_margin']:.0%}, {x['net_margin_stress']:.0%} if you sell 10% under. "
+                     f"Hours to sell {lib.shelf_hours(x)}. Tests: " + ", ".join(f"{c.replace('test_', '')} {lib.MARK[x[c]]}" for c in lib.TEST_COLS))
     if len(flips):
         f = flips[flips["item_id"] == pick]
         if len(f):

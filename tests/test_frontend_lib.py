@@ -5,7 +5,11 @@ import unittest
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend"))
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p in (os.path.join(_root, "frontend"), _root):      # lib.py sits in "frontend" here and in the main folder in the app repo
+    if os.path.exists(os.path.join(_p, "lib.py")):
+        sys.path.insert(0, _p)
+        break
 import lib  # noqa: E402
 
 
@@ -67,3 +71,14 @@ class TestLib(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestShelfLib(unittest.TestCase):
+    def test_shelf_table_filters_and_hours_text(self):
+        sh = pd.DataFrame({"verdict": ["candidate", "weak", "no"], "sell_hours_est": [4.3, 30.0, 1.0], "sell_hours_high": [3.2, 20.0, 1.0],
+                           "sell_hours_low": [6.5, float("inf"), 1.0]})
+        self.assertEqual(len(lib.shelf_table(sh)), 2)
+        self.assertEqual(len(lib.shelf_table(sh, ("candidate",))), 1)
+        self.assertEqual(lib.shelf_hours(sh.iloc[0]), "4.3 h (3.2 - 6.5)")
+        self.assertEqual(lib.shelf_hours(sh.iloc[1]), "30.0 h (20.0 - never)")
+        self.assertTrue(lib.shelf_table(pd.DataFrame()).empty)

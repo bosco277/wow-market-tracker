@@ -336,3 +336,14 @@ When Forever data exists:
   Rows posted with a stale "before" snapshot are marked unusable beyond 90 minutes. Rows whose notes say "abnormal" are kept
   out of the rate check. The log reader accepts tab or comma separated files, "Note 1", item names when item_id is #N/A,
   below/above lane words, and flags batches whose prices disagree by more than 10% (a likely typo).
+
+## 2f. Flip shelves (engine/shelves.py, `shelves` table from `derive`)
+
+One row per item at most: the best shelf of cheap units below a price gap (gap >= 15%), bought cheapest-first up to the unit
+and gold limits (`--max-units`, `--max-position-gold`; defaults 300 units, 150 gold), relisted at the tier above the gap
+(newest-first puts you at the front of that tier). Columns: units, shelf_units, cost_gold, avg_price_gold, target_gold,
+breakeven_gold (= avg / 0.95), net_margin (at target), net_margin_stress (selling 10% under), profit_gold, profit_stress_gold,
+sell_hours_low/est/high (units ahead of you after a partial buy + your own units, divided by the sales rate seen while the
+price was at the target; falls back to the overall rate, `rate_from_level` = False), cheap_units_ahead, book_share, five
+tests (test_price, test_speed, test_size, test_margin, test_book = pass / warn / fail) and `verdict` (candidate: no fail and at
+most one warn; weak: no fail; no). The tests describe prices and rates; they cannot see other players' intentions.

@@ -530,19 +530,37 @@ def run_flips(store, args, reader=None, names_fn=fetch_names):
     return ev
 
 
+def _names_from_frame(d):
+    """{item_id: name} from the dictionary table (columns id/item_id and name/item_name)."""
+    idc = next(c for c in d.columns if c.lower() in ("item_id", "id"))
+    nmc = next(c for c in d.columns if c.lower() in ("name", "item_name"))
+    return {int(i): str(n) for i, n in zip(d[idc], d[nmc]) if n == n and n is not None}
+
+
 def _dictionary_names():
-    """Item names from the repo's own system/item_dictionary.parquet (no Blizzard calls). Empty dict if unavailable."""
+    """Item names from system/item_dictionary.parquet. build_dictionary.py writes it to Backblaze (a tiny file, so reading it
+    is negligible against the download cap); the Hugging Face copy is tried first in case one exists. Empty dict if neither works."""
     tok = os.environ.get("HF_TOKEN")
     try:
         from huggingface_hub import hf_hub_download
-        path = hf_hub_download(HF_REPO, "system/item_dictionary.parquet", repo_type="dataset", token=tok)
-        d = pd.read_parquet(path)
-        idc = next(c for c in d.columns if c.lower() in ("item_id", "id"))
-        nmc = next(c for c in d.columns if c.lower() in ("name", "item_name"))
-        return {int(i): str(n) for i, n in zip(d[idc], d[nmc]) if n == n}
-    except Exception as e:
-        print(f"(item names skipped: {e})")
-        return {}
+        return _names_from_frame(pd.read_parquet(hf_hub_download(HF_REPO, "system/item_dictionary.parquet", repo_type="dataset", token=tok)))
+    except Exception:
+        pass
+    kid, key = os.environ.get("B2_KEY_ID"), os.environ.get("B2_APP_KEY")
+    if kid and key:
+        try:
+            import io
+            import boto3
+            s3 = boto3.client("s3", endpoint_url="https://s3.us-east-005.backblazeb2.com", aws_access_key_id=kid, aws_secret_access_key=key)
+            body = s3.get_object(Bucket=B2_BUCKET, Key="system/item_dictionary.parquet")["Body"].read()
+            names = _names_from_frame(pd.read_parquet(io.BytesIO(body)))
+            print(f"(item names: {len(names):,} read from Backblaze)")
+            return names
+        except Exception as e:
+            print(f"(item names skipped: {e})")
+    else:
+        print("(item names skipped: no copy on Hugging Face and no Backblaze keys in this run)")
+    return {}
 
 
 def run_derive(store, args, reader=None, names_fn=None):
@@ -564,7 +582,9 @@ def run_derive(store, args, reader=None, names_fn=None):
                 print(f"Experiment log used: {len(log)} listings, {0 if evidence is None else len(evidence)} items with checks.")
         except Exception as e:
             print(f"(experiment log skipped: {e})")
-    cfg = DeriveConfig(window_hours=args.window_hours, horizon_hours=args.horizon_hours)
+    from engine.shelves import ShelfConfig
+    shelf = ShelfConfig(max_units=int(getattr(args, "max_units", 300)), max_cost_gold=float(getattr(args, "max_position_gold", 300.0)))
+    cfg = DeriveConfig(window_hours=args.window_hours, horizon_hours=args.horizon_hours, shelf=shelf)
     out = derive(snaps, cfg, watch=watch, evidence=evidence, experiment_summary=exp, names=names)
     d = os.path.join(args.out, "derived")
     os.makedirs(d, exist_ok=True)
@@ -574,6 +594,17 @@ def run_derive(store, args, reader=None, names_fn=None):
         if len(df):
             df.to_parquet(os.path.join(d, f"{k}.parquet"), index=False)
         print(f"  {k:12s} {len(df):>7,} rows")
+    sh = out["shelves"]
+    print(f"\n== FLIP SHELVES (limits: {shelf.max_units} units, {shelf.max_cost_gold:.0f}g per flip; tests: price, speed, size, margin, book) ==")
+    cands = sh[sh["verdict"] != "no"].head(12) if len(sh) else sh
+    if len(cands):
+        show = cands.assign(item=cands["name"].where(cands["name"] != "", cands["item_id"].astype(str)))
+        show = show[["item", "verdict", "units", "avg_price_gold", "target_gold", "net_margin", "net_margin_stress", "profit_gold",
+                     "sell_hours_low", "sell_hours_est", "sell_hours_high", "test_price", "test_speed", "test_size", "test_margin", "test_book"]]
+        print(show.round(3).to_string(index=False))
+        print("  profit_gold is at the target price, before anyone undercuts; net_margin_stress assumes selling 10% under it.")
+    else:
+        print("  none pass right now (that is normal; shelves are rare)")
     cal = out["calibration"].iloc[0]
     print(f"Confidence: {cal['n_high']} High, {cal['n_medium']} Medium, {cal['n_low']} Low; median range (high/low) {cal['median_range_ratio']:.2f}x")
     if args.upload:

@@ -178,3 +178,11 @@ class TestCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDictionaryNames(unittest.TestCase):
+    def test_names_from_frame_accepts_id_or_item_id_and_skips_blanks(self):
+        a = lake._names_from_frame(pd.DataFrame({"id": [1, 2, 3], "name": ["A", None, "C"]}))
+        self.assertEqual(a, {1: "A", 3: "C"})
+        b = lake._names_from_frame(pd.DataFrame({"item_id": [5], "item_name": ["Z"]}))
+        self.assertEqual(b, {5: "Z"})

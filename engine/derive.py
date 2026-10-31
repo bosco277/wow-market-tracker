@@ -38,6 +38,7 @@ from .classifier import ClassifierParams, aggregate_rates, classify_series
 from .itemview import detect_flips
 from .market import flag_blips, flag_spikes, price_bands, profile, tsm_style_market_value, wall_report
 from .schema import COPPER_PER_GOLD, Snapshot
+from .shelves import ShelfConfig, shelves_for_item
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ class DeriveConfig:
     slow_daily_est: float = 500.0     # "slow" for the lumpy-and-slow rule
     wide_ratio: float = 5.0           # high / low above this is a wide range
     min_observed_hours: float = 24.0
+    shelf: ShelfConfig = ShelfConfig()
 
 
 def confidence(row: pd.Series, cfg: DeriveConfig, evidence: Optional[pd.Series] = None) -> tuple:
@@ -130,7 +132,7 @@ def derive(snapshots: Sequence[Snapshot], cfg: DeriveConfig = DeriveConfig(), pa
     by_item = {i: b for i, b in book_now.groupby("item_id")}
     ev = evidence.set_index("item_id") if evidence is not None and not evidence.empty else pd.DataFrame()
 
-    item_rows, hourly_parts, prof_parts = [], [], []
+    item_rows, hourly_parts, prof_parts, shelf_rows = [], [], [], []
     iv_cols = ["item_id", "t1", "sold_low", "sold_est", "sold_high", "flag_wipe", "flag_long_gap"]
     iv_small = intervals[intervals["item_id"].isin(keep_ids)][iv_cols].rename(columns={"t1": "ts"})
     fu_keep = fu[fu["item_id"].isin(keep_ids)].copy()
@@ -175,6 +177,10 @@ def derive(snapshots: Sequence[Snapshot], cfg: DeriveConfig = DeriveConfig(), pa
         row["confidence"], row["confidence_reason"] = label, why
         row["range_ratio"] = row.get("daily_high", np.nan) / max(row.get("daily_low", 0.0) or 0.0, 1.0)
         item_rows.append(row)
+        sh = shelves_for_item(bi, ser, {k_: per_hour[k_] for k_ in ("low", "est", "high")}, row["band_p90"], cfg.shelf)
+        if sh is not None:
+            shelf_rows.append(dict(item_id=int(item), name=names.get(int(item), ""), floor_gold=row["floor_gold"],
+                                   confidence=label, **sh))
         if item in profile_ids:
             p = profile(ser.assign(ts=ser["ts"]), pd.Series(sp.to_numpy()), tz=cfg.tz, by="none", blips=pd.Series(bl.to_numpy()))
             p.insert(0, "item_id", int(item))
@@ -199,8 +205,13 @@ def derive(snapshots: Sequence[Snapshot], cfg: DeriveConfig = DeriveConfig(), pa
                 flips = ev_f[ev_f["verdict"] == "flip / buyout"].copy().tail(2000)
                 flips["engine_version"] = __version__
 
+    shelves = pd.DataFrame(shelf_rows)
+    if len(shelves):
+        shelves["engine_version"] = __version__
+        shelves = shelves.sort_values(["fails", "warns", "profit_stress_gold"], ascending=[True, True, False]).reset_index(drop=True)
+
     cal = _calibration_row(items, snaps, now, experiment_summary)
-    return {"items": items, "item_hourly": item_hourly, "profile": prof, "flips": flips, "calibration": cal}
+    return {"items": items, "item_hourly": item_hourly, "profile": prof, "flips": flips, "shelves": shelves, "calibration": cal}
 
 
 def _calibration_row(items: pd.DataFrame, snaps: Sequence[Snapshot], now: pd.Timestamp, exp: Optional[dict]) -> pd.DataFrame:

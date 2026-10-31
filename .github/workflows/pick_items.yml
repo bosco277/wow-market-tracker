@@ -68,7 +68,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install
-        run: pip install pandas numpy pyarrow requests tabulate huggingface_hub
+        run: pip install pandas numpy pyarrow requests tabulate huggingface_hub boto3
 
       - name: Keep downloaded files between runs
         uses: actions/cache@v4
@@ -80,6 +80,8 @@ jobs:
       - name: Run
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
           BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
           BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
           MODE: ${{ inputs.mode }}

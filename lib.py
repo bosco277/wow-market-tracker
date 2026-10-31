@@ -115,3 +115,21 @@ def freshness(cal: pd.DataFrame, now=None) -> tuple:
     now = pd.Timestamp(now) if now is not None else pd.Timestamp.now("UTC").tz_localize(None)
     h = (now - last).total_seconds() / 3600.0
     return h, ("fresh" if h <= 3 else "stale" if h <= 12 else "very stale")
+
+
+MARK = {"pass": "pass", "warn": "WARN", "fail": "FAIL"}
+TEST_COLS = ["test_price", "test_speed", "test_size", "test_margin", "test_book"]
+
+
+def shelf_table(shelves: pd.DataFrame, verdicts: tuple = ("candidate", "weak")) -> pd.DataFrame:
+    """Flip shelves worth looking at, best first (the engine already sorts by fails, warns, then profit if undercut)."""
+    if shelves is None or shelves.empty:
+        return pd.DataFrame()
+    return shelves[shelves["verdict"].isin(verdicts)].reset_index(drop=True)
+
+
+def shelf_hours(row) -> str:
+    """Hours to sell everything, as best-high-low rates: '4.3 h (3.3 - 6.5)'."""
+    def f(x):
+        return "never" if x != x or x == float("inf") else (f"{x:.1f}" if x < 100 else ">100")
+    return f"{f(row['sell_hours_est'])} h ({f(row['sell_hours_high'])} - {f(row['sell_hours_low'])})"
