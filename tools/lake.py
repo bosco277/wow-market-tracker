@@ -530,6 +530,77 @@ def run_flips(store, args, reader=None, names_fn=fetch_names):
     return ev
 
 
+def _dictionary_names():
+    """Item names from the repo's own system/item_dictionary.parquet (no Blizzard calls). Empty dict if unavailable."""
+    tok = os.environ.get("HF_TOKEN")
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(HF_REPO, "system/item_dictionary.parquet", repo_type="dataset", token=tok)
+        d = pd.read_parquet(path)
+        idc = next(c for c in d.columns if c.lower() in ("item_id", "id"))
+        nmc = next(c for c in d.columns if c.lower() in ("name", "item_name"))
+        return {int(i): str(n) for i, n in zip(d[idc], d[nmc]) if n == n}
+    except Exception as e:
+        print(f"(item names skipped: {e})")
+        return {}
+
+
+def run_derive(store, args, reader=None, names_fn=None):
+    """Build the small tables the front end reads (items, item_hourly, profile, flips, calibration) into --out/derived."""
+    from engine.derive import DeriveConfig, derive
+    from engine.reconcile import item_evidence, read_log, reconcile, summarize
+    snaps = _load_all(store, args, reader)
+    _print_holes(snaps)
+    names = (names_fn or (lambda ids: _dictionary_names()))([])
+    watch = [int(x) for x in str(args.ids).replace(" ", "").split(",") if x]
+    evidence, exp, per_exp = None, None, None
+    if os.path.exists(args.log):
+        try:
+            log = read_log(args.log)
+            if not log.empty:
+                per, exp = reconcile(snaps, log)
+                per_exp = per
+                evidence = item_evidence(per)
+                print(f"Experiment log used: {len(log)} listings, {0 if evidence is None else len(evidence)} items with checks.")
+        except Exception as e:
+            print(f"(experiment log skipped: {e})")
+    cfg = DeriveConfig(window_hours=args.window_hours, horizon_hours=args.horizon_hours)
+    out = derive(snaps, cfg, watch=watch, evidence=evidence, experiment_summary=exp, names=names)
+    d = os.path.join(args.out, "derived")
+    os.makedirs(d, exist_ok=True)
+    if per_exp is not None and len(per_exp):
+        out["experiment"] = per_exp.drop(columns=[c for c in per_exp.columns if c.startswith("_")]).copy()
+    for k, df in out.items():
+        if len(df):
+            df.to_parquet(os.path.join(d, f"{k}.parquet"), index=False)
+        print(f"  {k:12s} {len(df):>7,} rows")
+    cal = out["calibration"].iloc[0]
+    print(f"Confidence: {cal['n_high']} High, {cal['n_medium']} Medium, {cal['n_low']} Low; median range (high/low) {cal['median_range_ratio']:.2f}x")
+    if args.upload:
+        _upload_derived(d, out["calibration"])
+    return out
+
+
+def _upload_derived(folder, cal_row):
+    """Push the derived tables to engine/ in the HF dataset repo, and append this run to the confidence history."""
+    from huggingface_hub import HfApi, hf_hub_download
+    tok = os.environ.get("HF_TOKEN")
+    if not tok:
+        raise SystemExit("--upload needs HF_TOKEN")
+    api = HfApi(token=tok)
+    hist_path = os.path.join(folder, "calibration_history.parquet")
+    try:
+        old = pd.read_parquet(hf_hub_download(HF_REPO, "engine/calibration_history.parquet", repo_type="dataset", token=tok))
+        hist = pd.concat([old, cal_row], ignore_index=True)
+    except Exception:
+        hist = cal_row.copy()
+    hist = hist.drop_duplicates(subset=["data_last_ts", "engine_version"], keep="last")
+    hist.to_parquet(hist_path, index=False)
+    api.upload_folder(folder_path=folder, path_in_repo="engine", repo_id=HF_REPO, repo_type="dataset",
+                      commit_message="derived layer refresh")
+    print(f"Uploaded {len(os.listdir(folder))} files to engine/ in {HF_REPO} (one commit).")
+
+
 def _has_tabulate():
     try:
         import tabulate  # noqa: F401
@@ -540,7 +611,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -558,9 +629,10 @@ def main(argv=None):
     ap.add_argument("--log", default="experiment_log.csv", help="reconcile: the experiment log CSV")
     ap.add_argument("--window-hours", type=float, default=72.0, help="pick: how far back item statistics look")
     ap.add_argument("--min-coverage", type=float, default=0.5, help="pick: share of the window that must have been observed")
+    ap.add_argument("--upload", action="store_true", help="derive: push the tables to engine/ in the HF repo")
     args = ap.parse_args(argv)
     store = make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile}[args.command](store, args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive}[args.command](store, args)
 
 
 if __name__ == "__main__":

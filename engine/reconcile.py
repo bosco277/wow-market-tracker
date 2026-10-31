@@ -319,3 +319,27 @@ def verdict_text(s: dict) -> List[str]:
     out.append("QUEUE ORDER: not read from this log. SAME listings share a price with older units, which the snapshots cannot tell apart; "
                "use the `order` check on the book history.")
     return out
+
+
+def item_evidence(per: pd.DataFrame, rate_check_max_listings: int = 0) -> pd.DataFrame:
+    """Per item, what the experiment showed about our sales rate (first-in-line listings only, abnormal rows left out):
+    inside / too_fast (real sales slower than predicted) / too_slow (real sales faster), and unsold_stayed (sold nothing
+    while first in line for at least 80% of the snapshots, although a sale inside 12 hours was predicted) / unsold_pushed
+    (sold nothing but was pushed back by cheaper listings, which says nothing about the rate)."""
+    cols = ["item_id", "checks", "inside", "too_fast", "too_slow", "unsold_stayed", "unsold_pushed"]
+    if per.empty or "cheapest_at_posting" not in per.columns:
+        return pd.DataFrame(columns=cols)
+    ok = per[(per["status"] == "ok") & per["cheapest_at_posting"].fillna(False).astype(bool)
+             & per["done"].fillna(False).astype(bool) & ~per["abnormal"].fillna(False).astype(bool)]
+    rows = []
+    for item, g in ok.groupby("item_id"):
+        sold = g[(g["units_sold"] >= 0.9 * g["quantity"]) & g["observed_hours_to_clear"].notna() & g["pred_lifo_h_est"].notna()]
+        pred = sold["pred_lifo_h_est"]
+        un = g[g["units_sold"] == 0]
+        stayed = un[(un["front_share"] >= 0.8) & (un["pred_lifo_h_est"] <= 12.0)]
+        rows.append(dict(
+            item_id=int(item), checks=int(len(sold)),
+            inside=int(((pred >= sold["still_there_h"]) & (pred <= sold["observed_hours_to_clear"])).sum()),
+            too_fast=int((pred < sold["still_there_h"]).sum()), too_slow=int((pred > sold["observed_hours_to_clear"]).sum()),
+            unsold_stayed=int(len(stayed)), unsold_pushed=int((un["front_share"] < 0.8).sum())))
+    return pd.DataFrame(rows, columns=cols)

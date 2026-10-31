@@ -1,0 +1,69 @@
+import os
+import sys
+import unittest
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend"))
+import lib  # noqa: E402
+
+
+def items():
+    return pd.DataFrame({
+        "item_id": [1, 2, 3], "name": ["Iceweb Spider Silk", "Saronite Ore", ""], "watched": [False, True, False],
+        "floor_gold": [1.0, 20.0, 0.5], "daily_low": [900, 5, 100], "daily_est": [1000, 10, 150], "daily_high": [1100, 40, 200],
+        "confidence": ["High", "Low", "Medium"], "now_percentile": [0.5, 0.95, 0.05]})
+
+
+class TestLib(unittest.TestCase):
+    def test_gsc(self):
+        self.assertEqual(lib.gsc(12.3456), "12g 34s 56c")
+        self.assertEqual(lib.gsc(0.0099), "99c")
+        self.assertEqual(lib.gsc(float("nan")), "-")
+
+    def test_rng_and_short_num(self):
+        self.assertEqual(lib.rng(900, 1500, 2100000), "900 - 1.5k - 2.1M")
+
+    def test_market_table_ranks_by_gold_flow_and_filters(self):
+        t = lib.market_table(items())
+        self.assertEqual(list(t["item_id"]), [1, 2, 3])          # 1000, 200, 75 gold/day
+        self.assertEqual(list(lib.market_table(items(), conf=("Low",))["item_id"]), [2])
+        self.assertEqual(list(lib.market_table(items(), text="iceweb")["item_id"]), [1])
+        self.assertEqual(list(lib.market_table(items(), text="3")["item_id"]), [3])
+        self.assertEqual(list(lib.market_table(items(), watched_only=True)["item_id"]), [2])
+        self.assertTrue((t["gold_flow_low"] <= t["gold_flow"]).all() and (t["gold_flow"] <= t["gold_flow_high"]).all())
+
+    def test_price_position(self):
+        self.assertEqual([lib.price_position(r) for _, r in items().iterrows()], ["normal", "expensive for this item", "cheap for this item"])
+
+    def test_daily_ribbon_needs_a_full_window_and_keeps_order(self):
+        ts = pd.date_range("2026-10-30", periods=30, freq="h")
+        h = pd.DataFrame({"ts": ts, "sold_low": 1.0, "sold_est": 2.0, "sold_high": 3.0})
+        h.loc[28, "sold_est"] = np.nan
+        r = lib.daily_ribbon(h)
+        self.assertTrue(r["est"].iloc[:23].isna().all())
+        self.assertEqual(r["low"].iloc[23], 24.0)
+        self.assertEqual(r["est"].iloc[23], 48.0)
+        self.assertTrue(np.isnan(r["est"].iloc[28]))
+        ok = r["est"].notna()
+        self.assertTrue((r.loc[ok, "low"] <= r.loc[ok, "est"]).all())
+        self.assertEqual(len(lib.hole_hours(h)), 1)
+
+    def test_confidence_mix_and_scorecard_and_freshness(self):
+        cal = pd.DataFrame({"data_last_ts": pd.to_datetime(["2026-10-30 12:00", "2026-10-31 12:00"]), "n_high": [0, 2], "n_medium": [5, 4],
+                            "n_low": [1, 1], "exp_rate_check_n": [np.nan, 7], "exp_rate_inside": [np.nan, 3],
+                            "exp_rate_pred_too_fast": [np.nan, 2], "exp_rate_pred_too_slow": [np.nan, 2]})
+        m = lib.confidence_mix(cal)
+        self.assertEqual(len(m), 6)
+        self.assertEqual(m[(m["tier"] == "High") & (m["data_last_ts"] == pd.Timestamp("2026-10-31 12:00"))]["items"].iloc[0], 2)
+        self.assertEqual(lib.experiment_scorecard(cal)["inside"], 3)
+        self.assertIsNone(lib.experiment_scorecard(cal)["listings"])
+        h, label = lib.freshness(cal, now="2026-10-31 13:00")
+        self.assertAlmostEqual(h, 1.0)
+        self.assertEqual(label, "fresh")
+        self.assertEqual(lib.freshness(cal, now="2026-11-01 12:00")[1], "very stale")
+
+
+if __name__ == "__main__":
+    unittest.main()
