@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from helpers import T0  # noqa: F401
-from engine.market import (find_shelf, flag_spikes, item_series, price_bands, price_wall, profile, queue_wait_hours,
+from engine.market import (find_shelf, flag_blips, flag_spikes, item_series, price_bands, price_wall, profile, queue_wait_hours,
                            reach_stats, tsm_style_market_value, wall_report)
 from engine.simulator import MarketSimulator, default_profiles
 
@@ -79,6 +79,17 @@ class TestWall(unittest.TestCase):
         self.assertFalse(r["velocity_matters"])
         self.assertLess(r["wait_low"], 12.0)
         self.assertLessEqual(r["wait_high"], r["wait_est"])
+
+    def test_your_own_units_count_toward_the_time_to_sell(self):
+        # nothing is cheaper, so the wait to reach the front is 0 h, but 500 units at 10/hour take 50 h to sell
+        flat = book([(275, 1296)])
+        r = wall_report(flat, dict(low=10.0, est=10.0, high=60.0), horizon_hours=4.0, trade_units=500)
+        self.assertEqual(r["wait_low"], 0.0)
+        self.assertAlmostEqual(r["sell_hours_low"], 50.0)
+        self.assertAlmostEqual(r["sell_hours_high"], 500 / 60.0)
+        self.assertTrue(r["velocity_matters"])
+        small = wall_report(flat, dict(low=10.0, est=10.0, high=60.0), horizon_hours=4.0, trade_units=75)
+        self.assertFalse(small["velocity_matters"])            # 75 units at 10/hour = 7.5 h, inside 12 h
 
     def test_velocity_matters_when_the_low_rate_gives_a_long_wait(self):
         thin = book([(1000, 100), (2000, 1000)])
@@ -180,6 +191,60 @@ class TestProfileAndSeries(unittest.TestCase):
         self.assertEqual(len(sp), len(ser[1002]))
         p = profile(ser[1002], spikes=sp, by="none")
         self.assertGreater(len(p), 0)
+
+
+class TestV052Guards(unittest.TestCase):
+    def test_tiny_price_steps_are_not_spikes_but_big_ones_still_are(self):
+        linen = pd.Series([0.04, 0.07, 0.04, 0.08, 0.05, 0.04, 0.07] * 8)      # 1-4 silver wiggles on a 4-8 silver item
+        self.assertEqual(int((flag_spikes(linen) != 0).sum()), 0)
+        f = pd.Series([2.0] * 40)
+        f.iloc[20:23] = 6.0
+        self.assertEqual(int((flag_spikes(f) == 1).sum()), 3)
+
+    def test_feed_blip_is_one_snapshot_that_recovers_not_a_real_buyout(self):
+        u = pd.Series([685_000.0] * 50)
+        u.iloc[20] = 63_361.0                                   # the Eternal Crystal blip
+        got = flag_blips(u)
+        self.assertEqual(list(got[got].index), [20])
+        real = pd.Series([1700.0] * 50)
+        real.iloc[20:32] = 200.0                                # a 12-hour drop is a market event, not a blip
+        self.assertEqual(int(flag_blips(real).sum()), 0)
+        tail = pd.Series([1700.0] * 49 + [100.0])               # still down at the end of the data: cannot tell yet
+        self.assertEqual(int(flag_blips(tail).sum()), 0)
+
+    def frame(self, days=7):
+        ts = pd.date_range("2026-10-05 00:00", periods=24 * days, freq="h")
+        day = np.arange(len(ts)) // 24
+        # a price that falls 10% a day (a trend), plus a real +20% every day at 16:00
+        price = 100.0 * (0.9 ** day) * np.where(ts.hour == 16, 1.2, 1.0)
+        return pd.DataFrame({"ts": ts, "floor_gold": price, "units_listed": 3000.0,
+                             "sold_est": np.where(ts.hour == 3, 40.0, 1.0), "flag_long_gap": False, "flag_wipe": False})
+
+    def test_price_vs_level_removes_the_trend_and_keeps_the_real_hourly_effect(self):
+        df = self.frame()
+        got = profile(df, tz="UTC", by="none")
+        raw = got.set_index("block")["price_median"]
+        rel = got.set_index("block")["price_vs_level"]
+        self.assertAlmostEqual(float(rel.loc[16]), 0.20, delta=0.06)           # the real +20% at 16:00 survives
+        for h in (2, 6, 10, 20):
+            self.assertLess(abs(float(rel.loc[h])), 0.06)                       # the trend does not leak into other hours
+        self.assertGreater(float(raw.max() / raw.min()), 1.05)                  # while the raw medians are not flat
+
+    def test_sold_share_sums_to_one_per_day_and_blips_are_left_out(self):
+        df = self.frame()
+        got = profile(df, tz="UTC", by="none")
+        self.assertAlmostEqual(float(got["sold_share"].sum()), 1.0, places=6)
+        self.assertAlmostEqual(float(got.loc[got["block"] == 3, "sold_share"].iloc[0]), 40.0 / (40.0 + 23.0), places=6)
+        df2 = df.copy()
+        df2.loc[100, "units_listed"] = 100.0
+        bl = flag_blips(df2["units_listed"])
+        self.assertTrue(bool(bl.iloc[100]))
+        hr = df2.loc[100, "ts"].hour
+        with_blip = profile(df2, tz="UTC", by="none", blips=bl)
+        self.assertEqual(float(with_blip.loc[with_blip["block"] == hr, "units_median"].iloc[0]), 3000.0)
+        self.assertEqual(int(with_blip.loc[with_blip["block"] == hr, "n_obs"].iloc[0]), 6)
+        w = profile(df, tz="UTC", by="dow", block_hours=4)
+        self.assertTrue(np.allclose(w.groupby("dow")["sold_share"].sum(), 1.0))
 
 
 if __name__ == "__main__":

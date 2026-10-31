@@ -29,49 +29,20 @@ UTC_OFFSET_HOURS = {"EDT": -4, "EST": -5, "UTC": 0, "GMT": 0}
 LOG_COLUMNS = ["date", "time_posted", "tz", "item_id", "lane", "list_price", "quantity", "units_sold", "units_expired", "note"]
 
 
-ITEM_IDS_BY_NAME = {
-    "iceweb spider silk": 42253, "mystic sapphire": 192841, "profaned tinderbox": 221758, "oil of dawn": 243735,
-    "denshroom deep roast": 260274, "laribole": 154124, "refulgent crystal": 219952, "eternal earth": 35624,
-    "algari healing potion": 211880, "swiftness potion": 2459, "invigorating healing potion": 244838,
-    "primordial saronite": 49908, "algari mana oil": 224107, "dawnlight": 130180, "sorrowmoss": 13466,
-    "eternal crystal": 172232, "linen cloth": 2589,
-}
-COLUMN_ALIASES = {"note 1": "note", "notes": "note", "note1": "note", "comment": "note", "comments": "note"}
-LANE_WORDS = {"UNDER": "UNDER", "BELOW": "UNDER", "SAME": "SAME", "ABOVE": "SAME"}
-
-
 def read_log(source) -> pd.DataFrame:
-    """Read the log (a path, comma or tab separated, or a DataFrame). Adds posted_utc (naive UTC, like the snapshots),
-    price_copper, abnormal, done. Tolerates what a pasted sheet looks like: a "Note 1" header, an extra item-name column,
-    times like "8:22 AM", lane words (below = UNDER, above = SAME; anything else = OTHER).
-
-    Results: if only units_expired is filled in, units_sold = quantity - units_expired; if units_sold equals the quantity,
-    units_expired = 0. A partial count with "as of" in the note (7 of 30 "as of 3 PM") is IN PROGRESS, not a result.
+    """Read the log (a path or a DataFrame). Adds posted_utc (naive UTC, like the snapshots), price_copper, abnormal, done.
     Example rows (note starts with 'example row') are dropped, and so are rows without a quantity or price."""
-    if isinstance(source, pd.DataFrame):
-        raw = source.copy()
-    else:
-        raw = pd.read_csv(source, dtype=str, keep_default_na=False, sep=None, engine="python")
-    raw.columns = [COLUMN_ALIASES.get(str(c).strip().lower(), str(c).strip().lower()) for c in raw.columns]
-    if "note" not in raw.columns:
-        raw["note"] = ""
+    raw = source.copy() if isinstance(source, pd.DataFrame) else pd.read_csv(source, dtype=str, keep_default_na=False)
+    raw.columns = [str(c).strip().lower() for c in raw.columns]
     missing = [c for c in LOG_COLUMNS if c not in raw.columns]
     if missing:
         raise ValueError(f"log is missing columns: {missing}")
     df = raw[LOG_COLUMNS].copy()
-    df["item_name"] = raw["item"] if "item" in raw.columns else ""
     for c in df.columns:
         df[c] = df[c].astype(str).str.strip()
     df = df[~df["note"].str.lower().str.startswith("example row")]
-    df = df[(df["quantity"] != "") & (df["list_price"] != "")].copy()
-    # item_id can arrive as "#N/A" from a failed sheet lookup: fall back to the item name
-    ids = pd.to_numeric(df["item_id"], errors="coerce")
-    by_name = df["item_name"].str.lower().map(ITEM_IDS_BY_NAME)
-    ids = ids.fillna(by_name)
-    if ids.isna().any():
-        bad = sorted(set(df.loc[ids.isna(), "item_name"].replace("", "(no name)")) | set(df.loc[ids.isna(), "item_id"]))
-        raise ValueError(f"cannot work out the item id for: {bad}; fill in item_id")
-    df["item_id"] = ids.astype("int64")
+    df = df[(df["item_id"] != "") & (df["quantity"] != "") & (df["list_price"] != "")].copy()
+    df["item_id"] = pd.to_numeric(df["item_id"]).astype("int64")
     df["quantity"] = pd.to_numeric(df["quantity"])
     df["list_price"] = pd.to_numeric(df["list_price"])
     for c in ("units_sold", "units_expired"):
@@ -83,35 +54,10 @@ def read_log(source) -> pd.DataFrame:
     local = pd.to_datetime(df["date"] + " " + df["time_posted"])
     df["posted_utc"] = local - pd.to_timedelta(off.astype(float), unit="h")
     df["price_copper"] = (df["list_price"] * COPPER_PER_GOLD).round().astype("int64")
-    df["lane"] = df["lane"].str.upper().map(LANE_WORDS).fillna("OTHER")
+    df["lane"] = df["lane"].str.upper()
     df["abnormal"] = df["note"].str.lower().str.contains("abnormal")
-    as_of = df["note"].str.lower().str.contains("as of")
-    sold, exp, q = df["units_sold"], df["units_expired"], df["quantity"]
-    df["units_sold"] = sold.where(sold.notna(), (q - exp).where(exp.notna()))       # only expired filled in: the rest sold
-    df["units_expired"] = exp.where(exp.notna(), pd.Series(0.0, index=df.index).where(df["units_sold"] >= q))
-    complete = (df["units_sold"] + df["units_expired"]) >= q - 0.5          # sold + expired accounts for every unit: final
-    in_progress = as_of & (df["units_sold"] < q) & ~complete
-    df.loc[in_progress, ["units_sold", "units_expired"]] = np.nan
     df["done"] = df["units_sold"].notna()
-    df["in_progress"] = in_progress
-    df = df.sort_values("posted_utc").reset_index(drop=True)
-    df.attrs["warnings"] = check_log(df)
-    return df
-
-
-def check_log(df: pd.DataFrame, cluster_minutes: float = 30.0, max_spread: float = 0.10) -> List[str]:
-    """Things in the log that look like typos. Listings of one item posted within `cluster_minutes` of each other are one
-    batch (the UNDER and SAME rows); their prices should be within `max_spread` of each other."""
-    out = []
-    for item, g in df.groupby("item_id"):
-        g = g.sort_values("posted_utc")
-        cluster = (g["posted_utc"].diff() > pd.Timedelta(minutes=cluster_minutes)).cumsum()
-        for _, c in g.groupby(cluster):
-            if len(c) > 1 and c["price_copper"].max() > c["price_copper"].min() * (1 + max_spread):
-                when = c["posted_utc"].min()
-                out.append(f"item {int(item)}: listings posted together around {when:%Y-%m-%d %H:%M} UTC have prices "
-                           f"{c['list_price'].min():g} to {c['list_price'].max():g}; check the time or price of one of them")
-    return out
+    return df.sort_values("posted_utc").reset_index(drop=True)
 
 
 def _item_books(snapshots: Sequence[Snapshot], item_ids) -> Dict[int, List[tuple]]:
@@ -171,7 +117,6 @@ def trace_listing(row: pd.Series, books: List[tuple], partner_qty: float, vel: d
     if out["gap_before_h"] > max_gap_hours or out["gap_after_h"] > max_gap_hours:
         out["status"] = "snapshot too far from the posting time (a hole)"
         return out
-    out["vs_floor_silver"] = (p - int(b0[1].min())) / SILVER      # price against the lowest price in the snapshot before posting
     below0, at0 = _units(b0[1], b0[2], p)
     below1, at1 = _units(a1[1], a1[2], p)
     out["tier_before"], out["tier_after_first"] = at0, at1
@@ -246,9 +191,7 @@ def summarize(per: pd.DataFrame) -> dict:
     seen = ok[~ok["invisible"].fillna(False).astype(bool)]
     if len(seen):
         s["median_appeared_share"] = float(seen["appeared_share"].median())
-    # SAME means "at the lowest price when you posted": judged from the book, not from the label you typed
-    at_floor = (sold_ok["vs_floor_silver"] == 0) if "vs_floor_silver" in sold_ok.columns else (sold_ok["lane"] == "SAME")
-    normal_same = sold_ok[at_floor & (~sold_ok["abnormal"]) & sold_ok["observed_hours_to_clear"].notna()]
+    normal_same = sold_ok[(sold_ok["lane"] == "SAME") & (~sold_ok["abnormal"]) & sold_ok["observed_hours_to_clear"].notna()]
     s["same_lane_for_order_test"] = int(len(normal_same))
     if len(normal_same):
         def err(col):

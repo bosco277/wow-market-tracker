@@ -1,0 +1,101 @@
+name: Market tools
+
+# One-click tools that read your recent commodity snapshots from the Hugging Face mirror (NOT Backblaze, so your B2
+# download cap is untouched). Put this file in .github/workflows/ . Run it from the Actions tab -> "Market tools".
+# Choose a mode:
+#   pick   writes the shortlist of items for the buy/list experiment
+#   files  lists the files that exist, day by day, and which hours are missing (downloads nothing)
+#   inspect downloads each DAILY file and shows what is inside it (columns, empty cells, one line per snapshot time)
+#   rates  one line per item id you type in: our estimated units sold per day, price and depth (use days=4)
+#   market  per item id: price bands, TSM-style value, price wall, flip shelf (use days=8)
+#   profile per item id: hour-of-day table and day-of-week grid of price and quantity (use days=8)
+#   plan   only counts files and MB (downloads nothing)
+#   order  checks whether the newest or the oldest listing at a price is bought first
+#   item   hourly price, depth and estimated sales for the item ids you type in
+#   flips  finds market flips (cheap side bought out, price jumped) in the last few days and what followed
+#   reconcile  checks your experiment log (a CSV in the repo, see log_path) against the snapshots (use days=8)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to run"
+        type: choice
+        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile]
+        default: pick
+      days:
+        description: "How many days of data to load (pick looks back 72 h, so 4 or more)"
+        default: "4"
+      item_ids:
+        description: "For mode=item: item ids separated by commas (e.g. 192841,42253)"
+        default: ""
+      max_position_gold:
+        description: "pick: most gold in play for any one item"
+        default: "150"
+      min_floor_gold:
+        description: "pick: skip items cheaper than this (gold per unit)"
+        default: "1"
+      max_units:
+        description: "pick: most units to buy for any one item"
+        default: "300"
+      n_items:
+        description: "pick: how many items to shortlist"
+        default: "6"
+      trade_units:
+        description: "market: the biggest trade you would make, in units"
+        default: "500"
+      horizon_hours:
+        description: "market: hours of sales the price wall must cover"
+        default: "4"
+      log_path:
+        description: "reconcile: your experiment log CSV, committed in the repo"
+        default: "experiment_log.csv"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pandas numpy pyarrow requests tabulate
+
+      - name: Keep downloaded files between runs
+        uses: actions/cache@v4
+        with:
+          path: .lake_cache
+          key: lake-cache-${{ github.run_id }}
+          restore-keys: lake-cache-
+
+      - name: Run
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+          MODE: ${{ inputs.mode }}
+          DAYS: ${{ inputs.days }}
+          IDS: ${{ inputs.item_ids }}
+          MAXPOS: ${{ inputs.max_position_gold }}
+          MINFLOOR: ${{ inputs.min_floor_gold }}
+          MAXUNITS: ${{ inputs.max_units }}
+          NITEMS: ${{ inputs.n_items }}
+          TRADE: ${{ inputs.trade_units }}
+          HORIZON: ${{ inputs.horizon_hours }}
+          LOGPATH: ${{ inputs.log_path }}
+        run: |
+          mkdir -p out
+          python tools/lake.py "$MODE" --store hf --days "$DAYS" --ids "$IDS" --max-position-gold "$MAXPOS" --min-floor-gold "$MINFLOOR" --max-units "$MAXUNITS" --n-items "$NITEMS" --trade-units "$TRADE" --horizon-hours "$HORIZON" --log "$LOGPATH" | tee out.txt
+          { echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save results
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-tools-results
+          path: |
+            out/
+            out.txt

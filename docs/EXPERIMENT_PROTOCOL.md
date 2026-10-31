@@ -105,3 +105,8 @@ guesses, and every number will come with a "how sure are we" attached.
 
 Stop and tell me if: an item's price jumps by more than 30%, a session loses more than you are comfortable with, or the
 data refresh stops (the log output will show gaps). Do not push on.
+
+## Running the reconcile check
+
+Save your log as `experiment_log.csv` in the repo root (same columns as the template; example rows are ignored) and commit it.
+Then Actions, "Market tools", mode `reconcile`, days 8. Rows without `units_sold` yet are shown but not counted. Paste me the output.

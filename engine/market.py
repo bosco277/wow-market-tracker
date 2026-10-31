@@ -40,19 +40,22 @@ def item_series(snapshots: Sequence[Snapshot], item_ids: Iterable[int], params=N
 # ---------------------------------------------------------------------------------------------------------------------
 # Spikes and price bands
 # ---------------------------------------------------------------------------------------------------------------------
-def flag_spikes(floor: pd.Series, factor: float = 1.5, window: int = 25, max_hours: int = 10) -> pd.Series:
+def flag_spikes(floor: pd.Series, factor: float = 1.5, window: int = 25, max_hours: int = 10,
+                min_move_gold: float = 0.05) -> pd.Series:
     """+1 for hours inside a short upward spike, -1 inside a short dip, 0 otherwise.
 
     An hour is a candidate when the price is `factor` times (or 1/factor of) the centred rolling median. Consecutive
     candidates of the same sign form an episode; episodes longer than `max_hours` are a new price LEVEL, not a spike, and
     stay at 0. Short episodes are what a flip or a one-off dump looks like, so they are kept out of the market rate.
+    A move smaller than `min_move_gold` (5 silver) is never a spike: on a 4-8 silver item one price step is 25-100%.
     """
     f = pd.Series(floor, dtype="float64").reset_index(drop=True)
     med = f.rolling(window, center=True, min_periods=max(3, window // 5)).median()
     ratio = f / med
     cand = pd.Series(0, index=f.index, dtype="int64")
-    cand[ratio >= factor] = 1
-    cand[ratio <= 1.0 / factor] = -1
+    big = (f - med).abs() >= float(min_move_gold)
+    cand[(ratio >= factor) & big] = 1
+    cand[(ratio <= 1.0 / factor) & big] = -1
     out = pd.Series(0, index=f.index, dtype="int64")
     i = 0
     n = len(cand)
@@ -68,6 +71,31 @@ def flag_spikes(floor: pd.Series, factor: float = 1.5, window: int = 25, max_hou
         i = j + 1
     out.index = pd.Series(floor).index
     return out
+
+
+def flag_blips(units_listed: pd.Series, max_snapshots: int = 2, drop_ratio: float = 0.30, recover_ratio: float = 0.70,
+               window: int = 25) -> pd.Series:
+    """True for snapshots where the feed itself looks wrong: the units listed fall to `drop_ratio` of normal for at most
+    `max_snapshots` snapshots and are back to `recover_ratio` of normal right after. Real buyouts and restocks do not
+    vanish and return that fast (a real one lasts hours). Eternal Crystal at Thu 10-29 18:33 ET (685k units -> 63k -> 685k)
+    is the known example, and Undermine's chart shows the same drop. An episode that runs to the end of the data is NOT
+    flagged, because we cannot yet tell whether it recovers."""
+    u = pd.Series(units_listed, dtype="float64").reset_index(drop=True)
+    med = u.rolling(window, center=True, min_periods=5).median()
+    low = (u <= drop_ratio * med).to_numpy()
+    out = np.zeros(len(u), dtype=bool)
+    i, n = 0, len(u)
+    while i < n:
+        if not low[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and low[j + 1]:
+            j += 1
+        if (j - i + 1) <= max_snapshots and j + 1 < n and u.iloc[j + 1] >= recover_ratio * med.iloc[i]:
+            out[i:j + 1] = True
+        i = j + 1
+    return pd.Series(out, index=pd.Series(units_listed).index)
 
 
 def price_bands(series: pd.DataFrame, spikes: Optional[pd.Series] = None, quantiles=(0.10, 0.25, 0.50, 0.75, 0.90)) -> dict:
@@ -117,13 +145,20 @@ def tsm_style_market_value(book_item: pd.DataFrame, top_share: float = 0.30, sof
 # Hour-of-week profile
 # ---------------------------------------------------------------------------------------------------------------------
 def profile(series: pd.DataFrame, spikes: Optional[pd.Series] = None, tz: str = "America/New_York",
-            block_hours: int = 1, by: str = "dow", min_obs: int = 3) -> pd.DataFrame:
+            block_hours: int = 1, by: str = "dow", min_obs: int = 3, blips: Optional[pd.Series] = None) -> pd.DataFrame:
     """Typical price, listed quantity and estimated sales per hour, by time slot (medians; spike / dip hours excluded).
 
     by = "dow" (7 x 24 slots), "weekpart" (weekday / weekend), or "none" (hour of day only). `block_hours` pools hours
     (4 gives six blocks a day). `n_obs` is the number of hourly observations behind each slot and `thin` marks slots
     with fewer than `min_obs`: with one week of data every day-of-week slot has ONE observation, so such a profile is a
-    draft until more weeks arrive. `weeks` (same on every row) is how many distinct calendar weeks contributed."""
+    draft until more weeks arrive. `weeks` (same on every row) is how many distinct calendar weeks contributed.
+
+    Three guards against misleading slots (added after the first real run):
+    - `price_vs_level` is each hour's price against that day's own level (centred 25-hour median), so a price that simply
+      fell over the week does not look like an evening premium. `price_median` is the raw price and mixes in the trend.
+    - `sold_share` is the slot's share of the day's estimated sales (it sums to 1 within a day). Hourly sales are lumpy,
+      and a share shows where the volume sits without trusting any single huge hour.
+    - hours flagged in `blips` (see `flag_blips`) are left out of price, quantity and sales."""
     s = series.reset_index(drop=True).copy()
     sp = spikes.reset_index(drop=True) if spikes is not None else pd.Series(0, index=s.index)
     t = pd.to_datetime(s["ts"]).dt.tz_localize("UTC").dt.tz_convert(tz)
@@ -132,12 +167,16 @@ def profile(series: pd.DataFrame, spikes: Optional[pd.Series] = None, tz: str = 
     s["weekpart"] = np.where(s["dow"] >= 5, "weekend", "weekday")
     keys = {"dow": ["dow", "block"], "weekpart": ["weekpart", "block"], "none": ["block"]}[by]
     weeks = int(t.dt.strftime("%G-%V").nunique())
-    typical = s[(sp == 0)]
+    blip = blips.reset_index(drop=True).fillna(False).astype(bool) if blips is not None else pd.Series(False, index=s.index)
+    f = s["floor_gold"].astype("float64")
+    ref = f.where((sp == 0) & ~blip).rolling(25, center=True, min_periods=21).median()
+    s["_rel"] = f / ref - 1.0
+    typical = s[(sp == 0) & ~blip]
     g = typical.groupby(keys)
     out = g.agg(n_obs=("floor_gold", "count"), price_median=("floor_gold", "median"),
                 price_p25=("floor_gold", lambda x: x.quantile(0.25)), price_p75=("floor_gold", lambda x: x.quantile(0.75)),
-                units_median=("units_listed", "median"))
-    bad = pd.Series(False, index=s.index)
+                units_median=("units_listed", "median"), price_vs_level=("_rel", "median"))
+    bad = blip.copy()
     for c in ("flag_long_gap", "flag_wipe"):
         if c in s.columns:
             bad |= s[c].fillna(False).astype(bool)
@@ -146,6 +185,11 @@ def profile(series: pd.DataFrame, spikes: Optional[pd.Series] = None, tz: str = 
     else:
         out["sold_per_hour"] = np.nan
     out = out.reset_index()
+    day_keys = keys[:-1] or ["_all"]
+    out["_all"] = 0
+    tot = out.groupby(day_keys)["sold_per_hour"].transform("sum")
+    out["sold_share"] = out["sold_per_hour"] / tot.where(tot > 0)
+    out = out.drop(columns="_all")
     out["thin"] = out["n_obs"] < min_obs
     out["weeks"] = weeks
     return out
@@ -195,8 +239,9 @@ def wall_report(book_item: pd.DataFrame, velocity_per_hour: Dict[str, float], ho
 
     deep_market      units at or below the est wall are at least `deep_multiple` times the trade you would make, so your
                      own buying or selling hardly moves it.
-    velocity_matters False when a listing at the est wall would sell within `duration_hours` even at the LOW rate (our
-                     rate is a floor), so a precise sales rate would not change what you do.
+    velocity_matters False when `trade_units` listed at the est wall would FULLY sell (units ahead of you plus your own)
+                     within `duration_hours` even at the LOW rate (our rate is a floor), so a precise sales rate would
+                     not change what you do. `wait_*` is only the time to reach the front of the line.
     """
     out: dict = {"horizon_hours": horizon_hours}
     walls = {}
@@ -208,9 +253,16 @@ def wall_report(book_item: pd.DataFrame, velocity_per_hour: Dict[str, float], ho
     est_price = walls["est"]["price"]
     waits = {k: queue_wait_hours(book_item, est_price, float(velocity_per_hour[k]), inflow_cheaper_per_hour) for k in ("low", "est", "high")}
     out.update({f"wait_{k}": w for k, w in waits.items()})
+    # Time to FULLY sell: the units ahead of you plus your own `trade_units` all have to be bought.
+    ahead = float(book_item.loc[book_item["unit_price"] < est_price, "quantity"].sum())
+    sell = {}
+    for k in ("low", "est", "high"):
+        drain = float(velocity_per_hour[k]) - float(inflow_cheaper_per_hour)
+        sell[k] = (ahead + float(trade_units)) / drain if drain > 0 else float("inf")
+    out.update({f"sell_hours_{k}": h for k, h in sell.items()})
     out["vwap_est"] = walls["est"]["vwap"]
     out["deep_market"] = bool(walls["est"]["units_at_or_below"] >= deep_multiple * trade_units)
-    out["velocity_matters"] = bool(waits["low"] > duration_hours)
+    out["velocity_matters"] = bool(sell["low"] > duration_hours)
     return out
 
 

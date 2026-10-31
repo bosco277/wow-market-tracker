@@ -13,6 +13,7 @@ name: Market tools
 #   order  checks whether the newest or the oldest listing at a price is bought first
 #   item   hourly price, depth and estimated sales for the item ids you type in
 #   flips  finds market flips (cheap side bought out, price jumped) in the last few days and what followed
+#   reconcile  checks your experiment log (a CSV in the repo, see log_path) against the snapshots (use days=8)
 
 on:
   workflow_dispatch:
@@ -20,7 +21,7 @@ on:
       mode:
         description: "What to run"
         type: choice
-        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips]
+        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile]
         default: pick
       days:
         description: "How many days of data to load (pick looks back 72 h, so 4 or more)"
@@ -46,6 +47,9 @@ on:
       horizon_hours:
         description: "market: hours of sales the price wall must cover"
         default: "4"
+      log_path:
+        description: "reconcile: your experiment log CSV, committed in the repo"
+        default: "experiment_log.csv"
 
 jobs:
   run:
@@ -82,9 +86,10 @@ jobs:
           NITEMS: ${{ inputs.n_items }}
           TRADE: ${{ inputs.trade_units }}
           HORIZON: ${{ inputs.horizon_hours }}
+          LOGPATH: ${{ inputs.log_path }}
         run: |
           mkdir -p out
-          python tools/lake.py "$MODE" --store hf --days "$DAYS" --ids "$IDS" --max-position-gold "$MAXPOS" --min-floor-gold "$MINFLOOR" --max-units "$MAXUNITS" --n-items "$NITEMS" --trade-units "$TRADE" --horizon-hours "$HORIZON" | tee out.txt
+          python tools/lake.py "$MODE" --store hf --days "$DAYS" --ids "$IDS" --max-position-gold "$MAXPOS" --min-floor-gold "$MINFLOOR" --max-units "$MAXUNITS" --n-items "$NITEMS" --trade-units "$TRADE" --horizon-hours "$HORIZON" --log "$LOGPATH" | tee out.txt
           { echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save results

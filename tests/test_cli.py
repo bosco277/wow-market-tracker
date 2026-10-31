@@ -55,6 +55,25 @@ class TestCli(unittest.TestCase):
         return argparse.Namespace(store="local", root=os.path.join(d, "lake"), days=3, end=str(snaps[-1].ts.date()),
                                   cache=os.path.join(d, "cache"), out=os.path.join(d, "out"), ids="1002,1003")
 
+    def test_reconcile_command_runs_on_a_small_log(self):
+        snaps = MarketSimulator(default_profiles(), seed=9).run(60).snapshots
+        with tempfile.TemporaryDirectory() as d:
+            args = self._lake(d, snaps)
+            args.log = os.path.join(d, "log.csv")
+            s = snaps[20]
+            b = s.book[s.book["item_id"] == 1002]
+            price = (int(b["unit_price"].min()) - 100) / 10000.0
+            t = s.ts + pd.Timedelta(minutes=5)
+            pd.DataFrame([
+                ["2026-10-30", "21:05", "EDT", 1002, "UNDER", 0.99, 45, 45, 0, "example row: ignore me"],
+                [str(t.date()), t.strftime("%H:%M"), "UTC", 1002, "UNDER", price, 20, 20, 0, ""],
+            ], columns=["date", "time_posted", "tz", "item_id", "lane", "list_price", "quantity", "units_sold", "units_expired", "note"]
+            ).to_csv(args.log, index=False)
+            per = lake.run_reconcile(LocalStore(args.root), args, reader=fake_reader, names_fn=lambda ids: {1002: "Test Herb"})
+            self.assertEqual(len(per), 1)
+            self.assertIn(per.iloc[0]["status"], ("ok", "snapshot too far from the posting time (a hole)", "no snapshots around the posting time"))
+            self.assertTrue(os.path.exists(os.path.join(d, "out", "reconcile.csv")))
+
     def test_item_and_flips_commands_run(self):
         snaps = MarketSimulator(default_profiles(), seed=9).run(40).snapshots
         with tempfile.TemporaryDirectory() as d:

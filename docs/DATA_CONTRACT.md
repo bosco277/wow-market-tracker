@@ -153,7 +153,9 @@ from the classifier as low / best / high units per hour, are a floor, and are po
   inside one hour adds and removes the same units), which is why `reach_stats` (history of how often and how fast the lowest
   price reached a level, refills included) is the better tool for very deep markets.
 - **Two flags per item:** `deep_market` (units at or below the wall >= 20x your trade size) and `velocity_matters` (False
-  when a listing at the wall sells within 12 h even at our LOW rate, so a precise rate would not change the decision).
+  when `trade_units` listed at the wall would FULLY sell within 12 h even at our LOW rate, so a precise rate would not
+  change the decision). v0.5.1: the time to sell counts your own units too (`sell_hours_*`); before, only the units ahead
+  of you were counted (`wait_*`, the time to reach the front of the line), which made most items look velocity-insensitive.
   Real examples: Linen Cloth (about 18,800 units below a 9 silver wall) and Eternal Crystal (about 1,960 below 2.29 g)
   are both velocity-insensitive although our rates for them are 14-26x below TSM's.
 - **Hour-of-week profile** (`lake.py profile`): medians of price, listed quantity and estimated sales by hour of day, plus a
@@ -307,3 +309,23 @@ When Forever data exists:
 4. Fit `cancel_share` and the blind-spot correction from that log; re-run validation on real data.
 5. Verify `time_left` buckets.
 6. Crafting margins, nightly derived job, Discord alerts.
+
+## 2e. v0.5.2: profile guards, feed blips, reconcile
+
+- **Feed blips** (`market.flag_blips`): a snapshot where an item's units listed fall to 30% of normal or less for at most two
+  snapshots and are back above 70% right after. Real buyouts last hours. Known example: Eternal Crystal Thu 10-29 18:33 ET
+  (about 685k units -> 63,361 -> 685k); Undermine's chart shows the same drop, so it comes from the feed, not from our loader.
+  An episode still open at the end of the data is not flagged. Blip hours are left out of the profile (price, quantity, sales).
+- **Profile columns:** `price_vs_level` (each hour against that day's own centred 25-hour median, so a week-long trend is not
+  read as an hourly effect) and `sold_share` (the slot's share of the day's estimated sales, sums to 1 within a day; hourly
+  sales are lumpy and the mean of a few days is dominated by one big hour). `price_median` stays as the raw price.
+- **Spike rule:** a move smaller than 5 silver (`min_move_gold`) is never a spike; on a 4-8 silver item one price step is
+  25-100%, and Linen Cloth lost 34 of 91 hours to this before.
+- **Reconcile** (`engine/reconcile.py`, `tools/lake.py reconcile --log experiment_log.csv`): for each log row, the snapshot
+  before and the first snapshot after posting, how many of your units appeared at your price (`appeared_share`), whether a
+  listing that sold out was gone before the next snapshot (`invisible`, the blind spot counted directly), the hours until the
+  units at or below your price fell back to where they were (`observed_hours_to_clear`, approximate because other sellers also
+  post and cancel at your price), and what a newest-first and an oldest-first queue predict at the recent sales rate. Only
+  SAME-lane listings vote on queue order (an UNDER listing is first in line under both rules); no verdict under 5 comparisons.
+  Rows whose notes say "abnormal" are kept out of the queue-order vote. Rows with no snapshot within 90 minutes are marked
+  unusable, never guessed.
