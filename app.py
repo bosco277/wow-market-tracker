@@ -96,7 +96,7 @@ with tab_flip:
                    "These do not know whether someone else will undercut you or whether the cheap units belong to another flipper.")
 
 # ---------------------------------------------------------------- Item
-with tab_item:
+def item_tab():
     t = lib.market_table(items)
     labels = {int(r.item_id): (r["name"] if r["name"] else str(r.item_id)) for _, r in t.iterrows()}
     pick = st.selectbox("Item", list(labels), format_func=lambda i: f"{labels[i]} ({i})")
@@ -107,13 +107,16 @@ with tab_item:
     k[2].metric("Sold per day (low - best - high)", lib.rng(r["daily_low"], r["daily_est"], r["daily_high"]))
     k[3].markdown(f"**Confidence: <span style='color:{lib.CONF_COLOR[r['confidence']]}'>{r['confidence']}</span>**<br>{r['confidence_reason']}",
                   unsafe_allow_html=True)
-    h = hourly[hourly["item_id"] == pick].sort_values("ts")
+    h = hourly[hourly["item_id"] == pick].sort_values("ts").reset_index(drop=True) if "item_id" in hourly else pd.DataFrame()
+    if h.empty:
+        st.info("No hourly history for this item in the tables yet.")
+        return
     fig = go.Figure()
     fig.add_hrect(y0=r["band_p10"], y1=r["band_p90"], fillcolor="#2B4C59", opacity=0.10, line_width=0, annotation_text="typical band")
     fig.add_trace(go.Scatter(x=h["ts"], y=h["floor_gold"], name="lowest price", line=dict(color="#2B4C59")))
-    sp = h[h["spike"]]
+    sp = h.loc[lib.flag_mask(h, "spike")]
     fig.add_trace(go.Scatter(x=sp["ts"], y=sp["floor_gold"], mode="markers", name="price spike", marker=dict(color="#B5483A", size=8)))
-    bl = h[h["blip"]]
+    bl = h.loc[lib.flag_mask(h, "blip")]
     fig.add_trace(go.Scatter(x=bl["ts"], y=bl["floor_gold"], mode="markers", name="listing blip (likely API)", marker=dict(color="#C28A1B", symbol="x", size=8)))
     for col, nm in (("wall_low_gold", "wall low"), ("wall_high_gold", "wall high")):
         fig.add_hline(y=r[col], line_dash="dot", line_color="#8A9BA3", annotation_text=nm)
@@ -155,6 +158,9 @@ with tab_item:
         if len(f):
             st.subheader("Past flip-like events")
             st.dataframe(f[[c for c in ("t1", "floor_before_gold", "floor_after_gold", "jump", "units_removed") if c in f.columns]], hide_index=True)
+
+with tab_item:
+    item_tab()
 
 # ---------------------------------------------------------------- Experiment
 with tab_exp:

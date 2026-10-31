@@ -82,3 +82,18 @@ class TestShelfLib(unittest.TestCase):
         self.assertEqual(lib.shelf_hours(sh.iloc[0]), "4.3 h (3.2 - 6.5)")
         self.assertEqual(lib.shelf_hours(sh.iloc[1]), "30.0 h (20.0 - never)")
         self.assertTrue(lib.shelf_table(pd.DataFrame()).empty)
+
+
+class TestFlagMask(unittest.TestCase):
+    def test_flag_mask_handles_odd_dtypes_and_missing_columns(self):
+        df = pd.DataFrame({"a": [True, False, None], "b": pd.Series([1.0, np.nan, 0.0]), "c": pd.Series(["x", "y", "z"]).astype(object).map(lambda v: v == "y")})
+        self.assertEqual(list(lib.flag_mask(df, "a")), [True, False, False])
+        self.assertEqual(list(lib.flag_mask(df, "b")), [True, False, False])
+        self.assertEqual(list(lib.flag_mask(df, "c")), [False, True, False])
+        self.assertEqual(list(lib.flag_mask(df, "missing")), [False, False, False])
+        self.assertEqual(len(lib.flag_mask(pd.DataFrame(), "a")), 0)
+        self.assertEqual(list(df.loc[lib.flag_mask(df, "a")].index), [0])
+
+    def test_watched_filter_survives_object_dtype(self):
+        it = items().assign(watched=pd.Series([None, True, False], dtype=object))
+        self.assertEqual(list(lib.market_table(it, watched_only=True)["item_id"]), [2])

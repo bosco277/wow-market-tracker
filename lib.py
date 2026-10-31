@@ -12,6 +12,13 @@ CONF_ORDER = ["High", "Medium", "Low"]
 CONF_COLOR = {"High": "#2E7D4F", "Medium": "#C28A1B", "Low": "#B5483A"}
 
 
+def flag_mask(df: pd.DataFrame, col: str) -> np.ndarray:
+    """True/False array for a flag column, whatever dtype it came back as from parquet (object, nullable, missing, all-NaN)."""
+    if df is None or col not in df.columns or len(df) == 0:
+        return np.zeros(0 if df is None else len(df), dtype=bool)
+    return df[col].fillna(False).astype(bool).to_numpy()
+
+
 def gsc(gold) -> str:
     """Gold as 12g 34s 56c."""
     if gold is None or gold != gold:
@@ -53,7 +60,7 @@ def market_table(items: pd.DataFrame, min_floor_gold: float = 0.0, conf: tuple =
     t["gold_flow_high"] = t["daily_high"] * t["floor_gold"]
     t = t[(t["floor_gold"] >= min_floor_gold) & t["confidence"].isin(conf)]
     if watched_only:
-        t = t[t["watched"]]
+        t = t.loc[flag_mask(t, "watched")]
     if text:
         q = text.strip().lower()
         t = t[t["name"].fillna("").str.lower().str.contains(q, regex=False) | t["item_id"].astype(str).str.contains(q, regex=False)]
