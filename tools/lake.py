@@ -457,7 +457,7 @@ def run_reconcile(store, args, reader=None, names_fn=fetch_names):
     show = per.copy()
     show["posted_ET"] = show["posted_utc"].map(_et)
     show["name"] = show["item_id"].map(lambda i: str(names.get(int(i), ""))[:18])
-    cols = ["posted_ET", "name", "lane", "price_gold", "quantity", "units_sold", "units_expired", "appeared_share",
+    cols = ["posted_ET", "name", "lane", "vs_floor_silver", "price_gold", "quantity", "units_sold", "units_expired", "appeared_share",
             "observed_hours_to_clear", "pred_lifo_h_est", "pred_fifo_h_est", "status"]
     cols = [c for c in cols if c in show.columns]
     t = show[cols].copy()
@@ -465,8 +465,8 @@ def run_reconcile(store, args, reader=None, names_fn=fetch_names):
         if c in t:
             t[c] = (t[c] * 100).round(0)
     t = t.rename(columns={"appeared_share": "seen_%", "observed_hours_to_clear": "cleared_h", "pred_lifo_h_est": "lifo_h", "pred_fifo_h_est": "fifo_h",
-                          "units_sold": "sold", "units_expired": "expired", "quantity": "qty", "price_gold": "price"}).round(2)
-    print("\n== EACH LISTING (seen_% = units that appeared at your price in the next snapshot / units you posted; cleared_h = hours until the")
+                          "units_sold": "sold", "units_expired": "expired", "vs_floor_silver": "vs_floor_s", "quantity": "qty", "price_gold": "price"}).round(2)
+    print("\n== EACH LISTING (vs_floor_s = your price against the lowest price just before posting, in silver; seen_% = units that appeared at your price in the next snapshot / units you posted; cleared_h = hours until the")
     print("   units at or below your price fell back to where they were; lifo_h / fifo_h = what each queue rule predicts at the recent sales rate) ==")
     print(t.to_string(index=False))
     print("\n== SUMMARY ==")

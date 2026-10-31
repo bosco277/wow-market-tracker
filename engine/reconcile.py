@@ -29,11 +29,25 @@ UTC_OFFSET_HOURS = {"EDT": -4, "EST": -5, "UTC": 0, "GMT": 0}
 LOG_COLUMNS = ["date", "time_posted", "tz", "item_id", "lane", "list_price", "quantity", "units_sold", "units_expired", "note"]
 
 
+COLUMN_ALIASES = {"note 1": "note", "notes": "note", "note1": "note", "comment": "note", "comments": "note"}
+LANE_WORDS = {"UNDER": "UNDER", "BELOW": "UNDER", "SAME": "SAME", "ABOVE": "SAME"}
+
+
 def read_log(source) -> pd.DataFrame:
-    """Read the log (a path or a DataFrame). Adds posted_utc (naive UTC, like the snapshots), price_copper, abnormal, done.
+    """Read the log (a path, comma or tab separated, or a DataFrame). Adds posted_utc (naive UTC, like the snapshots),
+    price_copper, abnormal, done. Tolerates what a pasted sheet looks like: a "Note 1" header, an extra item-name column,
+    times like "8:22 AM", lane words (below = UNDER, above = SAME; anything else = OTHER).
+
+    Results: if only units_expired is filled in, units_sold = quantity - units_expired; if units_sold equals the quantity,
+    units_expired = 0. A partial count with "as of" in the note (7 of 30 "as of 3 PM") is IN PROGRESS, not a result.
     Example rows (note starts with 'example row') are dropped, and so are rows without a quantity or price."""
-    raw = source.copy() if isinstance(source, pd.DataFrame) else pd.read_csv(source, dtype=str, keep_default_na=False)
-    raw.columns = [str(c).strip().lower() for c in raw.columns]
+    if isinstance(source, pd.DataFrame):
+        raw = source.copy()
+    else:
+        raw = pd.read_csv(source, dtype=str, keep_default_na=False, sep=None, engine="python")
+    raw.columns = [COLUMN_ALIASES.get(str(c).strip().lower(), str(c).strip().lower()) for c in raw.columns]
+    if "note" not in raw.columns:
+        raw["note"] = ""
     missing = [c for c in LOG_COLUMNS if c not in raw.columns]
     if missing:
         raise ValueError(f"log is missing columns: {missing}")
@@ -54,9 +68,16 @@ def read_log(source) -> pd.DataFrame:
     local = pd.to_datetime(df["date"] + " " + df["time_posted"])
     df["posted_utc"] = local - pd.to_timedelta(off.astype(float), unit="h")
     df["price_copper"] = (df["list_price"] * COPPER_PER_GOLD).round().astype("int64")
-    df["lane"] = df["lane"].str.upper()
+    df["lane"] = df["lane"].str.upper().map(LANE_WORDS).fillna("OTHER")
     df["abnormal"] = df["note"].str.lower().str.contains("abnormal")
+    as_of = df["note"].str.lower().str.contains("as of")
+    sold, exp, q = df["units_sold"], df["units_expired"], df["quantity"]
+    df["units_sold"] = sold.where(sold.notna(), (q - exp).where(exp.notna()))       # only expired filled in: the rest sold
+    df["units_expired"] = exp.where(exp.notna(), pd.Series(0.0, index=df.index).where(df["units_sold"] >= q))
+    in_progress = as_of & (df["units_sold"] < q)
+    df.loc[in_progress, ["units_sold", "units_expired"]] = np.nan
     df["done"] = df["units_sold"].notna()
+    df["in_progress"] = in_progress
     return df.sort_values("posted_utc").reset_index(drop=True)
 
 
@@ -117,6 +138,7 @@ def trace_listing(row: pd.Series, books: List[tuple], partner_qty: float, vel: d
     if out["gap_before_h"] > max_gap_hours or out["gap_after_h"] > max_gap_hours:
         out["status"] = "snapshot too far from the posting time (a hole)"
         return out
+    out["vs_floor_silver"] = (p - int(b0[1].min())) / SILVER      # price against the lowest price in the snapshot before posting
     below0, at0 = _units(b0[1], b0[2], p)
     below1, at1 = _units(a1[1], a1[2], p)
     out["tier_before"], out["tier_after_first"] = at0, at1
@@ -191,7 +213,9 @@ def summarize(per: pd.DataFrame) -> dict:
     seen = ok[~ok["invisible"].fillna(False).astype(bool)]
     if len(seen):
         s["median_appeared_share"] = float(seen["appeared_share"].median())
-    normal_same = sold_ok[(sold_ok["lane"] == "SAME") & (~sold_ok["abnormal"]) & sold_ok["observed_hours_to_clear"].notna()]
+    # SAME means "at the lowest price when you posted": judged from the book, not from the label you typed
+    at_floor = (sold_ok["vs_floor_silver"] == 0) if "vs_floor_silver" in sold_ok.columns else (sold_ok["lane"] == "SAME")
+    normal_same = sold_ok[at_floor & (~sold_ok["abnormal"]) & sold_ok["observed_hours_to_clear"].notna()]
     s["same_lane_for_order_test"] = int(len(normal_same))
     if len(normal_same):
         def err(col):
