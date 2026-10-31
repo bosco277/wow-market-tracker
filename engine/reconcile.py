@@ -5,9 +5,13 @@ what really sold. For each listing this module asks what the snapshots show for 
 
 1. DETECTION   Did the snapshot right after posting show about `quantity` new units at that price? If you sold the whole
                listing before that snapshot it shows nothing: that is the blind spot ("invisible"), counted directly.
-2. TIMING      How many hours until the units at or below the listing's price fell back to where they were before
-               you posted, versus how long a newest-first (LIFO) queue and an oldest-first (FIFO) queue each predict?
-               Only the SAME lane tells the two apart, because an UNDER listing is first in line under both rules.
+2. TIMING      For a listing that was the CHEAPEST in the book with nothing else at its price, how many hours until
+               nothing at or below that price was left, against the hours the classifier's recent sales rate predicts?
+               The snapshots are hourly, so the observed time is a window: still there at one snapshot, gone at the next.
+               Listings that share a price with older units are NOT used here: other sellers' units arriving and leaving
+               at the same price swamp the signal (the first real run showed negative "seen" shares and clearing times of
+               20 minutes for listings that sold nothing). Queue order (newest-first or not) cannot be read from this log;
+               the `order` check on the book history does that.
 3. TOTALS      Units posted, sold, expired. Listings where the log and the snapshots disagree are listed one by one.
 
 Honest limits: other sellers also post and cancel at your price while you wait, which blurs the "units fell back" test, so
@@ -158,7 +162,7 @@ def trace_listing(row: pd.Series, books: List[tuple], partner_qty: float, vel: d
     you in the queue and also counted in the 'at or below' total)."""
     p, q, t0 = int(row["price_copper"]), float(row["quantity"]), pd.Timestamp(row["posted_utc"])
     out = dict(item_id=int(row["item_id"]), lane=row["lane"], posted_utc=t0, price_gold=p / COPPER_PER_GOLD, quantity=q,
-               units_sold=row["units_sold"], units_expired=row["units_expired"], abnormal=bool(row["abnormal"]))
+               units_sold=row["units_sold"], units_expired=row["units_expired"], abnormal=bool(row["abnormal"]), done=bool(row["done"]))
     before = [b for b in books if b[0] <= t0]
     after = [b for b in books if t0 < b[0] <= t0 + pd.Timedelta(hours=duration_hours + 1.0)]
     if not before or not after:
@@ -174,23 +178,31 @@ def trace_listing(row: pd.Series, books: List[tuple], partner_qty: float, vel: d
     out["vs_floor_silver"] = (p - int(b0[1].min())) / SILVER      # price against the lowest price in the snapshot before posting
     below0, at0 = _units(b0[1], b0[2], p)
     below1, at1 = _units(a1[1], a1[2], p)
+    alone = at0 == 0                      # nothing else was listed at your price: then what appears there is yours
+    cheapest = alone and below0 == 0      # ...and nothing was cheaper: you were first in line
     out["tier_before"], out["tier_after_first"] = at0, at1
-    out["appeared_share"] = (at1 - at0) / q if q else np.nan
+    out["alone"], out["cheapest_at_posting"] = bool(alone), bool(cheapest)
+    out["appeared_share"] = (at1 / q) if (alone and q) else np.nan
     sold = row["units_sold"]
-    out["invisible"] = bool(row["done"] and sold >= 0.9 * q and out["appeared_share"] < 0.2)
+    out["invisible"] = bool(alone and row["done"] and sold >= 0.9 * q and out["appeared_share"] < 0.2)
     target = q + float(partner_qty)
-    base = below0 + at0
-    t_gone, n_obs = np.nan, 0
+    t_gone, still_there, n_obs, front_hits = np.nan, 0.0, 0, 0
     for ts, pr, qt in after:
         if ts > t0 + pd.Timedelta(hours=duration_hours):
             break
         n_obs += 1
         b, a = _units(pr, qt, p)
-        remaining = min(max(b + a - base, 0.0), target)
-        if remaining <= gone_share * target:
-            t_gone = (ts - t0).total_seconds() / 3600.0
-            break
+        if b == 0:
+            front_hits += 1
+        if cheapest:
+            remaining = min(float(b + a), target)
+            if remaining <= gone_share * target:
+                t_gone = (ts - t0).total_seconds() / 3600.0
+                break
+            still_there = (ts - t0).total_seconds() / 3600.0
     out["observed_hours_to_clear"] = t_gone
+    out["still_there_h"] = still_there if cheapest else np.nan
+    out["front_share"] = front_hits / n_obs if n_obs else np.nan   # share of the next snapshots in which nothing was cheaper than you
     out["snapshots_watched"] = n_obs
     ahead_lifo = float(below0) + float(partner_qty)
     ahead_fifo = ahead_lifo + float(at0)
@@ -240,29 +252,37 @@ def summarize(per: pd.DataFrame) -> dict:
         s["share_fully_sold"] = float((done["units_sold"] >= done["quantity"] - 0.5).mean())
     sold_ok = ok[ok["units_sold"].fillna(0) >= 0.9 * ok["quantity"]]
     s["fully_sold_usable"] = int(len(sold_ok))
-    if len(sold_ok):
-        s["invisible_share"] = float(sold_ok["invisible"].mean())
-        s["invisible_count"] = int(sold_ok["invisible"].sum())
-    seen = ok[~ok["invisible"].fillna(False).astype(bool)]
+    alone_sold = sold_ok[sold_ok["alone"].fillna(False).astype(bool)]
+    s["detectable_sold_out"] = int(len(alone_sold))
+    if len(alone_sold):
+        s["invisible_count"] = int(alone_sold["invisible"].sum())
+        s["invisible_share"] = float(alone_sold["invisible"].mean())
+    seen = ok[ok["alone"].fillna(False).astype(bool) & ~ok["invisible"].fillna(False).astype(bool)]
+    s["detection_n"] = int(len(seen))
     if len(seen):
         s["median_appeared_share"] = float(seen["appeared_share"].median())
-    # SAME means "at the lowest price when you posted": judged from the book, not from the label you typed
-    at_floor = (sold_ok["vs_floor_silver"] == 0) if "vs_floor_silver" in sold_ok.columns else (sold_ok["lane"] == "SAME")
-    normal_same = sold_ok[at_floor & (~sold_ok["abnormal"]) & sold_ok["observed_hours_to_clear"].notna()]
-    s["same_lane_for_order_test"] = int(len(normal_same))
-    if len(normal_same):
-        def err(col):
-            pred = normal_same[col].clip(lower=0.25)
-            obs = normal_same["observed_hours_to_clear"].clip(lower=0.25)
-            return np.abs(np.log(pred / obs))
-        e_l, e_f = err("pred_lifo_h_est"), err("pred_fifo_h_est")
-        valid = e_l.notna() & e_f.notna()
-        s["order_test_n"] = int(valid.sum())
-        if valid.any():
-            s["lifo_closer"] = int((e_l[valid] < e_f[valid]).sum())
-            s["fifo_closer"] = int((e_f[valid] < e_l[valid]).sum())
-            s["lifo_median_log_error"] = float(e_l[valid].median())
-            s["fifo_median_log_error"] = float(e_f[valid].median())
+
+    front = ok[ok["cheapest_at_posting"].fillna(False).astype(bool) & ok["done"].fillna(False).astype(bool)]
+    # RATE CHECK: listings first in line that sold out, with a measured clearing window
+    rc = front[(front["units_sold"] >= 0.9 * front["quantity"]) & front["observed_hours_to_clear"].notna() & ~front["abnormal"]]
+    s["rate_check_n"] = int(len(rc))
+    if len(rc):
+        pred = rc["pred_lifo_h_est"]
+        valid = pred.notna()
+        rc = rc[valid]
+        pred = pred[valid]
+        s["rate_check_n"] = int(len(rc))
+        s["rate_inside"] = int(((pred >= rc["still_there_h"]) & (pred <= rc["observed_hours_to_clear"])).sum())
+        s["rate_pred_too_fast"] = int((pred < rc["still_there_h"]).sum())      # real sales were slower than predicted
+        s["rate_pred_too_slow"] = int((pred > rc["observed_hours_to_clear"]).sum())   # real sales were faster
+    # UNSOLD while first in line: pushed back by cheaper listings, or really slow?
+    un = front[(front["units_sold"] == 0) & ~front["abnormal"]]
+    s["unsold_front_n"] = int(len(un))
+    if len(un):
+        stayed = un[un["front_share"] >= 0.8]
+        s["unsold_front_stayed"] = int(len(stayed))
+        s["unsold_front_pushed_back"] = int((un["front_share"] < 0.8).sum())
+        s["unsold_front_stayed_but_predicted_to_sell"] = int((stayed["pred_lifo_h_est"] <= 12.0).sum())
     return s
 
 
@@ -277,15 +297,25 @@ def verdict_text(s: dict) -> List[str]:
         out.append(f"Results filled in for {s['units_posted']:,.0f} units: {s['units_sold']:,.0f} sold, {s['units_expired']:,.0f} came back."
                    + (f" {s['share_fully_sold']:.0%} of listings sold out completely." if "share_fully_sold" in s else ""))
     if "invisible_share" in s:
-        out.append(f"BLIND SPOT: {s['invisible_count']} of {s['fully_sold_usable']} listings that sold out ({s['invisible_share']:.0%}) were gone before the "
-                   f"next snapshot, so they never appeared in the data." + (" Fewer than 5: rough." if s["fully_sold_usable"] < 5 else ""))
+        out.append(f"BLIND SPOT: of {s['detectable_sold_out']} sold-out listings with no other units at their price, {s['invisible_count']} "
+                   f"({s['invisible_share']:.0%}) were gone before the next snapshot and never appeared in the data."
+                   + (" Fewer than 5: rough." if s["detectable_sold_out"] < 5 else ""))
     if "median_appeared_share" in s:
-        out.append(f"DETECTION: in the first snapshot after posting, the tier at your price grew by {s['median_appeared_share']:.0%} of the units you "
-                   f"posted (median; 100% means we see every unit you list).")
-    if s.get("order_test_n", 0) >= 5:
-        winner = "NEWEST-FIRST (LIFO)" if s["lifo_closer"] > s["fifo_closer"] else ("OLDEST-FIRST (FIFO)" if s["fifo_closer"] > s["lifo_closer"] else "neither")
-        out.append(f"QUEUE ORDER from {s['order_test_n']} SAME-lane listings: LIFO predicted the clearing time better in {s['lifo_closer']}, "
-                   f"FIFO in {s['fifo_closer']}; leans {winner}. (median log error: LIFO {s['lifo_median_log_error']:.2f}, FIFO {s['fifo_median_log_error']:.2f})")
-    elif s.get("same_lane_for_order_test", 0):
-        out.append(f"QUEUE ORDER: only {s.get('order_test_n', 0)} comparable SAME-lane listings so far; need 5 before saying anything.")
+        out.append(f"DETECTION: for {s['detection_n']} listings with no other units at their price, the first snapshot after posting showed "
+                   f"{s['median_appeared_share']:.0%} of the units you posted (median; 100% means we see every unit you list).")
+    if s.get("rate_check_n"):
+        out.append(f"RATE CHECK on {s['rate_check_n']} listings that were first in line and sold out: our predicted clearing time fell inside the "
+                   f"observed window in {s['rate_inside']}, was too FAST (real sales slower) in {s['rate_pred_too_fast']}, too SLOW (real sales "
+                   f"faster) in {s['rate_pred_too_slow']}." + (" Fewer than 5: rough." if s["rate_check_n"] < 5 else ""))
+    if s.get("unsold_front_n"):
+        line = (f"UNSOLD while first in line: {s['unsold_front_n']} listings sold nothing. {s['unsold_front_pushed_back']} were pushed back by cheaper "
+                f"listings that appeared afterwards (the price moved, not necessarily a slow item); {s['unsold_front_stayed']} stayed at the front all "
+                f"12 hours")
+        if s["unsold_front_stayed"]:
+            line += f", and for {s['unsold_front_stayed_but_predicted_to_sell']} of those we had predicted a sale inside 12 hours (a rate we overstated)."
+        else:
+            line += "."
+        out.append(line)
+    out.append("QUEUE ORDER: not read from this log. SAME listings share a price with older units, which the snapshots cannot tell apart; "
+               "use the `order` check on the book history.")
     return out

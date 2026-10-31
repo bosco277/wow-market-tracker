@@ -321,11 +321,18 @@ When Forever data exists:
   sales are lumpy and the mean of a few days is dominated by one big hour). `price_median` stays as the raw price.
 - **Spike rule:** a move smaller than 5 silver (`min_move_gold`) is never a spike; on a 4-8 silver item one price step is
   25-100%, and Linen Cloth lost 34 of 91 hours to this before.
-- **Reconcile** (`engine/reconcile.py`, `tools/lake.py reconcile --log experiment_log.csv`): for each log row, the snapshot
-  before and the first snapshot after posting, how many of your units appeared at your price (`appeared_share`), whether a
-  listing that sold out was gone before the next snapshot (`invisible`, the blind spot counted directly), the hours until the
-  units at or below your price fell back to where they were (`observed_hours_to_clear`, approximate because other sellers also
-  post and cancel at your price), and what a newest-first and an oldest-first queue predict at the recent sales rate. Only
-  SAME-lane listings vote on queue order (an UNDER listing is first in line under both rules); no verdict under 5 comparisons.
-  Rows whose notes say "abnormal" are kept out of the queue-order vote. Rows with no snapshot within 90 minutes are marked
-  unusable, never guessed.
+- **Reconcile** (`engine/reconcile.py`, `tools/lake.py reconcile --log experiment_log.csv`), v0.5.5. Per log row: the snapshot
+  before and the first snapshot after posting. Findings from the first real run (47 listings) shaped it:
+  - Detection and the blind spot are only measured for listings with NOTHING else at their price (`alone`). Otherwise other
+    sellers' units arriving and leaving at the same price swamp the signal (first run: negative "seen" shares, and a blind
+    spot of 25% that is really 1 of 6). For `alone` listings the next snapshot showed 100-113% of the units posted.
+  - Timing (`still_h` / `gone_h`, a window because snapshots are hourly) is only measured for listings that were also the
+    CHEAPEST in the book (`cheapest_at_posting`); it is compared with the hours the classifier's recent rate predicts.
+  - `at_front_%` is the share of the next snapshots in which nothing was cheaper than the listing. An unsold listing that
+    stayed at the front all 12 hours and was predicted to sell is evidence our rate is overstated; one that was pushed back
+    by cheaper listings says nothing about the rate.
+  - Queue order (newest-first or not) is NOT read from the log: SAME listings share a price with older units, which
+    snapshots cannot tell apart. The `order` check on the book history does that.
+  Rows posted with a stale "before" snapshot are marked unusable beyond 90 minutes. Rows whose notes say "abnormal" are kept
+  out of the rate check. The log reader accepts tab or comma separated files, "Note 1", item names when item_id is #N/A,
+  below/above lane words, and flags batches whose prices disagree by more than 10% (a likely typo).

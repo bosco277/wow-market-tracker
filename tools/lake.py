@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from engine.loader import ByteBudget, NEEDED_COLUMNS, RangeFile, normalize_frame, read_parquet_file, B2Store, HFStore, LocalStore, MB, coverage_report, day_inventory, choose_files, load_snapshots, plan_load  # noqa: E402
@@ -459,17 +460,23 @@ def run_reconcile(store, args, reader=None, names_fn=fetch_names):
     show = per.copy()
     show["posted_ET"] = show["posted_utc"].map(_et)
     show["name"] = show["item_id"].map(lambda i: str(names.get(int(i), ""))[:18])
-    cols = ["posted_ET", "name", "lane", "vs_floor_silver", "price_gold", "quantity", "units_sold", "units_expired", "appeared_share",
-            "observed_hours_to_clear", "pred_lifo_h_est", "pred_fifo_h_est", "status"]
+    show["still_h"] = show["still_there_h"] if "still_there_h" in show.columns else np.nan
+    cols = ["posted_ET", "name", "lane", "vs_floor_silver", "price_gold", "quantity", "units_sold", "units_expired", "appeared_share", "front_share",
+            "still_h", "observed_hours_to_clear", "pred_lifo_h_est", "status"]
     cols = [c for c in cols if c in show.columns]
     t = show[cols].copy()
-    for c in ("appeared_share",):
+    for c in ("appeared_share", "front_share"):
         if c in t:
             t[c] = (t[c] * 100).round(0)
-    t = t.rename(columns={"appeared_share": "seen_%", "observed_hours_to_clear": "cleared_h", "pred_lifo_h_est": "lifo_h", "pred_fifo_h_est": "fifo_h",
-                          "units_sold": "sold", "units_expired": "expired", "vs_floor_silver": "vs_floor_s", "quantity": "qty", "price_gold": "price"}).round(2)
-    print("\n== EACH LISTING (vs_floor_s = your price against the lowest price just before posting, in silver; seen_% = units that appeared at your price in the next snapshot / units you posted; cleared_h = hours until the")
-    print("   units at or below your price fell back to where they were; lifo_h / fifo_h = what each queue rule predicts at the recent sales rate) ==")
+    t = t.rename(columns={"appeared_share": "seen_%", "observed_hours_to_clear": "gone_h", "pred_lifo_h_est": "predicted_h",
+                          "units_sold": "sold", "units_expired": "expired", "vs_floor_silver": "vs_floor_s", "front_share": "at_front_%",
+                          "quantity": "qty", "price_gold": "price"}).round(2)
+    print("\n== EACH LISTING ==")
+    print("   vs_floor_s   your price against the lowest price just before posting, in silver")
+    print("   seen_%       units that appeared at your price in the next snapshot / units you posted (blank if older units already sat at your price)")
+    print("   at_front_%   share of the following snapshots in which nothing was cheaper than you")
+    print("   still_h / gone_h   for listings that were first in line: still there at this many hours, gone by this many (snapshots are hourly, so it is a window)")
+    print("   predicted_h  hours to sell all units at the recent estimated sales rate")
     print(t.to_string(index=False))
     print("\n== SUMMARY ==")
     for line in verdict_text(summ):

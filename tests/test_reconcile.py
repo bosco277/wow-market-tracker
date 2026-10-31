@@ -76,48 +76,77 @@ class TestReconcile(unittest.TestCase):
         self.assertEqual(s["usable"], 0)
 
 
-class TestQueueOrderTest(unittest.TestCase):
-    def row(self, lane, price, sold=40, q=40):
+class TestRateCheckAndFirstInLine(unittest.TestCase):
+    def row(self, price, sold=40, q=40, lane="UNDER", done=True):
         return pd.Series(dict(price_copper=price, quantity=float(q), posted_utc=pd.Timestamp("2026-10-31 01:05"), lane=lane,
-                              units_sold=float(sold), units_expired=0.0, abnormal=False, done=True, item_id=ITEM))
+                              units_sold=float(sold), units_expired=0.0, abnormal=False, done=done, item_id=ITEM))
 
-    def books(self, clear_after_h):
-        """old tier of 200 units at the floor 1.00; our UNDER 40 at 0.99 and SAME 40 at 1.00 join; everything of ours clears
-        after `clear_after_h` hours (our units, not the old 200, disappear)."""
-        out = [(pd.Timestamp("2026-10-31 00:33"), np.array([10000]), np.array([200]))]
-        for k in range(1, 12):
+    def books(self, mine_until_h, floor=10000, floor_units=200, under_price=9900, extra=None):
+        """Snapshots 00:33, 01:33, ...: a floor tier of others; our 40 units at `under_price` stay until `mine_until_h`
+        hours after the 00:33 snapshot. `extra(k)` may add other (price, units) tiers at snapshot k."""
+        out = []
+        for k in range(0, 12):
             t = pd.Timestamp("2026-10-31 00:33") + pd.Timedelta(hours=k)
-            mine = k < clear_after_h
-            prices = np.array([9900, 10000]) if mine else np.array([10000])
-            qty = np.array([40, 240]) if mine else np.array([200])
-            out.append((t, prices, qty))
+            tiers = {floor: floor_units}
+            if 1 <= k < mine_until_h:
+                tiers[under_price] = tiers.get(under_price, 0) + 40
+            if extra:
+                for pr, u in extra(k):
+                    tiers[pr] = tiers.get(pr, 0) + u
+            prices = np.array(sorted(tiers))
+            out.append((t, prices, np.array([tiers[x] for x in prices])))
         return out
 
-    def test_same_lane_clearing_in_two_hours_fits_lifo_not_fifo(self):
-        vel = dict(low=40.0, est=40.0, high=40.0)
-        t = trace_listing(self.row("SAME", 10000), self.books(3), partner_qty=40, vel=vel)
-        self.assertEqual(t["status"], "ok")
-        self.assertAlmostEqual(t["pred_lifo_h_est"], 2.0)       # (40 of mine ahead + 40 own) / 40 per hour
-        self.assertAlmostEqual(t["pred_fifo_h_est"], 7.0)       # + the 200 old units at the same price
-        self.assertLess(abs(np.log(t["pred_lifo_h_est"] / t["observed_hours_to_clear"])),
-                        abs(np.log(t["pred_fifo_h_est"] / t["observed_hours_to_clear"])))
+    def test_a_first_in_line_listing_gets_a_clearing_window_and_a_prediction_to_compare(self):
+        vel = dict(low=20.0, est=40.0, high=80.0)
+        t = trace_listing(self.row(9900), self.books(4), partner_qty=0, vel=vel)
+        self.assertTrue(t["cheapest_at_posting"] and t["alone"])
+        self.assertAlmostEqual(t["appeared_share"], 1.0)
+        self.assertAlmostEqual(t["pred_lifo_h_est"], 1.0)                       # 40 units at 40 an hour
+        self.assertAlmostEqual(t["still_there_h"], 2 + 28 / 60, places=2)             # last seen at 03:33, posted 01:05
+        self.assertAlmostEqual(t["observed_hours_to_clear"], 3 + 28 / 60, places=2)   # gone at 04:33
+        self.assertGreater(t["front_share"], 0.99)
 
-    def test_verdict_needs_five_comparisons(self):
+    def test_a_listing_that_shares_its_price_with_older_units_is_not_used_for_timing_or_detection(self):
         vel = dict(low=40.0, est=40.0, high=40.0)
-        rows = [trace_listing(self.row("SAME", 10000), self.books(3), 40, vel) for _ in range(4)]
-        s = summarize(pd.DataFrame(rows))
-        self.assertTrue(any("need 5" in line for line in verdict_text(s)))
-        rows.append(trace_listing(self.row("SAME", 10000), self.books(3), 40, vel))
-        s5 = summarize(pd.DataFrame(rows))
-        self.assertEqual(s5["order_test_n"], 5)
-        self.assertEqual(s5["lifo_closer"], 5)
-        self.assertTrue(any("NEWEST-FIRST" in line for line in verdict_text(s5)))
+        t = trace_listing(self.row(10000, lane="SAME"), self.books(4), partner_qty=0, vel=vel)
+        self.assertFalse(t["alone"])
+        self.assertTrue(np.isnan(t["appeared_share"]))
+        self.assertTrue(np.isnan(t["observed_hours_to_clear"]))
+        self.assertFalse(t["invisible"])
 
-    def test_under_lane_does_not_vote_on_order(self):
+    def test_front_share_falls_when_cheaper_listings_arrive_after_you(self):
         vel = dict(low=40.0, est=40.0, high=40.0)
-        rows = [trace_listing(self.row("UNDER", 9900), self.books(3), 0, vel) for _ in range(6)]
-        s = summarize(pd.DataFrame(rows))
-        self.assertEqual(s["same_lane_for_order_test"], 0)
+        pushed = lambda k: [(9800, 30)] if k >= 3 else []                       # an undercutter from the 03:33 snapshot on
+        t = trace_listing(self.row(9900, sold=0), self.books(99, extra=pushed), partner_qty=0, vel=vel)
+        self.assertLess(t["front_share"], 0.5)
+        self.assertTrue(np.isnan(t["observed_hours_to_clear"]))
+
+    def row_set(self, specs):
+        vel = dict(low=40.0, est=40.0, high=40.0)
+        return pd.DataFrame([trace_listing(self.row(9900, sold=sold), self.books(k, extra=ex), 0, vel) for sold, k, ex in specs])
+
+    def test_summary_counts_rate_check_and_unsold_causes_separately(self):
+        none = None
+        pushed = lambda k: [(9800, 30)] if k >= 3 else []
+        per = self.row_set([
+            (40, 4, none),           # sold; real clearing 3.x h against a predicted 1 h  -> predicted too FAST
+            (40, 2, none),           # sold; cleared by the 02:33 snapshot (1.4 h window 0-1.4 h) vs predicted 1 h -> inside
+            (0, 99, none),           # unsold, at the front all the time, predicted to sell inside 12 h -> overstated rate
+            (0, 99, pushed),         # unsold, pushed back
+        ])
+        s = summarize(per)
+        self.assertEqual(s["rate_check_n"], 2)
+        self.assertEqual(s["rate_pred_too_fast"], 1)
+        self.assertEqual(s["rate_inside"], 1)
+        self.assertEqual(s["unsold_front_n"], 2)
+        self.assertEqual(s["unsold_front_stayed"], 1)
+        self.assertEqual(s["unsold_front_pushed_back"], 1)
+        self.assertEqual(s["unsold_front_stayed_but_predicted_to_sell"], 1)
+        text = " ".join(verdict_text(s))
+        self.assertIn("RATE CHECK", text)
+        self.assertIn("pushed back", text)
+        self.assertIn("QUEUE ORDER: not read from this log", text)
 
 
 PASTED = "\n".join([
