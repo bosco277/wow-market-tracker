@@ -199,32 +199,48 @@ class TestNumericTables(unittest.TestCase):
 class TestTimeProfiles(unittest.TestCase):
     def hourly(self, days=10):   # ends before daylight saving time ends (Nov 1), so the -4 h offset holds
         ts = pd.date_range("2026-10-20 00:00", periods=days * 24, freq="h")
-        hour_et = (ts - pd.Timedelta(hours=4)).hour                     # EDT during October
-        price = 10.0 * np.where(hour_et >= 20, 0.8, 1.0)                # 20% cheaper from 8 PM Eastern
-        units = np.where(hour_et >= 18, 2000, 1000)
-        return pd.DataFrame({"ts": ts, "floor_gold": price, "units_listed": units, "sold_est": np.where(hour_et == 21, 5.0, 1.0),
-                             "spike": False, "blip": False})
+        hour_et = (ts - pd.Timedelta(hours=4)).hour
+        return pd.DataFrame({"ts": ts, "floor_gold": np.where(hour_et >= 20, 8.0, 10.0), "units_listed": np.where(hour_et >= 18, 2000, 1000),
+                             "sold_est": np.where(hour_et == 21, 5.0, 1.0), "spike": False, "blip": False})
 
-    def test_hour_of_day_finds_the_cheap_hour(self):
+    def test_grids_are_7_by_24_in_eastern_time(self):
         tp = lib.time_profiles(self.hourly())
-        hod = tp["hod"].set_index("hour")
-        self.assertLess(hod.loc[20, "price_rel"], -15)
-        self.assertAlmostEqual(hod.loc[12, "price_rel"], 0.0, places=0)
-        self.assertGreater(hod.loc[19, "units_rel"], hod.loc[9, "units_rel"])
-        self.assertAlmostEqual(hod.loc[21, "sold_per_hour"], 5.0)
-        self.assertEqual(len(hod), 24)
+        for k in ("price", "units", "sold", "n"):
+            self.assertEqual(tp[k].shape, (7, 24))
+        self.assertTrue((tp["price"][20] == 8.0).all() and (tp["price"][12] == 10.0).all())    # 8 PM Eastern, not UTC
+        self.assertTrue((tp["units"][19] == 2000).all() and (tp["units"][9] == 1000).all())
+        self.assertTrue((tp["sold"][21] == 5.0).all())
+        self.assertEqual(int(tp["n"].to_numpy().sum()), tp["hours"])
+        self.assertEqual(len(lib.HOURS), 24)
+        self.assertEqual((lib.HOURS[0], lib.HOURS[12], lib.HOURS[23]), ("12am", "12pm", "11pm"))
 
-    def test_grid_shape_counts_and_masking_inputs(self):
-        tp = lib.time_profiles(self.hourly())
-        self.assertEqual(tp["grid_price"].shape, (7, 6))
-        self.assertEqual(int(tp["grid_n"].to_numpy().sum()), tp["hours"])
-        self.assertLess(tp["grid_price"].loc[:, 5].mean(), tp["grid_price"].loc[:, 2].mean())   # 20-24 block holds the cheap hour
+    def test_day_of_week_row_order(self):
+        h = self.hourly()
+        tp = lib.time_profiles(h.assign(floor_gold=[float(t.dayofweek) for t in (h["ts"] - pd.Timedelta(hours=4))]))
+        for d in range(7):
+            self.assertTrue((tp["price"].loc[d].dropna() == d).all())                       # row 0 = Monday ... row 6 = Sunday
 
-    def test_flagged_hours_excluded_and_timezone_aware_input(self):
-        h = self.hourly(3)
+    def test_flagged_hours_excluded_blank_cells_and_timezone_aware_input(self):
+        h = self.hourly(2)
         h.loc[5, ["floor_gold", "spike"]] = [1000.0, True]
         tp = lib.time_profiles(h)
         self.assertEqual(tp["hours"], len(h) - 1)
-        h2 = h.assign(ts=h["ts"].dt.tz_localize("UTC"))
-        self.assertEqual(lib.time_profiles(h2)["hours"], len(h) - 1)
+        self.assertTrue(tp["price"].isna().any().any())                                   # two days cannot fill a week
+        self.assertEqual(lib.time_profiles(h.assign(ts=h["ts"].dt.tz_localize("UTC")))["hours"], len(h) - 1)
         self.assertEqual(lib.time_profiles(pd.DataFrame()), {})
+
+
+class TestPastEvents(unittest.TestCase):
+    def test_plain_headers_numbers_and_wording(self):
+        f = pd.DataFrame({"t1": pd.to_datetime(["2026-10-31 17:33:42", "2026-11-01 06:33:45", "2026-11-01 08:00:00"]),
+                          "floor_before_gold": [2.92, 1.74, 2.0], "floor_after_gold": [3.96, 3.95, 4.0], "jump": [1.3562, 2.2701, 2.0],
+                          "units_removed": [93.0, 65.0, 40.0], "ended_by": ["reverted", "hole", "end_of_data"],
+                          "revert_hours": [3.5, np.nan, np.nan], "followup_hours": [3.5, 2.0, 1.5], "likely_flip": [True, False, False]})
+        t = lib.past_events_table(f)
+        self.assertEqual(list(t["When (US Eastern)"])[0], "Sun Nov 01 03:00 AM")        # newest first, DST ended Nov 1 (UTC-5 -> 03:00)
+        self.assertAlmostEqual(t["Price rose by (%)"].iloc[2], 35.62, places=2)
+        self.assertTrue(pd.api.types.is_numeric_dtype(t["Units bought out"]))
+        self.assertEqual(list(t["Back to old price?"]), ["not yet (watched 1.5 h)", "unknown (gap in our data)", "yes, after 3.5 h"])
+        self.assertEqual(list(t["Looks like a flipper"]), ["no", "no", "yes"])
+        self.assertTrue(lib.past_events_table(pd.DataFrame()).empty)
+        self.assertNotIn("Back to old price?", lib.past_events_table(f.drop(columns=["ended_by"])).columns)

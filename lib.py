@@ -338,42 +338,63 @@ def flip_numbers(sh: pd.DataFrame, rates: Optional[dict] = None) -> pd.DataFrame
 
 
 DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-BLOCKS = ["00-04", "04-08", "08-12", "12-16", "16-20", "20-24"]
+HOURS = ["12am"] + [f"{h}am" for h in range(1, 12)] + ["12pm"] + [f"{h}pm" for h in range(1, 12)]
 
 
-def time_profiles(h: pd.DataFrame, tz: str = "America/New_York", min_obs: int = 3) -> dict:
-    """Time-of-day and day-of-week patterns for ONE item from its hourly rows (ts, floor_gold, units_listed, spike, blip).
+def time_profiles(h: pd.DataFrame, tz: str = "America/New_York") -> dict:
+    """Day-of-week x hour-of-day grids (7 rows Mon..Sun, 24 columns) for ONE item, from its hourly rows
+    (ts, floor_gold, units_listed, sold_est, spike, blip). All times are US Eastern. Each cell is the MEDIAN of the readings that
+    fall in it, and `n` says how many readings that was (about one per week, so with under a month of data most cells rest on 1 to 3).
 
-    hod            per hour of day: median price, p25 / p75, median units listed, price vs the item's own level (so a price that
-                   simply fell over the week is not read as an evening discount), number of observations
-    grid_price     day of week x 4-hour block: price vs its own level (%), blanks where there is no data
-    grid_units     same grid: units listed vs the item's overall median (%)
-    grid_n         observations behind each cell (cells under `min_obs` are a draft: with under a few weeks of data most are)
-    Spike and blip hours are left out."""
+    price   lowest price on the auction house (gold)
+    units   total units listed
+    sold    sales velocity: the best estimate of units sold per hour (the middle of the low - best - high range we use)
+    n       readings behind each cell
+    Hours flagged as a price spike or a listing blip are left out."""
     if h is None or h.empty:
         return {}
-    s = h.sort_values("ts").reset_index(drop=True).copy()
+    s = h.copy()
     bad = pd.Series(flag_mask(s, "spike") | flag_mask(s, "blip"), index=s.index)
     t = pd.to_datetime(s["ts"])
     t = (t.dt.tz_localize("UTC") if t.dt.tz is None else t).dt.tz_convert(tz)
-    s["hour"], s["dow"], s["block"] = t.dt.hour, t.dt.dayofweek, (t.dt.hour // 4)
-    f = s["floor_gold"].astype(float)
-    ref = f.where(~bad).rolling(25, center=True, min_periods=21).median()
-    s["price_rel"] = (f / ref - 1.0) * 100.0
-    u = s["units_listed"].astype(float)
-    base = float(u.where(~bad).median()) if u.where(~bad).notna().any() else np.nan
-    s["units_rel"] = (u / base - 1.0) * 100.0 if base == base and base > 0 else np.nan
+    s["dow"], s["hour"] = t.dt.dayofweek, t.dt.hour
+    s["price"] = s["floor_gold"].astype(float)
+    s["units"] = s["units_listed"].astype(float)
     s["sold"] = s["sold_est"].astype(float) if "sold_est" in s else np.nan
     g = s[~bad]
-    hod = g.groupby("hour").agg(n_obs=("floor_gold", "count"), price_median=("floor_gold", "median"),
-                                price_p25=("floor_gold", lambda x: x.quantile(0.25)), price_p75=("floor_gold", lambda x: x.quantile(0.75)),
-                                units_median=("units_listed", "median"), price_rel=("price_rel", "median"),
-                                units_rel=("units_rel", "median"), sold_per_hour=("sold", "mean")).reindex(range(24)).reset_index()
-    gp = g.groupby(["dow", "block"])
-    cell = gp.agg(n=("floor_gold", "count"), price_rel=("price_rel", "median"), units_rel=("units_rel", "median"),
-                  sold_per_hour=("sold", "mean"))
-    full = pd.MultiIndex.from_product([range(7), range(6)], names=["dow", "block"])
-    cell = cell.reindex(full)
-    shape = lambda col: cell[col].unstack("block").reindex(index=range(7), columns=range(6))
-    return dict(hod=hod, grid_price=shape("price_rel"), grid_units=shape("units_rel"), grid_sold=shape("sold_per_hour"), grid_n=shape("n").fillna(0).astype(int),
-                min_obs=min_obs, hours=int(len(g)), base_units=base)
+    if g.empty:
+        return {}
+    shape = lambda col, how: g.groupby(["dow", "hour"])[col].agg(how).unstack("hour").reindex(index=range(7), columns=range(24))
+    return dict(price=shape("price", "median"), units=shape("units", "median"), sold=shape("sold", "median"),
+                n=shape("price", "count").fillna(0).astype(int), hours=int(len(g)))
+
+
+def past_events_table(f: pd.DataFrame, tz: str = "America/New_York") -> pd.DataFrame:
+    """One item's past buyout events (the engine's `flips` table) with plain headers and numbers in numeric columns."""
+    if f is None or f.empty:
+        return pd.DataFrame()
+    f = f.sort_values("t1", ascending=False).reset_index(drop=True)
+    t = pd.to_datetime(f["t1"])
+    t = (t.dt.tz_localize("UTC") if t.dt.tz is None else t).dt.tz_convert(tz)
+
+    def back(r):
+        how = r.get("ended_by", "")
+        if how == "reverted":
+            return f"yes, after {r['revert_hours']:.1f} h"
+        if how == "hole":
+            return "unknown (gap in our data)"
+        if how == "end_of_data":
+            return f"not yet (watched {r.get('followup_hours', 0):.1f} h)"
+        return "-"
+    out = pd.DataFrame({
+        "When (US Eastern)": t.dt.strftime("%a %b %d %I:%M %p"),
+        "Lowest price before (g)": f["floor_before_gold"].astype(float),
+        "Lowest price after (g)": f["floor_after_gold"].astype(float),
+        "Price rose by (%)": (f["jump"].astype(float) - 1.0) * 100.0,
+        "Units bought out": f["units_removed"].astype(float).round(0),
+    })
+    if "ended_by" in f:
+        out["Back to old price?"] = f.apply(back, axis=1)
+    if "likely_flip" in f:
+        out["Looks like a flipper"] = f["likely_flip"].map(lambda v: "yes" if bool(v) else "no")
+    return out

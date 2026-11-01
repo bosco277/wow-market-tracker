@@ -90,37 +90,33 @@ def pick_row(df: pd.DataFrame, key: str, height: int = 520):
 
 
 def time_charts(h: pd.DataFrame, key: str):
-    """Time of day (24 bars) and day of week x 4-hour block (heatmap), for price, units listed and units sold. US Eastern."""
+    """Three heatmaps, day of week x hour of day (US Eastern): quantity listed, lowest price, sales velocity."""
     tp = lib.time_profiles(h)
     if not tp:
         return
-    st.markdown("**When it happens: time of day and day of week (US Eastern)**")
-    days = (h["ts"].max() - h["ts"].min()).total_seconds() / 86400 if len(h) else 0
-    st.caption(f"Built from {tp['hours']} hourly readings ({days:.1f} days). Price is shown against the item's own level around that time, "
-               "so a price that simply fell over the week is not read as an evening discount. A day-of-week cell needs several weeks to mean "
-               f"much: cells with fewer than {tp['min_obs']} readings are greyed out. Treat all of this as a draft until about 4 weeks exist.")
-    hod = tp["hod"]
-    specs = [("price_rel", "Price vs its own level (%)", "#2B4C59"), ("units_rel", "Units listed vs usual (%)", "#6B8E9B"),
-             ("sold_per_hour", "Units sold per hour (best estimate)", "#C28A1B")]
-    cols = st.columns(3)
-    for c, (col, title, color) in zip(cols, specs):
-        f = go.Figure(go.Bar(x=hod["hour"], y=hod[col], marker_color=color, customdata=hod["n_obs"],
-                             hovertemplate="%{x}:00  %{y:,.1f}  (%{customdata} readings)<extra></extra>"))
-        f.update_layout(title=f"{title}, by hour", height=280, margin=dict(l=10, r=10, t=50, b=10), xaxis=dict(dtick=3, title="hour of day"),
-                        showlegend=False)
-        c.plotly_chart(f, **WIDE, key=f"{key}_hod_{col}")
-    grids = [("grid_price", "Price vs its own level (%)", "RdBu_r"), ("grid_units", "Units listed vs usual (%)", "RdBu"),
-             ("grid_sold", "Units sold per hour", "YlOrBr")]
-    n = tp["grid_n"]
-    cols = st.columns(3)
-    for c, (gk, title, scale) in zip(cols, grids):
-        z = tp[gk].where(n >= tp["min_obs"])
-        mid = 0 if gk != "grid_sold" else None
-        f = go.Figure(go.Heatmap(z=z.values, x=lib.BLOCKS, y=lib.DOW, colorscale=scale, zmid=mid, customdata=n.values,
-                                 hovertemplate="%{y} %{x}h: %{z:,.1f}  (%{customdata} readings)<extra></extra>", xgap=2, ygap=2,
-                                 colorbar=dict(thickness=10)))
-        f.update_layout(title=f"{title}, by day and time", height=300, margin=dict(l=10, r=10, t=50, b=10), yaxis=dict(autorange="reversed"))
-        c.plotly_chart(f, **WIDE, key=f"{key}_dow_{gk}")
+    days = (h["ts"].max() - h["ts"].min()).total_seconds() / 86400
+    st.markdown("**When it happens: day of week and hour of day (US Eastern)**")
+    st.caption(f"Built from {tp['hours']} hourly readings ({days:.1f} days). Each square is the median of the readings in that hour of that weekday; "
+               "with under a month of data most squares rest on one to three readings, so they are a draft. Blank squares have no reading. "
+               "Hover a square for its value and how many readings are behind it.")
+    n = tp["n"]
+    specs = [
+        ("units", "Quantity listed (total units on the auction house)", "YlOrBr", lambda v: f"{v:,.0f} units"),
+        ("price", "Lowest price", "Blues", lib.gsc),
+        ("sold", "Sales velocity (best estimate of units sold per hour)", "Greens", lambda v: f"{v:,.1f} per hour"),
+    ]
+    for gk, title, scale, fmt in specs:
+        z = tp[gk]
+        text = z.apply(lambda col: col.map(lambda v: "" if v != v else fmt(v)))
+        hover = text.copy()
+        for r in range(7):
+            for c in range(24):
+                hover.iat[r, c] = f"{lib.DOW[r]} {lib.HOURS[c]}: {text.iat[r, c]} ({n.iat[r, c]} reading{'s' if n.iat[r, c] != 1 else ''})"
+        f = go.Figure(go.Heatmap(z=z.values, x=lib.HOURS, y=lib.DOW, colorscale=scale, xgap=2, ygap=2, hoverongaps=False,
+                                 text=hover.values, hovertemplate="%{text}<extra></extra>", colorbar=dict(thickness=10)))
+        f.update_layout(title=title, height=300, margin=dict(l=10, r=10, t=50, b=10), yaxis=dict(autorange="reversed"),
+                        xaxis=dict(type="category", tickangle=0, tickmode="array", tickvals=lib.HOURS[::2], ticktext=lib.HOURS[::2]))
+        st.plotly_chart(f, **WIDE, key=f"{key}_heat_{gk}")
 
 
 def item_detail(pick: int, key: str):
@@ -183,15 +179,19 @@ def item_detail(pick: int, key: str):
             st.markdown(f"**Flip shelf: {x['verdict']}.** Buy {x['units']:.0f} units (avg {lib.gsc(x['avg_price_gold'])}, break-even "
                         f"{lib.gsc(x['breakeven_gold'])}), relist at {lib.gsc(x['target_gold'])}: net margin {x['net_margin']:.0%}, "
                         f"{x['net_margin_stress']:.0%} if you sell 10% under. Hours to sell {lib.shelf_hours(x)}.")
-            st.table(pd.DataFrame({"Check": [lib.TEST_INFO[c][0] for c in lib.TEST_COLS], "Result": [lib.MARK[x[c]] for c in lib.TEST_COLS],
-                                   "What it asks": [lib.TEST_INFO[c][1] for c in lib.TEST_COLS]}).set_index("Check"))
+            st.caption(f"Checks that did not pass: {lib.shelf_watch(x)}. What each check means is explained on the Flips tab, under its table.")
     time_charts(h, key)
     if len(flips):
         f = flips[flips["item_id"] == pick]
         if len(f):
-            st.markdown("**Past flip-like events for this item**")
-            st.dataframe(f[[c for c in ("t1", "floor_before_gold", "floor_after_gold", "jump", "units_removed") if c in f.columns]], hide_index=True)
-
+            st.markdown("**Past buyouts of this item's cheap listings**")
+            st.caption("Moments in the last 4 days when almost all of the cheapest listings vanished within one hour (bought out, not expired), "
+                       "so the lowest price jumped. It may have been a flipper, or just a rush of demand. 'Back to old price?' says how long it took "
+                       "for the lowest price to return to within 10% of what it was before. 'Looks like a flipper' means the amount bought was at "
+                       "least 3 times a normal hour of sales AND at least half of it was relisted near the new price. Use this to see how long a "
+                       "raised price tends to last for this item.")
+            ev = lib.past_events_table(f)
+            st.dataframe(ev, hide_index=True, **WIDE, column_config=column_config(ev))
 
 tab_market, tab_flip, tab_exp, tab_conf = st.tabs(["Market", "Flips", "Experiment", "Confidence"])
 

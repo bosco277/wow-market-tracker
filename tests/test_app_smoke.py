@@ -101,9 +101,13 @@ def tables():
         "daily_low": [1, 2], "daily_est": [3, 4], "daily_high": [5, 6], "engine_version": "0.7.6",
         **{c: ["pass", "warn"] for c in ("test_price", "test_speed", "test_size", "test_margin", "test_regime", "test_book")},
         "long_median_gold": [1.2, 2.5], "long_p10_gold": [1.0, 2.0], "long_p90_gold": [1.4, 3.0], "long_days": [7.0, 5.0]})
+    flips = pd.DataFrame({"item_id": [1, 1], "t1": pd.to_datetime(["2026-10-31 17:33:42", "2026-11-01 04:33:45"]),
+                          "floor_before_gold": [2.9, 2.7], "floor_after_gold": [3.9, 3.7], "jump": [1.35, 1.37], "units_removed": [93.0, 78.0],
+                          "ended_by": ["reverted", "end_of_data"], "revert_hours": [3.0, np.nan], "followup_hours": [3.0, 1.0],
+                          "likely_flip": [True, False]})
     cal = pd.DataFrame({"data_last_ts": [pd.Timestamp("2026-11-01 12:00")], "median_range_ratio": [2.9], "n_high": [1], "n_medium": [1], "n_low": [1]})
     return dict(items=items, item_hourly=hourly, profile=pd.DataFrame(), calibration=cal, calibration_history=cal,
-                experiment=pd.DataFrame(), flips=pd.DataFrame(), shelves=shelves, backtest_summary=pd.DataFrame())
+                experiment=pd.DataFrame(), flips=flips, shelves=shelves, backtest_summary=pd.DataFrame())
 
 
 def run_app(data, **kw):  # kw: selected_row, found, version
@@ -139,9 +143,11 @@ class TestAppSmoke(unittest.TestCase):
         for df, k in st.seen:
             self.assertNotIn("use_container_width", k)               # the deprecated argument is gone on Streamlit 1.51
             self.assertEqual(k.get("width"), "stretch")
-        market = st.seen[0][0]
+        market = next(d for d, k in st.seen if "Sold/day best" in d and "Gold/day best (g)" in d)
         self.assertTrue(pd.api.types.is_numeric_dtype(market["Sold/day best"]))
-        flips = st.seen[1][0]
+        flips = next(d for d, k in st.seen if "Profit at target (g)" in d)
+        events = next(d for d, k in st.seen if "Units bought out" in d)                 # the item view's past-buyouts table
+        self.assertEqual(len(events), 2)
         self.assertTrue(pd.api.types.is_numeric_dtype(flips["Profit at target (g)"]))
         self.assertTrue(pd.api.types.is_numeric_dtype(flips["Hours to sell (slow case)"]))
 
@@ -153,7 +159,7 @@ class TestAppSmoke(unittest.TestCase):
 
     def test_search_box_shows_item_and_watch_list_from_address(self):
         st = run_app(tables(), selected_row=None, found="Saronite Ore (2)")
-        market = st.seen[0][0]
+        market = next(d for d, k in st.seen if "Watched" in d)
         self.assertTrue(market.loc[market["Item ID"] == 2, "Watched"].iloc[0])      # ?watch=2
         self.assertFalse(market.loc[market["Item ID"] == 1, "Watched"].iloc[0])
 
