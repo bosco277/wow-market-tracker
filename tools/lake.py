@@ -775,7 +775,8 @@ def run_grouptest(store, args, read_table=None):
     if items.empty or groups.empty:
         print("grouptest needs engine/items.parquet and engine/item_groups.parquet. Run derive with upload ticked, then groups with upload ticked.")
         return {}
-    res = GT.grouptest(groups, items)
+    hourly = read_table("item_hourly")
+    res = GT.grouptest(groups, items, hourly if len(hourly) else None)
     if not res:
         print("Nothing to score: no items with both a group and a sales rate.")
         return {}
@@ -788,7 +789,10 @@ def run_grouptest(store, args, read_table=None):
         d = df[[key] + [c for c in show if c in df.columns]].rename(columns=show)
         return d.round(2).to_string(index=False)
 
-    print(f"GROUP TEST on {res['n_items']} items. Each item is guessed from the OTHER items in its group, never from itself.")
+    print(f"GROUP TEST on {res['n_items']} items.")
+    print("PART 1 - HOW MANY SELL. This compares absolute sales per day and price, so it asks whether items in a group sell similar QUANTITIES. That is the hardest")
+    print("question; parts 2 and 3 below (daily rhythm, lifting together) compare each item with its OWN normal and are the ones that ask whether they MOVE alike.")
+    print("Each item is guessed from the OTHER items in its group, never from itself.")
     print("  *_miss = how far off the typical guess is, as a multiple (2.0 = about double or half). Smaller is better.")
     print("  vs_all / vs_family = how many times smaller the miss is than guessing from all items / from the item's family (1.0 = no help).")
     print(f"  reliable = items whose own numbers are Medium/High confidence; rel_* repeat the test on those only. Verdict needs {GT.MIN_SCORED}+ scored items and a {int((GT.HELPS - 1) * 100)}%+ smaller miss.")
@@ -816,11 +820,48 @@ def run_grouptest(store, args, read_table=None):
     coarse = res.get("coarse")
     if coarse is not None and len(coarse):
         print("\n== BIG GROUPS WHOSE ITEMS BEHAVE VERY DIFFERENTLY: WHAT SPLITS THEM? (sales per day) ==")
-        print("  id_band = item id in blocks of 20,000 (roughly which expansion); quality; tiered = has same-name tiers; use = name guess.")
+        print("  off_* = typical miss as a multiple; gain_* = miss before / miss after splitting (1.0 = no help). era = item-id range, my rough guess at the")
+        print("  expansion (old <120k, mid 120-200k, previous 200-240k, current 240k+); id_band = blocks of 20,000; tiered = has same-name tiers; use = name guess.")
         print(coarse.drop(columns=["slices"]).round(2).to_string(index=False))
         for r in coarse.itertuples():
-            print(f"  {r.group} split by {r.best_split}: {r.slices}")
+            print(f"  {r.group} by {r.best_split}: {r.slices}")
         coarse.to_csv(os.path.join(args.out, "grouptest_coarse.csv"), index=False)
+    rh = res.get("rhythm")
+    if rh:
+        print(f"\n== PART 2 - DAILY RHYTHM: do items in a group sell (and price) on the same daily pattern? ({rh['items']} items with enough hourly history, {rh['rows']:,} hourly readings) ==")
+        print("  Each item's pattern is guessed from the average of the OTHER items in its group. hour_miss / dow_miss = share of sales sitting in the wrong hours / days")
+        print("  (0 = perfect); price_miss = typical gap in log10 price by hour (0.05 = about 12%). vs_flat = miss of a flat day / miss of the group guess; vs_all = miss of the")
+        print(f"  all-items average / miss of the group guess. Needs {GT.MIN_HOURS}+ usable hourly readings per item; {GT.MIN_SCORED}+ items per group for a verdict.")
+        keep = ["hour_items", "hour_miss_group", "hour_vs_flat", "hour_vs_all", "dow_miss_group", "dow_vs_flat", "dow_vs_all", "price_miss_group", "price_vs_flat", "price_vs_all", "hour_verdict"]
+        for level, key, title in (("overall", "_all", "ALL ITEMS"), ("families", "family", "BY FAMILY"), ("groups", "group", "BY GROUP")):
+            df = rh.get(level)
+            if df is not None and len(df):
+                print(f"\n-- {title} --")
+                print(df[[key] + [c for c in keep if c in df.columns]].round(3).to_string(index=False))
+                df.to_csv(os.path.join(args.out, f"grouptest_rhythm_{level}.csv"), index=False)
+    cm = res.get("comove")
+    if cm:
+        print(f"\n== PART 3 - LIFTING TOGETHER: do items in a group have good and bad DAYS together? ({cm['items']} items, {cm['days']} days) ==")
+        print("  Each day is compared with the item's OWN typical day, so quantities drop out: sales_lift 0.30 = double its normal, -0.30 = half. For each item we correlate its")
+        print("  day-by-day lifts with the average of the OTHER items in its group (corr_group) and of every item OUTSIDE its group (corr_market). extra = corr_group - corr_market: how much")
+        print(f"  the group moves together beyond everything moving at once (reset days, patches, weekends). Needs {GT.MIN_DAYS}+ good days and 3+ units a day per item; 0 = no link, 1 = identical.")
+        print(f"  spike_events = item-days with sales at least {GT.SPIKE:g}x normal. spike_group / spike_market = how many times more likely the item's peers (in its group / outside it) are to lift on")
+        print("  those same days than on a random day (1.0 = no link). price_* is the same test on the day's price.")
+        keep = ["sales_items", "sales_corr_group", "sales_corr_market", "sales_extra", "price_corr_group", "price_corr_market", "price_extra", "spike_events", "spike_group",
+                "spike_market", "sales_verdict", "spike_verdict"]
+        for level, key, title in (("overall", "_all", "ALL ITEMS"), ("families", "family", "BY FAMILY"), ("groups", "group", "BY GROUP")):
+            df = cm.get(level)
+            if df is not None and len(df):
+                print(f"\n-- {title} --")
+                print(df[[key] + [c for c in keep if c in df.columns]].round(2).to_string(index=False))
+                df.to_csv(os.path.join(args.out, f"grouptest_comove_{level}.csv"), index=False)
+    elif rh:
+        print(f"\n(Lifting-together test skipped: no item has {GT.MIN_DAYS}+ complete days with {GT.MIN_DAILY_SOLD:g}+ units a day yet.)")
+    if not rh:
+        if hourly is None or not len(hourly):
+            print("\n(Daily-rhythm and lifting-together tests skipped: engine/item_hourly.parquet is missing or empty.)")
+        else:
+            print(f"\n(Daily-rhythm and lifting-together tests skipped: no item has {GT.MIN_HOURS}+ usable hourly readings yet.)")
     return res
 
 

@@ -15,7 +15,14 @@ MIN_SCORED = 6         # fewer scored items than this and there is no verdict
 HELPS = 1.15           # a guess has to cut the typical miss by at least 15% to count as help
 BAND = 20000           # item-id slices: a rough stand-in for the expansion an item belongs to
 RELIABLE = ("Medium", "High")
-SPLITS = ("id_band", "quality", "tiered", "use")
+ERA_EDGES = (0, 120000, 200000, 240000)       # item-id edges: a rough guess at expansion boundaries, not Blizzard data
+ERA_LABELS = ("old (<120k)", "mid (120-200k)", "previous (200-240k)", "current (240k+)")
+SPLITS = ("era", "id_band", "quality", "era_quality", "tiered", "use")
+MIN_DAYS = 14          # an item needs this many usable days before its day-to-day lifts are scored
+MIN_DAILY_SOLD = 3.0   # and a typical day of at least this many units sold (below that, a day's count is mostly luck)
+SPIKE = 2.0            # a "lift" day: sales at least this many times the item's own typical day
+EXTRA_CORR = 0.10      # a group has its own pattern if its correlation beats the all-items one by this much
+MIN_HOURS = 240        # an item needs this many usable hourly readings (about 10 days) before its daily rhythm is scored
 
 
 def _loo_median(df: pd.DataFrame, keys: list, col: str, min_peers: int = MIN_PEERS) -> np.ndarray:
@@ -56,6 +63,8 @@ def prepare(groups: pd.DataFrame, items: pd.DataFrame) -> pd.DataFrame:
     m["reliable"] = m["confidence"].isin(RELIABLE)
     m["id_band"] = ((m["item_id"].astype(int) // BAND) * BAND // 1000).astype(str) + "k"
     m["tiered"] = np.where(m["siblings"] > 1, "has tiers", "single")
+    m["era"] = pd.Series(ERA_LABELS)[np.searchsorted(ERA_EDGES, m["item_id"].to_numpy(), side="right") - 1].to_numpy()
+    m["era_quality"] = m["era"] + " / " + m["quality"]
     m["_all"] = "all"
     return m
 
@@ -148,10 +157,24 @@ def tier_report(m: pd.DataFrame) -> dict:
     return out
 
 
+def _slices(part: pd.DataFrame, split: str) -> str:
+    """What each slice of a split looks like: median sales per day, median price, and how many items."""
+    agg = part.groupby(split).agg(sales=("daily_est", "median"), price=("floor_gold", "median"), n=("item_id", "count"))
+    if split == "id_band":
+        agg = agg.sort_values("n", ascending=False).head(12)
+        agg = agg.loc[sorted(agg.index, key=lambda k: int(str(k)[:-1]))]                  # oldest ids first
+    elif split == "era":
+        agg = agg.loc[[e for e in ERA_LABELS if e in agg.index]]
+    else:
+        agg = agg.sort_values("n", ascending=False).head(8)
+    return " | ".join(f"{k}: {r.sales:,.0f}/day at {r.price:,.2f}g (n={int(r.n)})" for k, r in agg.iterrows())
+
+
 def coarse_report(m: pd.DataFrame, min_items: int = 20, spread_over: float = 10.0, splits=SPLITS) -> pd.DataFrame:
-    """For the groups that are big but whose items behave very differently (wide spread), which extra split (item-id band, quality,
-    has-tiers, name use) would make the peers more alike? Reported as the drop in the leave-one-out miss on sales per day."""
-    cols = ["group", "items", "spread", "best_split", "off_group", "off_with_split", "gain", "slices"]
+    """For the groups that are big but whose items behave very differently (wide spread): how much each extra split (era, item-id
+    block, quality, era+quality, has-tiers, name use) lowers the leave-one-out miss on sales per day. gain_* = miss before / miss after;
+    a slice too small to guess from falls back to the whole group."""
+    cols = ["group", "items", "spread", "off_group", "best_split", "off_best"] + [f"gain_{x}" for x in splits] + ["slices"]
     if m.empty:
         return pd.DataFrame(columns=cols)
     sp = m.groupby("group")["daily_est"].agg(items="count", p25=lambda x: x.quantile(0.25), p75=lambda x: x.quantile(0.75))
@@ -162,36 +185,335 @@ def coarse_report(m: pd.DataFrame, min_items: int = 20, spread_over: float = 10.
         actual = part["log_sales"].to_numpy(float)
         base = _loo_median(part, ["group"], "log_sales")
         e0 = np.abs(actual - base)
+        ok = ~np.isnan(e0)
+        if not ok.any():
+            continue
+        row = dict(group=gname, items=int(sp.loc[gname, "items"]), spread=sp.loc[gname, "spread"], off_group=10 ** np.median(e0[ok]))
         best = None
-        for s in splits:
-            if part[s].nunique() < 2:
+        for s_ in splits:
+            row[f"gain_{s_}"] = np.nan
+            if part[s_].nunique() < 2:
                 continue
-            p = _loo_median(part, ["group", s], "log_sales")
-            p = np.where(np.isnan(p), base, p)                      # a slice too small to guess from falls back to the whole group
-            e = np.abs(actual - p)
-            ok = ~np.isnan(e0) & ~np.isnan(e)
-            if not ok.any():
-                continue
-            gain = np.median(e0[ok]) / max(np.median(e[ok]), 0.005)
+            p = _loo_median(part, ["group", s_], "log_sales")
+            e = np.abs(actual - np.where(np.isnan(p), base, p))
+            gain = min(np.median(e0[ok]) / max(np.median(e[ok]), 0.005), 99.0)
+            row[f"gain_{s_}"] = gain
             if best is None or gain > best[1]:
-                best = (s, gain, 10 ** np.median(e0[ok]), 10 ** np.median(e[ok]))
+                best = (s_, gain, 10 ** np.median(e[ok]))
         if best is None:
             continue
-        agg = part.groupby(best[0])["daily_est"].agg(["median", "count"])
-        if best[0] == "id_band":
-            agg = agg.loc[sorted(agg.index, key=lambda k: int(str(k)[:-1]))]                  # oldest ids first
-        else:
-            agg = agg.sort_values("count", ascending=False)
-        agg = agg.head(6)
-        slices = " | ".join(f"{k}: {r['median']:,.0f}/day (n={int(r['count'])})" for k, r in agg.iterrows())
-        rows.append(dict(group=gname, items=int(sp.loc[gname, "items"]), spread=sp.loc[gname, "spread"], best_split=best[0],
-                         off_group=best[2], off_with_split=best[3], gain=min(best[1], 99.0), slices=slices))
+        row.update(best_split=best[0], off_best=best[2], slices=_slices(part, best[0]))
+        rows.append(row)
     return pd.DataFrame(rows, columns=cols)
 
 
-def grouptest(groups: pd.DataFrame, items: pd.DataFrame) -> dict:
+# ------------------------------------------------------------------ rhythm: does a group share a daily pattern?
+def hourly_profiles(h: pd.DataFrame, tz: str = "America/New_York", min_rows: int = MIN_HOURS) -> dict:
+    """Per-item daily rhythm from the hourly table, US Eastern. Hours flagged as spikes, blips, wipes or gaps are left out.
+    sold_hour: share of an item's sales in each hour of the day (24 numbers summing to 1);
+    sold_dow: the same for day of the week (7 numbers, Monday first);
+    price_hour: log10 of the item's typical price in that hour over its overall typical price (24 numbers; 0 = no difference)."""
+    need = ["item_id", "ts", "floor_gold", "sold_est"]
+    if h is None or h.empty or any(c not in h.columns for c in need):
+        return {}
+    flags = [c for c in ("spike", "blip", "flag_wipe", "flag_long_gap") if c in h.columns]
+    s = h[need + flags].copy()
+    bad = np.zeros(len(s), dtype=bool)
+    for c in flags:
+        bad |= s[c].fillna(False).astype(bool).to_numpy()
+    s = s[~bad].dropna(subset=["sold_est", "floor_gold"])
+    s = s[(s["floor_gold"].astype(float) > 0)]
+    cnt = s.groupby("item_id").size()
+    s = s[s["item_id"].isin(cnt[cnt >= min_rows].index)].copy()
+    if s.empty:
+        return {}
+    t = pd.to_datetime(s["ts"])
+    t = (t.dt.tz_localize("UTC") if t.dt.tz is None else t).dt.tz_convert(tz)
+    s["hour"], s["dow"] = t.dt.hour, t.dt.dayofweek
+    s["sold"] = s["sold_est"].astype(float).clip(lower=0)
+    med = s.groupby("item_id")["floor_gold"].transform("median").astype(float)
+    s["lp"] = np.log10(s["floor_gold"].astype(float) / med)
+
+    def grid(col, key, k, how, min_cover):
+        w = s.groupby(["item_id", key])[col].agg(how).unstack(key).reindex(columns=range(k))
+        w = w[w.notna().sum(axis=1) >= min_cover]
+        return w.T.fillna(w.mean(axis=1)).T
+
+    sh = grid("sold", "hour", 24, "mean", 20)
+    sh = sh[sh.sum(axis=1) > 0]
+    sh = sh.div(sh.sum(axis=1), axis=0)
+    sd = grid("sold", "dow", 7, "mean", 6)
+    sd = sd[sd.sum(axis=1) > 0]
+    sd = sd.div(sd.sum(axis=1), axis=0)
+    ph = grid("lp", "hour", 24, "median", 20)
+    return {"sold_hour": sh, "sold_dow": sd, "price_hour": ph, "items": int(s["item_id"].nunique()), "rows": int(len(s))}
+
+
+def shape_by(groups: pd.DataFrame, prof: pd.DataFrame, by: str = "group", share: bool = True) -> pd.DataFrame:
+    """Leave-one-out on rhythms: each item's profile is guessed from the average profile of the OTHER items in its group, in its
+    family, in all items, and from a flat profile. miss = how far the guess is from the item's own profile: for shares, the fraction
+    of the item's sales that sit in the wrong hours (0-1); for price, the typical gap in log10 price (0.05 = about 12%)."""
+    if prof is None or prof.empty:
+        return pd.DataFrame()
+    key = groups.drop_duplicates("item_id").set_index("item_id")
+    key = key.assign(_all="all")
+    key = key[[c for c in dict.fromkeys([by, "family", "_all"]) if c in key.columns]]
+    m = prof.join(key, how="inner")
+    m = m[m[by].astype(str) != ""]
+    if m.empty:
+        return pd.DataFrame()
+    cols = list(prof.columns)
+    A = m[cols].to_numpy(float)
+
+    def loo(keys):
+        g = m.groupby(keys)
+        cnt = g[cols[0]].transform("count").to_numpy(float)
+        pred = (g[cols].transform("sum").to_numpy(float) - A) / np.maximum(cnt - 1, 1)[:, None]
+        pred[(cnt - 1) < MIN_PEERS] = np.nan
+        return pred
+
+    def miss(pred):
+        d = np.abs(A - pred)
+        return 0.5 * d.sum(axis=1) if share else d.mean(axis=1)
+
+    r = pd.DataFrame({by: m[by].to_numpy(), "m_group": miss(loo([by])), "m_all": miss(loo(["_all"])),
+                      "m_flat": miss(np.full_like(A, 1.0 / len(cols)) if share else np.zeros_like(A))})
+    r = r.dropna()
+    if r.empty:
+        return pd.DataFrame()
+    g = r.groupby(by)
+    out = pd.DataFrame({"items": g.size(), "miss_group": g["m_group"].median(), "miss_all": g["m_all"].median(), "miss_flat": g["m_flat"].median()})
+    for col, base in (("vs_flat", "miss_flat"), ("vs_all", "miss_all")):
+        out[col] = (out[base] / out["miss_group"].clip(lower=1e-4)).clip(upper=99)
+        out.loc[(out[base] < 1e-4) & (out["miss_group"] < 1e-4), col] = np.nan                 # nothing to explain: no verdict
+    return out
+
+
+def rhythm_verdict(items, vs_flat, vs_all) -> str:
+    if not items or items < MIN_SCORED:
+        return "too few to judge"
+    if not vs_flat >= HELPS:
+        return "no better than a flat day"
+    return "group-specific rhythm" if vs_all >= HELPS else "same rhythm as every item"
+
+
+def shape_report(groups: pd.DataFrame, hourly: pd.DataFrame) -> dict:
+    """Rhythm results: per group, family and overall, for the hour-of-day sales pattern (hour_*), the day-of-week sales pattern (dow_*)
+    and the hour-of-day price pattern (price_*)."""
+    prof = hourly_profiles(hourly)
+    if not prof:
+        return {}
+    out = {"items": prof["items"], "rows": prof["rows"]}
+    for level, by in (("groups", "group"), ("families", "family"), ("overall", "_all")):
+        parts = []
+        for tag, key, share in (("hour", "sold_hour", True), ("dow", "sold_dow", True), ("price", "price_hour", False)):
+            t = shape_by(groups, prof[key], by=by, share=share)
+            if len(t):
+                parts.append(t.add_prefix(f"{tag}_"))
+        if not parts:
+            continue
+        df = pd.concat(parts, axis=1)
+        df.index.name = by
+        df = df.reset_index()
+        if "hour_items" in df.columns:
+            if by == "_all":                                     # group and all-items are the same guess here, so only "better than a flat day" is meaningful
+                df["hour_verdict"] = ["items share a common daily pattern" if v >= HELPS else "no common daily pattern" for v in df["hour_vs_flat"]]
+            else:
+                df["hour_verdict"] = [rhythm_verdict(n if n == n else 0, a, b) for n, a, b in zip(df["hour_items"], df["hour_vs_flat"], df["hour_vs_all"])]
+            df = df.sort_values("hour_items", ascending=False)
+        out[level] = df.reset_index(drop=True)
+    return out
+
+
+# ------------------------------------------------------------------ co-movement: do items in a group lift on the same days?
+def daily_series(h: pd.DataFrame, tz: str = "America/New_York", min_hours_per_day: int = 18, min_days: int = MIN_DAYS,
+                 min_daily_sold: float = MIN_DAILY_SOLD) -> dict:
+    """Each item's day-by-day lift against ITS OWN typical day, so quantities drop out.
+    sales: log10((units sold that day + 1) / (the item's median day + 1)); 0 = a normal day, 0.30 = double, -0.30 = half.
+    price: log10(the day's typical price / the item's typical price).
+    A day counts only if it has min_hours_per_day usable hours (spike/blip/wipe/gap hours left out); sales are scaled to 24 hours.
+    Items need min_days such days and a median day of min_daily_sold units. Days are US Eastern dates."""
+    need = ["item_id", "ts", "floor_gold", "sold_est"]
+    if h is None or h.empty or any(c not in h.columns for c in need):
+        return {}
+    flags = [c for c in ("spike", "blip", "flag_wipe", "flag_long_gap") if c in h.columns]
+    s = h[need + flags].copy()
+    bad = np.zeros(len(s), dtype=bool)
+    for c in flags:
+        bad |= s[c].fillna(False).astype(bool).to_numpy()
+    s = s[~bad].dropna(subset=["sold_est", "floor_gold"])
+    s = s[s["floor_gold"].astype(float) > 0]
+    if s.empty:
+        return {}
+    t = pd.to_datetime(s["ts"])
+    t = (t.dt.tz_localize("UTC") if t.dt.tz is None else t).dt.tz_convert(tz)
+    s = s.assign(day=t.dt.strftime("%Y-%m-%d").to_numpy(), sold=s["sold_est"].astype(float).clip(lower=0).to_numpy(), price=s["floor_gold"].astype(float).to_numpy())
+    d = s.groupby(["item_id", "day"]).agg(n=("sold", "size"), sold=("sold", "mean"), price=("price", "median")).reset_index()
+    d = d[d["n"] >= min_hours_per_day]
+    d["sold"] = d["sold"] * 24.0
+    g = d.groupby("item_id")
+    keep = g.size()[g.size() >= min_days].index
+    d = d[d["item_id"].isin(keep)]
+    base = d.groupby("item_id")["sold"].median()
+    keep = base[base >= min_daily_sold].index
+    d = d[d["item_id"].isin(keep)].copy()
+    if d.empty:
+        return {}
+    d["sales_lift"] = np.log10((d["sold"] + 1.0) / (d["item_id"].map(base) + 1.0))
+    d["price_lift"] = np.log10(d["price"] / d.groupby("item_id")["price"].transform("median"))
+    sales = d.pivot(index="item_id", columns="day", values="sales_lift")
+    price = d.pivot(index="item_id", columns="day", values="price_lift")
+    return {"sales": sales, "price": price, "items": int(d["item_id"].nunique()), "days": int(d["day"].nunique())}
+
+
+def _peer_mean(A: np.ndarray, V: np.ndarray, frame: pd.DataFrame, keys: list) -> np.ndarray:
+    """Per item and day: the mean of the OTHER items' values that day (NaN with fewer than MIN_PEERS valid peers)."""
+    cols = list(range(A.shape[1]))
+    k = frame[keys].reset_index(drop=True)
+    S = pd.concat([k, pd.DataFrame(np.where(V, A, 0.0), columns=cols)], axis=1).groupby(keys)[cols].transform("sum").to_numpy(float)
+    C = pd.concat([k, pd.DataFrame(V.astype(float), columns=cols)], axis=1).groupby(keys)[cols].transform("sum").to_numpy(float)
+    n = C - V
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = (S - np.where(V, A, 0.0)) / n
+    out[n < MIN_PEERS] = np.nan
+    return out
+
+
+def _outside_mean(A: np.ndarray, V: np.ndarray, frame: pd.DataFrame, keys: list) -> np.ndarray:
+    """Per item and day: the mean over every item OUTSIDE the item's own slice (the rest of the market), so a strong group cannot inflate its own control."""
+    cols = list(range(A.shape[1]))
+    k = frame[keys].reset_index(drop=True)
+    Av = np.where(V, A, 0.0)
+    S = pd.concat([k, pd.DataFrame(Av, columns=cols)], axis=1).groupby(keys)[cols].transform("sum").to_numpy(float)
+    C = pd.concat([k, pd.DataFrame(V.astype(float), columns=cols)], axis=1).groupby(keys)[cols].transform("sum").to_numpy(float)
+    n = V.sum(axis=0).astype(float)[None, :] - C
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = (Av.sum(axis=0)[None, :] - S) / n
+    out[n < MIN_PEERS] = np.nan
+    return out
+
+
+def _rowcorr(X: np.ndarray, Y: np.ndarray, min_n: int = 10) -> np.ndarray:
+    ok = ~np.isnan(X) & ~np.isnan(Y)
+    n = ok.sum(axis=1)
+    X0, Y0 = np.where(ok, X, 0.0), np.where(ok, Y, 0.0)
+    nn = np.maximum(n, 1)
+    dx = np.where(ok, X0 - (X0.sum(axis=1) / nn)[:, None], 0.0)
+    dy = np.where(ok, Y0 - (Y0.sum(axis=1) / nn)[:, None], 0.0)
+    vx, vy = (dx ** 2).sum(axis=1), (dy ** 2).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r = (dx * dy).sum(axis=1) / np.sqrt(vx * vy)
+    r[(n < min_n) | (vx <= 0) | (vy <= 0)] = np.nan
+    return r
+
+
+def comove_by(groups: pd.DataFrame, mat: pd.DataFrame, by: str = "group", spikes: bool = False) -> pd.DataFrame:
+    """Leave-one-out on day-by-day lifts. For each item, its lift series is compared with the average of the OTHER items in its group
+    (corr_group) and with the average of every item OUTSIDE the group (corr_market). extra = how much more the group tracks the item than the rest of the market does.
+    With spikes=True: on the days the item lifts (>= SPIKE times its own typical day), how often do its peers lift too, compared with
+    how often they lift on any day (a ratio; 1.0 = no link), for the group (spike_group) and for the rest of the market (spike_market)."""
+    if mat is None or mat.empty:
+        return pd.DataFrame()
+    key = groups.drop_duplicates("item_id").set_index("item_id").assign(_all="all")
+    key = key[[c for c in dict.fromkeys([by, "family", "_all"]) if c in key.columns]]
+    m = mat.join(key, how="inner")
+    m = m[m[by].astype(str) != ""]
+    if m.empty:
+        return pd.DataFrame()
+    A = m[list(mat.columns)].to_numpy(float)
+    V = ~np.isnan(A)
+    if not spikes:
+        rg = _rowcorr(A, _peer_mean(A, V, m, [by]))
+        ra = rg if by == "_all" else _rowcorr(A, _outside_mean(A, V, m, [by]))      # nothing lies outside "all items"
+        r = pd.DataFrame({by: m[by].to_numpy(), "corr_group": rg, "corr_market": ra}).dropna()
+        if r.empty:
+            return pd.DataFrame()
+        r["extra"] = r["corr_group"] - r["corr_market"]
+        g = r.groupby(by)
+        return pd.DataFrame({"items": g.size(), "corr_group": g["corr_group"].median(), "corr_market": g["corr_market"].median(), "extra": g["extra"].median()})
+    L = np.where(V, A >= np.log10(SPIKE), False).astype(float)
+    out = {}
+    out["group"] = _peer_mean(L, V, m, [by])                          # share of the other items in the group lifting that day
+    out["market"] = out["group"] if by == "_all" else _outside_mean(L, V, m, [by])   # share of the items outside the group lifting that day
+    rows = []
+    byv = m[by].to_numpy()
+    for gval in pd.unique(byv):
+        sel = byv == gval
+        ev = (L[sel] == 1) & ~np.isnan(out["group"][sel]) & ~np.isnan(out["market"][sel])
+        n_ev = int(ev.sum())
+        res = dict(events=n_ev)
+        for lab in ("group", "market"):
+            rt = out[lab][sel]
+            valid = V[sel] & ~np.isnan(rt)
+            base = rt[valid].mean() if valid.any() else np.nan
+            cond = rt[ev].mean() if n_ev else np.nan
+            res[f"spike_{lab}"] = cond / base if base and base > 0 else np.nan
+        res[by] = gval
+        rows.append(res)
+    return pd.DataFrame(rows).set_index(by)
+
+
+def comove_verdict(items, extra, corr_group, corr_market) -> str:
+    if not items or items < MIN_SCORED:
+        return "too few to judge"
+    if extra >= EXTRA_CORR and corr_group >= 0.25:
+        return "moves together beyond the market"
+    if corr_market >= 0.25 and extra < EXTRA_CORR:
+        return "moves with the whole market"
+    return "no shared movement"
+
+
+def comove_report(groups: pd.DataFrame, hourly: pd.DataFrame) -> dict:
+    """Co-movement results per group, family and overall, for sales lifts (sales_*), price lifts (price_*) and same-day spikes (spike_*)."""
+    ds = daily_series(hourly)
+    if not ds:
+        return {}
+    out = {"items": ds["items"], "days": ds["days"]}
+    for level, by in (("groups", "group"), ("families", "family"), ("overall", "_all")):
+        parts = []
+        for tag, mat in (("sales", ds["sales"]), ("price", ds["price"])):
+            t = comove_by(groups, mat, by=by)
+            if len(t):
+                parts.append(t.add_prefix(f"{tag}_"))
+        sp = comove_by(groups, ds["sales"], by=by, spikes=True)
+        if len(sp):
+            parts.append(sp)
+        if not parts:
+            continue
+        df = pd.concat(parts, axis=1)
+        df.index.name = by
+        df = df.reset_index()
+        if "sales_items" in df.columns:
+            if by == "_all":
+                df["sales_verdict"] = ["items share market-wide lifts" if c >= 0.25 else "no market-wide lifts" for c in df["sales_corr_group"]]
+            else:
+                df["sales_verdict"] = [comove_verdict(n if n == n else 0, e, cg, ca) for n, e, cg, ca in
+                                       zip(df["sales_items"], df["sales_extra"], df["sales_corr_group"], df["sales_corr_market"])]
+            df = df.sort_values("sales_items", ascending=False)
+        if "spike_events" in df.columns or "events" in df.columns:
+            df = df.rename(columns={"events": "spike_events"})
+            df["spike_verdict"] = [spike_verdict(e if e == e else 0, g, a) for e, g, a in zip(df["spike_events"], df.get("spike_group", np.nan), df.get("spike_market", np.nan))]
+        out[level] = df.reset_index(drop=True)
+    return out
+
+
+def spike_verdict(events, spike_group, spike_market) -> str:
+    if not events or events < 10:
+        return "too few spike days"
+    if spike_group >= 1.5 and spike_group >= 1.15 * (spike_market if spike_market == spike_market else 0):
+        return "spikes together beyond the market"
+    if spike_market >= 1.5:
+        return "spikes with the whole market"
+    return "no shared spikes"
+
+
+def grouptest(groups: pd.DataFrame, items: pd.DataFrame, hourly: pd.DataFrame = None) -> dict:
     m = prepare(groups, items)
     if m.empty:
         return {}
-    return {"groups": loo_by(m, "group"), "families": loo_by(m, "family"), "uses": loo_by(m, "use"),
-            **{f"tiers_{k}": v for k, v in tier_report(m).items()}, "coarse": coarse_report(m), "n_items": len(m)}
+    res = {"groups": loo_by(m, "group"), "families": loo_by(m, "family"), "uses": loo_by(m, "use"),
+           **{f"tiers_{k}": v for k, v in tier_report(m).items()}, "coarse": coarse_report(m), "n_items": len(m)}
+    if hourly is not None and len(hourly):
+        res["rhythm"] = shape_report(groups, hourly)
+        res["comove"] = comove_report(groups, hourly)
+    return res
