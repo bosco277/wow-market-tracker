@@ -19,6 +19,11 @@ name: Market tools
 #   daily  adds days to the permanent per-item daily history (engine/item_daily): days = how many days to read (7), end_date = last day (blank = today); tick upload.
 #          Run it again with an earlier end_date to backfill. The group test's lifting-together part needs 14+ days of it.
 #   grouptest  leave-one-out test of the groups: which ones predict an item better than its family or all items, and what splits the coarse ones
+#   undermine  pulls years of DAILY price and units-listed history from Undermine Exchange for a balanced sample of items (needs the UNDERMINE_API_KEY
+#              secret; 3 points per item, 3,000 per hour). Tick upload. Run again about an hour later until it says all sampled items are done.
+#              Stored only in the private dataset; nothing from it goes into a downloadable file.
+#   undermine_check  fetches Undermine's HOURLY rows for ~40 items and compares them with our own (units, feed, does their stock change track our
+#              sales estimate). Needs derive's tables in the private dataset. About 120 points. Prints summary numbers only.
 #   groups  builds the item-groups table (class, subclass, vendor price) from Blizzard's item data; use item_ids to add items; tick upload to publish it
 #   ledger  reads your Journalator.lua from the PRIVATE dataset (log_path = hf:system/Journalator.lua): real profit per flip, deposits, every
 #           listing's outcome. Needs no snapshots. Names are never printed; tick upload to store the tables in engine/ of the private dataset
@@ -29,7 +34,7 @@ on:
       mode:
         description: "What to run"
         type: choice
-        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger, groups, grouptest, daily]
+        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger, groups, grouptest, daily, undermine, undermine_check]
         default: pick
       days:
         description: "How many days of data to load (pick looks back 72 h, so 4 or more)"
@@ -61,8 +66,11 @@ on:
       end_date:
         description: "daily/derive/etc: last UTC date to read, YYYY-MM-DD (blank = today). Use an earlier date to backfill with daily."
         default: ""
+      batch:
+        description: "undermine: most items to fetch in one run (3 points each; 800 = 2,400 of the 3,000 points per hour)"
+        default: "800"
       upload:
-        description: "derive: publish the tables to engine/ in the HF repo (one commit)"
+        description: "derive/daily/undermine: publish the tables to engine/ in the HF repo (one commit)"
         type: boolean
         default: false
 
@@ -92,6 +100,7 @@ jobs:
       - name: Run
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          UNDERMINE_API_KEY: ${{ secrets.UNDERMINE_API_KEY }}
           B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
           B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
           BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
@@ -108,12 +117,13 @@ jobs:
           LOGPATH: ${{ inputs.log_path }}
           UPLOAD: ${{ inputs.upload }}
           END: ${{ inputs.end_date }}
+          BATCH: ${{ inputs.batch }}
         run: |
           mkdir -p out
           EXTRA=""
           if [ "$UPLOAD" = "true" ]; then EXTRA="--upload"; fi
           if [ -n "$END" ]; then EXTRA="$EXTRA --end $END"; fi
-          python tools/lake.py "$MODE" $EXTRA --store hf --days "$DAYS" --ids "$IDS" --max-position-gold "$MAXPOS" --min-floor-gold "$MINFLOOR" --max-units "$MAXUNITS" --n-items "$NITEMS" --trade-units "$TRADE" --horizon-hours "$HORIZON" --log "$LOGPATH" | tee out.txt
+          python tools/lake.py "$MODE" $EXTRA --store hf --days "$DAYS" --ids "$IDS" --max-position-gold "$MAXPOS" --min-floor-gold "$MINFLOOR" --max-units "$MAXUNITS" --n-items "$NITEMS" --trade-units "$TRADE" --horizon-hours "$HORIZON" --log "$LOGPATH" --batch "$BATCH" | tee out.txt
           { echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save downloaded files
@@ -124,7 +134,8 @@ jobs:
           key: lake-cache-${{ github.run_id }}
 
       - name: Save results
-        if: ${{ inputs.mode != 'ledger' }}      # the ledger is personal: its details go only to the private dataset, never to a downloadable file
+        # the ledger is personal, and Undermine data is not ours to republish: both go only to the private dataset, never to a downloadable file
+        if: ${{ inputs.mode != 'ledger' && inputs.mode != 'undermine' && inputs.mode != 'undermine_check' }}
         uses: actions/upload-artifact@v4
         with:
           name: market-tools-results

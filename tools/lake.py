@@ -917,6 +917,125 @@ def run_daily(store, args, reader=None, read_table=None):
     return merged
 
 
+def _undermine_client(client=None):
+    """The paced Undermine client. The key comes from the UNDERMINE_API_KEY secret and is never printed."""
+    if client is not None:
+        return client
+    from engine import undermine as U
+    key = os.environ.get("UNDERMINE_API_KEY", "").strip()
+    if not key:
+        raise SystemExit("undermine needs the UNDERMINE_API_KEY secret (GitHub: Settings > Secrets and variables > Actions).")
+    return U.Client(key)
+
+
+def _store_private(tables, message, upload):
+    """Write parquet files to a temporary folder (never to out/, which is a downloadable artifact) and upload them to engine/ of the
+    private dataset. Returns True if uploaded."""
+    import tempfile
+    if not upload:
+        return False
+    folder = tempfile.mkdtemp(prefix="engine_upload_")
+    for name, df in tables.items():
+        df.to_parquet(os.path.join(folder, f"{name}.parquet"), index=False)
+    _upload_folder_to_engine(folder, message)
+    return True
+
+
+def run_undermine(store, args, client=None, read_table=None):
+    """Pull the DAILY history (price and units listed, one row per day, back to 2022) from Undermine Exchange for a balanced sample of items:
+    at most 30 per group, spread over era and quality. Resumable: items already fetched are skipped, so run it again (about an hour later,
+    when the point budget has refilled) until it says all sampled items are done. Stored only in the private dataset (engine/market_history and
+    engine/market_history_meta); raw history is never printed or written to a downloadable file."""
+    from engine import undermine as U
+    read_table = read_table or _read_engine_table
+    groups = read_table("item_groups")
+    if groups is None or groups.empty:
+        print("engine/item_groups.parquet is missing: run mode groups (upload ticked) first.")
+        return pd.DataFrame()
+    meta_old, data_old = read_table("market_history_meta"), read_table("market_history")
+    done = set(meta_old.loc[meta_old["status"].isin(["ok", "empty", "not_found"]), "item_id"].astype(int)) if len(meta_old) else set()
+    extra = [int(t) for t in str(args.ids or "").replace(";", ",").split(",") if t.strip().isdigit()]
+    wanted = list(dict.fromkeys(extra + U.sample_items(groups, per_group=30)))
+    todo = [i for i in wanted if i not in done]
+    batch = max(1, int(getattr(args, "batch", 800) or 800))
+    print(f"Sample: {len(wanted)} items ({len(done & set(wanted))} already fetched, {len(todo)} to go). This run: up to {batch} items, about {3 * min(batch, len(todo))} points.")
+    if not todo:
+        print("All sampled items are done. Nothing to fetch.")
+        return data_old
+    client = _undermine_client(client)
+    res = U.pull_daily(todo, client, batch=batch)
+    data, meta = U.merge_history(data_old, res["data"]), U.merge_meta(meta_old, res["meta"])
+    ok = meta[meta["status"] == "ok"]
+    print(f"\nThis run: {len(res['meta'])} items answered, {len(res['data']):,} day-rows, {client.points} points used.")
+    left = len([i for i in wanted if i not in set(meta['item_id'].astype(int))])
+    print(f"Stored in total: {len(ok)} items with history, {int((meta['status'] != 'ok').sum())} without (not tracked); {len(data):,} day-rows; first day {ok['first_day'].min() if len(ok) else '-'}; median {int(ok['n_days'].median()) if len(ok) else 0} days per item.")
+    if res["stopped"] == "budget":
+        print("STOPPED: the hourly point budget is used up. Progress is saved below. Run again in about an hour to continue.")
+    elif res["stopped"] == "key":
+        print("STOPPED: Undermine rejected the key. Check the UNDERMINE_API_KEY secret (and that the key is active).")
+    print(f"{left} sampled items still to fetch." if left else "All sampled items are done.")
+    if len(res["meta"]) or len(res["data"]):
+        if _store_private({"market_history": data, "market_history_meta": meta}, "undermine daily history", getattr(args, "upload", False)):
+            print("Saved to the private dataset.")
+        else:
+            print("NOT SAVED: tick upload, or this progress is lost when the run ends.")
+    return data
+
+
+def run_undermine_check(store, args, client=None, read_table=None):
+    """The calibration check. For about 40 well-measured items, fetch Undermine's HOURLY rows (lowest price, total units; about 14 days), line them up
+    with our own hourly rows and report: are the units the same (copper vs gold), is the feed the same, and does 'units that disappeared from the
+    total' track the sales we infer from the full listing book? Prints only summary numbers, no raw rows. About 120 points."""
+    from engine import undermine as U
+    read_table = read_table or _read_engine_table
+    items, ours = read_table("items"), read_table("item_hourly")
+    extra = [int(t) for t in str(args.ids or "").replace(";", ",").split(",") if t.strip().isdigit()]
+    ids = extra or U.sample_for_check(items, ours, n=40)
+    if not ids:
+        print("No well-measured items in engine/items and engine/item_hourly (run derive with upload first).")
+        return pd.DataFrame()
+    client = _undermine_client(client)
+    frames, stopped = [], ""
+    for iid in ids[:60]:
+        try:
+            status, js = client.get(f"/v1/region/us/commodities/{int(iid)}/hourly.json")
+        except U.BudgetSpent:
+            stopped = "the hourly point budget ran out"
+            break
+        except U.KeyRejected as e:
+            stopped = str(e)
+            break
+        if status == 200:
+            frames.append(U.parse_hourly(js, iid))
+    under = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    print(f"Fetched hourly rows for {len(frames)} of {len(ids[:60])} items ({client.points} points)" + (f"; stopped: {stopped}" if stopped else "") + ".")
+    if under.empty:
+        return under
+    print(f"Undermine hourly rows run from {_et_any(under['ts'].min())} to {_et_any(under['ts'].max())} US Eastern ({under.groupby('item_id').size().median():.0f} per item).")
+    m = U.align_hourly(under, ours)
+    rep = U.calibration_report(m)
+    if not rep:
+        print("No Undermine row lines up with one of our snapshots (our hourly table only keeps the last 8 days).")
+        return m
+    print(f"\n== UNITS AND FEED ==  {rep['pairs']} matched hours over {rep['items']} items")
+    print(f"UNITS CHECK : Undermine price / our price (copper) = {rep['price_ratio']:.4f} (1.0000 means copper, same feed); identical in {rep['price_exact']:.0%} of hours")
+    print(f"FEED CHECK  : Undermine units / our units = {rep['qty_ratio']:.4f}; identical in {rep['qty_exact']:.0%} of hours")
+    per = rep.get("per_item")
+    if per is not None and len(per):
+        rho = rep["spearman_median"]
+        verdict = "tracks well" if rho >= 0.6 else "tracks moderately" if rho >= 0.3 else "tracks weakly"
+        print(f"\n== DOES 'UNITS GONE FROM THE TOTAL' TRACK OUR SALES ESTIMATE? ==  {len(per)} items with enough hours")
+        print(f"Median rank correlation {rho:.2f} -> {verdict}. (Their totals miss new listings that arrive in the same hour, so some shortfall is expected.)")
+        print(f"Their implied sales / ours (median over items): {per['proxy_over_ours'].median():.2f}x")
+        b = rep.get("depth_buckets")
+        if b is not None and len(b):
+            print("\nBy how deep the stock is compared with hourly sales:")
+            print(b.round(2).to_string(index=False))
+    else:
+        print("\n(Not enough overlapping hours per item for the sales comparison yet.)")
+    return m
+
+
 def _et_any(ts):
     if ts is None or pd.isna(ts):
         return ""
@@ -1045,7 +1164,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily", "undermine", "undermine_check"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -1064,9 +1183,10 @@ def main(argv=None):
     ap.add_argument("--window-hours", type=float, default=72.0, help="pick: how far back item statistics look")
     ap.add_argument("--min-coverage", type=float, default=0.5, help="pick: share of the window that must have been observed")
     ap.add_argument("--upload", action="store_true", help="derive: push the tables to engine/ in the HF repo")
+    ap.add_argument("--batch", type=int, default=800, help="undermine: most items to fetch in one run (3 points each; the budget is 3,000 per hour)")
     args = ap.parse_args(argv)
-    store = None if args.command in ("ledger", "groups", "grouptest") else make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily}[args.command](store, args)
+    store = None if args.command in ("ledger", "groups", "grouptest", "undermine", "undermine_check") else make_store(args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily, "undermine": run_undermine, "undermine_check": run_undermine_check}[args.command](store, args)
 
 
 if __name__ == "__main__":

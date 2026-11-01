@@ -415,3 +415,29 @@ units listed), `flagged_hours`, `engine_version`. For a day present twice the ro
 a partial first run is repaired by a later one. A day with under 18 usable hours is stored but not scored. Items covered: those in
 engine/items (plus --ids). Run with upload ticked; run again with an earlier `end_date` to backfill. The group test's lifting-together part
 needs 14+ complete days per item.
+
+## 2k. Undermine Exchange history (engine/undermine.py, `tools/lake.py undermine` and `undermine_check`; v0.7.16)
+
+Source: https://undermine.exchange/api.html (retail only; regions us/eu/tw/kr; no Forever data). Key in the `UNDERMINE_API_KEY` secret, sent as
+`Authorization: ApiKey <key>` with `Accept-Encoding: gzip`. Budget: 3,000 points per sliding hour; a history request costs 3 points compressed.
+The client keeps a local count under 2,700 per hour, stops cleanly on HTTP 429 (progress is kept), aborts on 401/403, and never prints the key.
+
+What they give for a commodity: DAILY rows (`day, price, quantity`: price and units listed at the snapshot with the most units that day; back to
+2022-09-04 for the items checked, no gaps) and HOURLY rows (`snapshot, price, quantity`: lowest price and total units listed; about 14 days).
+They do NOT give sales, listing-by-listing books or Forever. Prices are presumed copper (`undermine_check` measures the ratio to ours).
+What it is for: transferable SHAPES (weekday rhythm, how groups move together, how fresh items settle after a patch or launch, holiday and
+patch response) as weak priors with wide error bars. Not levels, not sales. Survivorship bias (only items still traded today) and only a few
+real launches limit what it can say.
+
+* `undermine` (resumable; tick upload): a balanced sample, at most 30 items per group, spread over era and quality, ordered so any prefix is
+  balanced. Default `--batch 800` (2,400 points); run again about an hour later until it prints "All sampled items are done." Writes
+  `engine/market_history.parquet` (`item_id, day, price, quantity`) and `engine/market_history_meta.parquet` (`item_id, status ok/empty/not_found,
+  fetched_at, first_day, last_day, n_days`) to the PRIVATE dataset only. Items already answered are skipped; network failures are not recorded, so
+  they are retried. Prints summary counts only.
+* `undermine_check` (about 120 points): about 40 well-measured items (Medium/High confidence, 20+ sold a day, in item_hourly), Undermine hourly rows
+  lined up with ours (nearest snapshot within 30 minutes). Reports price ratio (UNITS CHECK, 1.0000 = copper and same feed), units ratio (FEED
+  CHECK), and the rank correlation between "units that disappeared from their total this hour" and our sold_est, overall and by how deep the
+  stock is compared with hourly sales (tracks well >= 0.6, moderately 0.3-0.6, weakly < 0.3). Summary numbers only.
+* Privacy: both modes are excluded from the "Save results" artifact in the workflow; uploads go through a temporary folder, never `out/`.
+* Nothing here feeds a forecast yet. Next: a Part 4 of the group test on this long history (weekday rhythm, long-run co-movement, age-aligned
+  fresh-item curves).
