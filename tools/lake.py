@@ -690,6 +690,82 @@ def _upload_folder_to_engine(folder, message):
     print(f"Uploaded {len(os.listdir(folder))} files to engine/ in the private dataset: {', '.join(sorted(os.listdir(folder)))}")
 
 
+def _read_engine_table(name):
+    """A table from engine/ in the private dataset, or an empty frame if it is not there."""
+    tok = os.environ.get("HF_TOKEN")
+    try:
+        from huggingface_hub import hf_hub_download
+        return pd.read_parquet(hf_hub_download(HF_REPO, f"engine/{name}.parquet", repo_type="dataset", token=tok, force_download=True))
+    except Exception:
+        return pd.DataFrame()
+
+
+def _blizzard_get():
+    """(get, token_ok): get(url) -> (status, json). Uses the same Blizzard credentials as the extract job."""
+    import requests
+    cid, sec = os.environ.get("BLIZZARD_CLIENT_ID"), os.environ.get("BLIZZARD_CLIENT_SECRET")
+    if not cid or not sec:
+        raise SystemExit("groups needs BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET (the Market tools workflow passes them).")
+    r = requests.post("https://oauth.battle.net/token", auth=(cid, sec), data={"grant_type": "client_credentials"}, timeout=30)
+    r.raise_for_status()
+    headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
+    sess = requests.Session()
+
+    def get(url):
+        resp = sess.get(url, headers=headers, timeout=30)
+        try:
+            return resp.status_code, (resp.json() if resp.status_code == 200 else None)
+        except ValueError:
+            return resp.status_code, None
+    return get
+
+
+def run_groups(store, args, get=None, read_table=None):
+    """Build the item-groups table from Blizzard's item data (class, subclass, quality, vendor price) for the items in the engine
+    tables, keep what is already known, and print how the groups look: items per group, typical price and sales per day, and
+    how alike the items in a group are."""
+    from engine.groups import group_summary, refresh
+    read_table = read_table or _read_engine_table
+    items = read_table("items")
+    wanted = set(items["item_id"].astype(int)) if len(items) else set()
+    for tok in str(args.ids or "").replace(";", ",").split(","):
+        if tok.strip().isdigit():
+            wanted.add(int(tok))
+    if not wanted:
+        print("No item ids to group: engine/items.parquet is empty or missing (run derive with upload first), and no --ids were given.")
+        return pd.DataFrame()
+    existing = read_table("item_groups")
+    have = len(set(existing["item_id"].astype(int)) & wanted) if len(existing) else 0
+    print(f"{len(wanted)} items to group; {have} already known, asking Blizzard about {len(wanted) - have} (about {max(1, (len(wanted) - have) // 15 // 60)} min).")
+    get = get or _blizzard_get()
+    g = refresh(existing, wanted, get)
+    missing = len(wanted) - len(g)
+    if g.empty:
+        print("Blizzard returned nothing. Check the credentials and try again.")
+        return g
+    os.makedirs(args.out, exist_ok=True)
+    g.to_csv(os.path.join(args.out, "item_groups.csv"), index=False)
+    print(f"Grouped {len(g)} items" + (f"; {missing} not found (retired items or ids Blizzard does not know)." if missing else "."))
+    print("\n== FAMILIES ==")
+    fam = group_summary(g, items, by="family") if len(items) else g.groupby("family").size().rename("items").reset_index()
+    print(fam.round(2).to_string(index=False))
+    print("\n== GROUPS (class: subclass). 'spread' = p75 / p25 of sales per day: the closer to 1, the more alike the items are ==")
+    summ = group_summary(g, items) if len(items) else g.groupby("group").size().rename("items").reset_index()
+    print(summ.round(2).to_string(index=False))
+    used = g[g["use"] != ""]
+    if len(used) and len(items):
+        print("\n== FINER USES (guessed from names) ==")
+        print(group_summary(used, items, by="use").round(2).to_string(index=False))
+    sib = g[g["siblings"] > 1]
+    print(f"\n{sib['name'].nunique()} names have several item ids (quality tiers): {len(sib)} items. tier_guess ranks them by item id.")
+    if getattr(args, "upload", False):
+        folder = os.path.join(args.out, "groups_upload")
+        os.makedirs(folder, exist_ok=True)
+        g.to_parquet(os.path.join(folder, "item_groups.parquet"), index=False)
+        _upload_folder_to_engine(folder, "item groups refresh")
+    return g
+
+
 def _et_any(ts):
     if ts is None or pd.isna(ts):
         return ""
@@ -818,7 +894,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -838,8 +914,8 @@ def main(argv=None):
     ap.add_argument("--min-coverage", type=float, default=0.5, help="pick: share of the window that must have been observed")
     ap.add_argument("--upload", action="store_true", help="derive: push the tables to engine/ in the HF repo")
     args = ap.parse_args(argv)
-    store = None if args.command == "ledger" else make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger}[args.command](store, args)
+    store = None if args.command in ("ledger", "groups") else make_store(args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups}[args.command](store, args)
 
 
 if __name__ == "__main__":

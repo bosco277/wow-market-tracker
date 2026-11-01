@@ -16,6 +16,7 @@ name: Market tools
 #   derive  builds the small tables the new front end reads (use days=4; tick upload to publish them to the HF repo)
 #   backtest  replays the flip screener on past hours and shows what happened next (use days=8; tick upload to show it in the app)
 #   reconcile  checks your experiment log (a CSV in the repo, see log_path) against the snapshots (use days=8)
+#   groups  builds the item-groups table (class, subclass, vendor price) from Blizzard's item data; use item_ids to add items; tick upload to publish it
 #   ledger  reads your Journalator.lua from the PRIVATE dataset (log_path = hf:system/Journalator.lua): real profit per flip, deposits, every
 #           listing's outcome. Needs no snapshots. Names are never printed; tick upload to store the tables in engine/ of the private dataset
 
@@ -25,7 +26,7 @@ on:
       mode:
         description: "What to run"
         type: choice
-        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger]
+        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger, groups]
         default: pick
       days:
         description: "How many days of data to load (pick looks back 72 h, so 4 or more)"

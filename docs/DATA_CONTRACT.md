@@ -366,3 +366,15 @@ name and price.
 - an expired listing forfeits its deposit; a sold unit returns it.
 - Tables: purchases, sales, postings, failures; `match_listings` (units sold / expired / open per posting, hours to collect, deposit
   lost); `flip_ledger` (per item bought: profit on sold units after the cut, unsold stock at cost, deposits).
+
+## 2h. Item groups (engine/groups.py, `tools/lake.py groups`, table `engine/item_groups.parquet`)
+
+Built from Blizzard's item endpoint (`/data/wow/item/{id}`, namespace static-us), the same call the dictionary job makes. One row
+per item: item_class / item_subclass (plain words and ids), quality, item_level, vendor_sell_gold, vendor_buy_gold, and our tags:
+`group` ("Crafting materials: Cloth"), `family` (coarse parent), `use` (finer label guessed from the NAME where Blizzard lumps items,
+for example Healing potion, Feast / cauldron, Ore or bar; a guess), `siblings` / `tier_guess` (items sharing a name are quality tiers;
+tier_guess ranks them by item id and is a guess). Only ids not yet in the table are fetched, so later runs are short. The summary the
+command prints gives, per group, items, median price, median sales per day and `spread` (p75 / p25 of sales per day): a group is only
+useful for extrapolation if its items behave alike, so spread near 1 is good and a large spread means the group is too coarse.
+Community groups (TSM public groups) are not used: they are partial and personal. Planned: a leave-one-out test (does an item's
+group predict its sales better than no group?) before any group value feeds the forecasts.
