@@ -180,7 +180,8 @@ def derive(snapshots: Sequence[Snapshot], cfg: DeriveConfig = DeriveConfig(), pa
         sh = shelves_for_item(bi, ser, {k_: per_hour[k_] for k_ in ("low", "est", "high")}, row["band_p90"], cfg.shelf)
         if sh is not None:
             shelf_rows.append(dict(item_id=int(item), name=names.get(int(item), ""), floor_gold=row["floor_gold"],
-                                   confidence=label, **sh))
+                                   confidence=label, daily_low=row.get("daily_low", np.nan), daily_est=row.get("daily_est", np.nan),
+                                   daily_high=row.get("daily_high", np.nan), **sh))
         if item in profile_ids:
             p = profile(ser.assign(ts=ser["ts"]), pd.Series(sp.to_numpy()), tz=cfg.tz, by="none", blips=pd.Series(bl.to_numpy()))
             p.insert(0, "item_id", int(item))

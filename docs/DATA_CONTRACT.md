@@ -344,6 +344,12 @@ and gold limits (`--max-units`, `--max-position-gold`; defaults 300 units, 150 g
 (newest-first puts you at the front of that tier). Columns: units, shelf_units, cost_gold, avg_price_gold, target_gold,
 breakeven_gold (= avg / 0.95), net_margin (at target), net_margin_stress (selling 10% under), profit_gold, profit_stress_gold,
 sell_hours_low/est/high (units ahead of you after a partial buy + your own units, divided by the sales rate seen while the
-price was at the target; falls back to the overall rate, `rate_from_level` = False), cheap_units_ahead, book_share, five
-tests (test_price, test_speed, test_size, test_margin, test_book = pass / warn / fail) and `verdict` (candidate: no fail and at
+price was at the target; falls back to the overall rate, `rate_from_level` = False), cheap_units_ahead, book_share, six
+tests (test_price, test_speed, test_size, test_margin, test_regime, test_book = pass / warn / fail) and `verdict` (candidate: no fail and at
 most one warn; weak: no fail; no). The tests describe prices and rates; they cannot see other players' intentions.
+
+test_regime compares the cost and the target with the item's longer history (median of all hourly floors we hold, up to 8 days;
+long_median_gold, long_p10_gold, long_p90_gold, long_days): fail if avg cost > 1.25x the median, or the last 48 h median is
+>= 1.3x the median and the price is now below 0.85x the last 48 h p90 (a market reset in progress), or the target > 1.5x the
+median; warn if the target > 1.25x the median or under 3 days of history. cost_vs_long and target_vs_long are the ratios.
+The `shelves` table also carries daily_low / daily_est / daily_high (units sold per day) of the item.

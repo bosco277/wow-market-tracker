@@ -575,6 +575,8 @@ def run_derive(store, args, reader=None, names_fn=None):
     import time
     from engine.derive import DeriveConfig, derive
     from engine.reconcile import item_evidence, read_log, reconcile, summarize
+    from engine import __version__ as engine_version
+    print(f"[engine {engine_version}]")
     t_start = time.time()
     snaps = _load_all(store, args, reader)
     print(f"[timing] snapshots loaded in {(time.time() - t_start) / 60:.1f} min")
@@ -608,15 +610,23 @@ def run_derive(store, args, reader=None, names_fn=None):
         print(f"  {k:12s} {len(df):>7,} rows")
     sh = out["shelves"]
     print(f"\n== FLIP SHELVES (limits: {shelf.max_units} units, {shelf.max_cost_gold:.0f}g per flip; tests: price, speed, size, margin, regime, book) ==")
-    cands = sh[sh["verdict"] != "no"].head(12) if len(sh) else sh
-    if len(cands):
-        show = cands.assign(item=cands["name"].where(cands["name"] != "", cands["item_id"].astype(str)))
-        show = show[["item", "verdict", "units", "avg_price_gold", "target_gold", "net_margin", "net_margin_stress", "profit_gold",
-                     "sell_hours_low", "sell_hours_est", "sell_hours_high", "long_median_gold", "daily_est", "test_price", "test_speed", "test_size", "test_margin", "test_regime", "test_book"]]
-        print(show.round(3).to_string(index=False))
-        print("  profit_gold is at the target price, before anyone undercuts; net_margin_stress assumes selling 10% under it.")
-    else:
-        print("  none pass right now (that is normal; shelves are rare)")
+    try:                                       # a display problem must never stop the upload below
+        needed = ["long_median_gold", "daily_est", "test_regime"]
+        if len(sh) and any(c not in sh.columns for c in needed):
+            print(f"  WARNING: the shelves table lacks {[c for c in needed if c not in sh.columns]}. Files from different engine versions are mixed in this "
+                  f"repo (running engine {engine_version}). Re-install the latest full engine zip; the app will show blanks until then.")
+        cands = sh[sh["verdict"] != "no"].head(12) if len(sh) else sh
+        if len(cands):
+            show = cands.assign(item=cands["name"].where(cands["name"] != "", cands["item_id"].astype(str)))
+            cols = ["item", "verdict", "units", "avg_price_gold", "target_gold", "net_margin", "net_margin_stress", "profit_gold",
+                    "sell_hours_low", "sell_hours_est", "sell_hours_high", "long_median_gold", "daily_est", "test_price", "test_speed",
+                    "test_size", "test_margin", "test_regime", "test_book"]
+            print(show[[c for c in cols if c in show.columns]].round(3).to_string(index=False))
+            print("  profit_gold is at the target price, before anyone undercuts; net_margin_stress assumes selling 10% under it.")
+        else:
+            print("  none pass right now (that is normal; shelves are rare)")
+    except Exception as e:
+        print(f"  (shelf listing skipped: {e})")
     cal = out["calibration"].iloc[0]
     print(f"Confidence: {cal['n_high']} High, {cal['n_medium']} Medium, {cal['n_low']} Low; median range (high/low) {cal['median_range_ratio']:.2f}x")
     if args.upload:
@@ -654,7 +664,7 @@ def _upload_derived(folder, cal_row, shelves=None):
         snap.to_parquet(os.path.join(folder, "shelves_history.parquet"), index=False)
     api.upload_folder(folder_path=folder, path_in_repo="engine", repo_id=HF_REPO, repo_type="dataset",
                       commit_message="derived layer refresh")
-    print(f"Uploaded {len(os.listdir(folder))} files to engine/ in {HF_REPO} (one commit).")
+    print(f"Uploaded {len(os.listdir(folder))} files to engine/ in {HF_REPO} (one commit): {', '.join(sorted(os.listdir(folder)))}")
 
 
 def run_backtest(store, args, reader=None, names_fn=None):

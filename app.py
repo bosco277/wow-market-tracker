@@ -31,6 +31,7 @@ items, hourly, prof = load("items"), load("item_hourly"), load("profile")
 cal, hist, exp, flips = load("calibration"), load("calibration_history"), load("experiment"), load("flips")
 shelves = load("shelves")
 shelves_old = len(shelves) > 0 and "test_regime" not in shelves.columns
+shelves_ver = str(shelves["engine_version"].iloc[0]) if len(shelves) and "engine_version" in shelves.columns else "unknown"
 shelves = lib.ensure_shelf_columns(shelves)
 backtest = load("backtest_summary")
 bt_rates = lib.backtest_rates(backtest)
@@ -158,8 +159,9 @@ with tab_flip:
              "check against the live auction house, not instructions. Limits per flip come from the engine run (units and gold). "
              "Click a row to see the item's charts and its full list of checks below.")
     if shelves_old:
-        st.warning("This flip table was written by an older engine run, so the normal-price check and sales-per-day columns are blank. "
-                   "Run the Market tools workflow with mode=derive (upload ticked) to refresh it.")
+        st.warning(f"This flip table was written by engine {shelves_ver}, but the other tables by engine {ver}, so the normal-price check and "
+                   "sales-per-day columns are blank. If you just ran derive: check that its log says 'Uploaded ... files to engine/', then use the menu "
+                   "(top right) > Clear cache, or wait 10 minutes. If the engine numbers are old, the engine code in the repo needs updating first.")
     only = st.checkbox("Candidates only (hide weak)", value=False)
     sh = lib.shelf_table(shelves, ("candidate",) if only else ("candidate", "weak"))
     sel = None

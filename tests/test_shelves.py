@@ -91,3 +91,35 @@ class TestShelves(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRegime(unittest.TestCase):
+    """The reset case from the first real flips: a price that spiked recently and is coming back down."""
+
+    def test_buying_into_a_spike_fails_the_regime_test(self):
+        # normal level 1.0g for 5 days, then a spike to 1.8g that is now back to ~1.75g (cost 1.75g, target 2.5g)
+        floors = [1.0] * 96 + [1.75] * 24
+        b = book([(1.75, 40), (2.5, 400)])
+        r = shelves_for_item(b, series(floors, units=440), RATE, 2.5)
+        self.assertEqual(r["test_regime"], "fail")
+        self.assertEqual(r["verdict"], "no")
+        self.assertAlmostEqual(r["cost_vs_long"], 1.75)
+        self.assertGreater(r["target_vs_long"], 2.4)
+
+    def test_a_reset_in_progress_fails_even_if_the_cost_is_low(self):
+        floors = [1.0] * 96 + [2.0] * 24 + [1.5] * 24      # two days up at 2.0 then 1.5: coming back down
+        b = book([(1.2, 40), (1.4, 400)])                    # cost 1.2 and target 1.4 are both fine on their own
+        r = shelves_for_item(b, series(floors, units=440), RATE, 1.4)
+        self.assertEqual(r["test_regime"], "fail")
+        self.assertLessEqual(r["cost_vs_long"], 1.25)
+        self.assertLessEqual(r["target_vs_long"], 1.5)
+
+    def test_a_normal_level_passes(self):
+        floors = list(np.where(np.arange(120) % 5 == 0, 1.0, 1.4))      # normally 1.4g, with brief dips to 1.0g
+        b = book([(1.0, 40), (1.4, 400)])
+        r = shelves_for_item(b, series(floors, units=440), RATE, 1.5)
+        self.assertEqual(r["test_regime"], "pass")
+
+    def test_short_history_only_warns(self):
+        r = shelves_for_item(EX, series(np.where(np.arange(30) % 3 == 0, 1.5, 1.0)), RATE, 1.5)
+        self.assertEqual(r["test_regime"], "warn")

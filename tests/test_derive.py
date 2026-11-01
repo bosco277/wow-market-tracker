@@ -131,3 +131,24 @@ class TestDeriveCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDeriveDisplayNeverBlocksUpload(unittest.TestCase):
+    def test_a_shelves_table_missing_columns_does_not_stop_derive(self):
+        """The real failure: lake.py expected 'daily_est' in the shelves table that an older engine/derive.py had written."""
+        import engine.derive as ed
+        from test_cli import TestCli as _C
+        snaps = MarketSimulator(default_profiles(), seed=9).run(60).snapshots
+        real = ed.derive
+
+        def old_derive(*a, **k):
+            out = real(*a, **k)
+            out["shelves"] = pd.DataFrame({"item_id": [1], "name": ["x"], "verdict": ["candidate"], "units": [5], "avg_price_gold": [1.0],
+                                           "target_gold": [2.0], "net_margin": [0.5], "net_margin_stress": [0.3], "profit_gold": [3.0]})
+            return out
+        with tempfile.TemporaryDirectory() as d:
+            args = _C()._lake(d, snaps)
+            args.log, args.ids, args.upload, args.horizon_hours, args.window_hours = os.path.join(d, "none.csv"), "", False, 4.0, 72.0
+            with mock.patch.object(ed, "derive", old_derive), mock.patch.object(pd.DataFrame, "to_parquet", lambda self, path, **kw: self.to_pickle(path)):
+                out = lake.run_derive(LocalStore(args.root), args, reader=fake_reader, names_fn=lambda ids: {})
+            self.assertEqual(len(out["calibration"]), 1)
