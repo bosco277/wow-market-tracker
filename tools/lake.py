@@ -444,8 +444,15 @@ def run_profile(store, args, reader=None, names_fn=fetch_names):
 
 def run_reconcile(store, args, reader=None, names_fn=fetch_names):
     """Compare the buy-and-list experiment log (a CSV in the repo) with the hourly snapshots."""
-    from engine.reconcile import read_log, reconcile, verdict_text
+    from engine.reconcile import parse_spent, read_log, reconcile, split_flips, verdict_text
     log = read_log(args.log)
+    log, flips_log = split_flips(log)
+    if len(flips_log):
+        print(f"\n== FLIPS IN THE LOG ({len(flips_log)} rows; kept out of the lane experiment below) ==")
+        fl = flips_log.copy()
+        fl["posted_ET"] = fl["posted_utc"].map(_et)
+        fl["spent_g"] = fl["note"].map(parse_spent)
+        print(fl[["posted_ET", "item_id", "list_price", "quantity", "units_sold", "units_expired", "spent_g", "note"]].round(2).to_string(index=False))
     if log.empty:
         print(f"No usable rows in {args.log} (example rows and rows without a price or quantity are skipped).")
         return pd.DataFrame()
@@ -595,12 +602,12 @@ def run_derive(store, args, reader=None, names_fn=None):
             df.to_parquet(os.path.join(d, f"{k}.parquet"), index=False)
         print(f"  {k:12s} {len(df):>7,} rows")
     sh = out["shelves"]
-    print(f"\n== FLIP SHELVES (limits: {shelf.max_units} units, {shelf.max_cost_gold:.0f}g per flip; tests: price, speed, size, margin, book) ==")
+    print(f"\n== FLIP SHELVES (limits: {shelf.max_units} units, {shelf.max_cost_gold:.0f}g per flip; tests: price, speed, size, margin, regime, book) ==")
     cands = sh[sh["verdict"] != "no"].head(12) if len(sh) else sh
     if len(cands):
         show = cands.assign(item=cands["name"].where(cands["name"] != "", cands["item_id"].astype(str)))
         show = show[["item", "verdict", "units", "avg_price_gold", "target_gold", "net_margin", "net_margin_stress", "profit_gold",
-                     "sell_hours_low", "sell_hours_est", "sell_hours_high", "test_price", "test_speed", "test_size", "test_margin", "test_book"]]
+                     "sell_hours_low", "sell_hours_est", "sell_hours_high", "long_median_gold", "daily_est", "test_price", "test_speed", "test_size", "test_margin", "test_regime", "test_book"]]
         print(show.round(3).to_string(index=False))
         print("  profit_gold is at the target price, before anyone undercuts; net_margin_stress assumes selling 10% under it.")
     else:
@@ -608,11 +615,11 @@ def run_derive(store, args, reader=None, names_fn=None):
     cal = out["calibration"].iloc[0]
     print(f"Confidence: {cal['n_high']} High, {cal['n_medium']} Medium, {cal['n_low']} Low; median range (high/low) {cal['median_range_ratio']:.2f}x")
     if args.upload:
-        _upload_derived(d, out["calibration"])
+        _upload_derived(d, out["calibration"], out["shelves"])
     return out
 
 
-def _upload_derived(folder, cal_row):
+def _upload_derived(folder, cal_row, shelves=None):
     """Push the derived tables to engine/ in the HF dataset repo, and append this run to the confidence history."""
     from huggingface_hub import HfApi, hf_hub_download
     tok = os.environ.get("HF_TOKEN")
@@ -627,9 +634,67 @@ def _upload_derived(folder, cal_row):
         hist = cal_row.copy()
     hist = hist.drop_duplicates(subset=["data_last_ts", "engine_version"], keep="last")
     hist.to_parquet(hist_path, index=False)
+    # Keep what the screener recommended at each run (candidates and weak shelves, 21 days), so flips you actually make can be
+    # compared later with what the tool said at the time. The shelves table itself is overwritten every run.
+    if shelves is not None and len(shelves):
+        snap = shelves[shelves["verdict"] != "no"].head(300).copy()
+        snap.insert(0, "data_last_ts", cal_row["data_last_ts"].iloc[0])
+        try:
+            old = pd.read_parquet(hf_hub_download(HF_REPO, "engine/shelves_history.parquet", repo_type="dataset", token=tok))
+            snap = pd.concat([old, snap], ignore_index=True)
+        except Exception:
+            pass
+        snap = snap.drop_duplicates(subset=["data_last_ts", "item_id", "target_gold"], keep="last")
+        snap = snap[pd.to_datetime(snap["data_last_ts"]) > pd.to_datetime(snap["data_last_ts"]).max() - pd.Timedelta(days=21)]
+        snap.to_parquet(os.path.join(folder, "shelves_history.parquet"), index=False)
     api.upload_folder(folder_path=folder, path_in_repo="engine", repo_id=HF_REPO, repo_type="dataset",
                       commit_message="derived layer refresh")
     print(f"Uploaded {len(os.listdir(folder))} files to engine/ in {HF_REPO} (one commit).")
+
+
+def run_backtest(store, args, reader=None, names_fn=None):
+    """Replay the flip screener on the snapshots we hold and see what happened after each shelf (no gold at risk)."""
+    from engine.classifier import aggregate_rates, classify_series
+    from engine.shelf_backtest import backtest_shelves, summarize_backtest
+    from engine.shelves import ShelfConfig
+    snaps = _load_all(store, args, reader)
+    _print_holes(snaps)
+    cs = sorted((s for s in snaps if s.kind == "commodity"), key=lambda s: s.ts)
+    rates = aggregate_rates(classify_series(cs), cs[-1].ts, args.window_hours)
+    flo = cs[-1].book.groupby("item_id")["unit_price"].min() / 10000.0
+    rates = rates[(rates["daily_high"] >= 20.0) & rates["item_id"].isin(flo.index)]
+    rates = rates.assign(flow=rates["daily_est"].values * flo.reindex(rates["item_id"]).fillna(0.0).values)
+    keep = rates.sort_values("flow", ascending=False)["item_id"].head(3000).tolist()
+    shelf = ShelfConfig(max_units=int(getattr(args, "max_units", 300)), max_cost_gold=float(getattr(args, "max_position_gold", 300.0)))
+    bt = backtest_shelves(cs, shelf, item_ids=keep, step=2, min_history_hours=48.0)
+    os.makedirs(args.out, exist_ok=True)
+    if bt.empty:
+        print("No shelves found in the replay.")
+        return bt
+    bt.to_csv(os.path.join(args.out, "shelf_backtest.csv"), index=False)
+    summ = summarize_backtest(bt)
+    f = bt[bt["first_seen"]]
+    print(f"\n== SHELF BACKTEST: {len(f):,} separate shelves seen ({len(bt):,} hourly sightings), "
+          f"{_et(bt['t0'].min())} to {_et(bt['t0'].max())} ET ==")
+    print("  reached_Nh      share whose relist price was reached by the lowest price within N hours (known outcomes only)")
+    print("  median_hours    hours to get there (when it did)")
+    print("  floor_ratio_4h  lowest price 4 h later / relist price (1.0 = right at it; below 1 = not there yet)")
+    print("  undercut_risk   share where new cheaper listings worth 50%+ of your units appeared within 2 h")
+    show = summ.copy()
+    for c in ("reached_4h", "reached_12h", "undercut_risk"):
+        show[c] = (show[c] * 100).round(0)
+    print(show.round(2).to_string(index=False))
+    print("  Spike flags are off in the replay and the cheap units stay in the book, so 'reached' is a cautious reading of the relist price.")
+    summ.to_parquet(os.path.join(args.out, "backtest_summary.parquet"), index=False)
+    if args.upload:
+        from huggingface_hub import HfApi
+        tok = os.environ.get("HF_TOKEN")
+        if not tok:
+            raise SystemExit("--upload needs HF_TOKEN")
+        HfApi(token=tok).upload_file(path_or_fileobj=os.path.join(args.out, "backtest_summary.parquet"), path_in_repo="engine/backtest_summary.parquet",
+                                     repo_id=HF_REPO, repo_type="dataset", commit_message="shelf backtest summary")
+        print("Uploaded backtest_summary.parquet to engine/.")
+    return bt
 
 
 def _has_tabulate():
@@ -642,7 +707,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -663,7 +728,7 @@ def main(argv=None):
     ap.add_argument("--upload", action="store_true", help="derive: push the tables to engine/ in the HF repo")
     args = ap.parse_args(argv)
     store = make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive}[args.command](store, args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest}[args.command](store, args)
 
 
 if __name__ == "__main__":

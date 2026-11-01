@@ -186,3 +186,26 @@ class TestDictionaryNames(unittest.TestCase):
         self.assertEqual(a, {1: "A", 3: "C"})
         b = lake._names_from_frame(pd.DataFrame({"item_id": [5], "item_name": ["Z"]}))
         self.assertEqual(b, {5: "Z"})
+
+
+class TestBacktestCli(unittest.TestCase):
+    def test_backtest_command_runs_on_local_files(self):
+        import test_shelf_backtest as tb
+        snaps = tb.snaps(80)
+        with tempfile.TemporaryDirectory() as d:
+            for s in snaps:
+                write(os.path.join(d, "lake"), key_for(s.ts), as_fetch_v2_frame([s]))
+            args = argparse.Namespace(store="local", root=os.path.join(d, "lake"), days=10, end=str(snaps[-1].ts.date()),
+                                      cache=os.path.join(d, "cache"), out=os.path.join(d, "out"), ids="", window_hours=72.0,
+                                      upload=False, max_units=300, max_position_gold=300.0)
+            real = True
+            try:
+                import pyarrow  # noqa: F401
+            except ImportError:
+                real = False
+            from unittest import mock
+            patch = mock.patch.object(pd.DataFrame, "to_parquet", lambda self, path, **kw: self.to_pickle(path)) if not real else mock.MagicMock()
+            with patch:
+                bt = lake.run_backtest(LocalStore(args.root), args, reader=fake_reader)
+            self.assertTrue(os.path.exists(os.path.join(d, "out", "shelf_backtest.csv")))
+            self.assertGreater(len(bt), 0)

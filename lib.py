@@ -125,7 +125,7 @@ def freshness(cal: pd.DataFrame, now=None) -> tuple:
 
 
 MARK = {"pass": "pass", "warn": "WARN", "fail": "FAIL"}
-TEST_COLS = ["test_price", "test_speed", "test_size", "test_margin", "test_book"]
+TEST_COLS = ["test_price", "test_speed", "test_size", "test_margin", "test_regime", "test_book"]
 
 
 def shelf_table(shelves: pd.DataFrame, verdicts: tuple = ("candidate", "weak")) -> pd.DataFrame:
@@ -140,3 +140,52 @@ def shelf_hours(row) -> str:
     def f(x):
         return "never" if x != x or x == float("inf") else (f"{x:.1f}" if x < 100 else ">100")
     return f"{f(row['sell_hours_est'])} h ({f(row['sell_hours_high'])} - {f(row['sell_hours_low'])})"
+
+
+# What each flip check means, in plain words: (short name, what it asks, what a WARN/FAIL says)
+TEST_INFO = {
+    "test_price": ("Price history", "Has the lowest price actually been at the relist price recently, and is that price inside the item's usual band (not a spike)?",
+                   "the relist price has rarely or never been seen lately, or it is above the item's usual band"),
+    "test_speed": ("Sells fast enough", "Hours until your units, and any cheap units left ahead of you, are bought, at the sales rate seen while the price was that high. Must fit in about a day.",
+                   "it may take more than a day to sell, or the sales rate was not seen at this price"),
+    "test_size": ("Fits your limits", "Does the whole shelf fit your unit and gold limits? A partial buy leaves cheap units ahead of you in the queue.",
+                  "you could only buy part of the shelf, so cheap units stay ahead of yours"),
+    "test_margin": ("Still profitable if undercut", "Net margin after the 5% cut if you have to sell 10% below the relist price.",
+                    "the profit disappears if you sell 10% under the relist price"),
+    "test_regime": ("Normal price, not a spike", "Compares what you pay and the relist price with the item's longer history. Fails if you would pay well above normal, the price spiked in the last two days and is coming back down, or the relist price is far above normal.",
+                    "the price looks temporary (a spike or reset) or sits well above the item's normal level"),
+    "test_book": ("Complete listing snapshot", "Is the number of units listed now normal? A thin snapshot creates fake price gaps.",
+                  "the snapshot looks incomplete, so the gap may not be real"),
+}
+
+
+def shelf_checks(row) -> str:
+    """'5 of 6 pass'."""
+    n = sum(row[c] == "pass" for c in TEST_COLS if c in row)
+    return f"{n} of {len(TEST_COLS)} pass"
+
+
+def shelf_watch(row) -> str:
+    """The checks that did not pass, in words ('FAIL: Normal price, not a spike; WARN: Price history')."""
+    out = []
+    for label, mark in (("FAIL", "fail"), ("WARN", "warn")):
+        names = [TEST_INFO[c][0] for c in TEST_COLS if c in row and row[c] == mark]
+        if names:
+            out.append(f"{label}: " + ", ".join(names))
+    return "; ".join(out) if out else "none"
+
+
+def backtest_table(summ: pd.DataFrame) -> pd.DataFrame:
+    """The backtest summary in words and percentages, for the Flips screen."""
+    if summ is None or summ.empty:
+        return pd.DataFrame()
+    pct = lambda v: "-" if v != v else f"{v * 100:.0f}%"
+    return pd.DataFrame({
+        "Group": summ["group"],
+        "Shelves seen": summ["n"].astype(int),
+        "Reached relist price within 4 h": summ["reached_4h"].map(pct),
+        "Within 12 h": summ["reached_12h"].map(pct),
+        "Median hours to get there": summ["median_hours"].map(lambda v: "-" if v != v else f"{v:.1f}"),
+        "Price 4 h later vs relist price": summ["median_floor_ratio_4h"].map(lambda v: "-" if v != v else f"{v:.2f}x"),
+        "Undercut risk (new cheap listings within 2 h)": summ["undercut_risk"].map(pct),
+    })

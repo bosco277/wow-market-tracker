@@ -97,3 +97,28 @@ class TestFlagMask(unittest.TestCase):
     def test_watched_filter_survives_object_dtype(self):
         it = items().assign(watched=pd.Series([None, True, False], dtype=object))
         self.assertEqual(list(lib.market_table(it, watched_only=True)["item_id"]), [2])
+
+
+class TestShelfWords(unittest.TestCase):
+    def test_checks_and_watch_text(self):
+        row = pd.Series({c: "pass" for c in lib.TEST_COLS})
+        self.assertEqual(lib.shelf_checks(row), "6 of 6 pass")
+        self.assertEqual(lib.shelf_watch(row), "none")
+        row["test_regime"], row["test_price"] = "fail", "warn"
+        self.assertEqual(lib.shelf_checks(row), "4 of 6 pass")
+        self.assertEqual(lib.shelf_watch(row), "FAIL: Normal price, not a spike; WARN: Price history")
+
+    def test_every_check_has_an_explanation(self):
+        for c in lib.TEST_COLS:
+            self.assertEqual(len(lib.TEST_INFO[c]), 3)
+
+
+class TestBacktestTable(unittest.TestCase):
+    def test_formats_percentages_and_blanks(self):
+        s = pd.DataFrame({"group": ["all shelves"], "n": [12], "reached_4h": [0.5], "reached_12h": [0.75], "median_hours": [float("nan")],
+                          "median_floor_ratio_4h": [0.98], "undercut_risk": [0.25]})
+        t = lib.backtest_table(s)
+        self.assertEqual(t.iloc[0]["Reached relist price within 4 h"], "50%")
+        self.assertEqual(t.iloc[0]["Median hours to get there"], "-")
+        self.assertEqual(t.iloc[0]["Price 4 h later vs relist price"], "0.98x")
+        self.assertTrue(lib.backtest_table(pd.DataFrame()).empty)

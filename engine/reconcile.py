@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence
 
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -89,6 +91,7 @@ def read_log(source) -> pd.DataFrame:
     df["price_copper"] = (df["list_price"] * COPPER_PER_GOLD).round().astype("int64")
     df["lane"] = df["lane"].str.upper().map(LANE_WORDS).fillna("OTHER")
     df["abnormal"] = df["note"].str.lower().str.contains("abnormal")
+    df["is_flip"] = df["note"].str.lower().str.lstrip(" \"'*-").str.startswith("flipped")
     as_of = df["note"].str.lower().str.contains("as of")
     sold, exp, q = df["units_sold"], df["units_expired"], df["quantity"]
     df["units_sold"] = sold.where(sold.notna(), (q - exp).where(exp.notna()))       # only expired filled in: the rest sold
@@ -101,6 +104,23 @@ def read_log(source) -> pd.DataFrame:
     df = df.sort_values("posted_utc").reset_index(drop=True)
     df.attrs["warnings"] = check_log(df)
     return df
+
+
+_SPENT = re.compile(r"(?:spent|paid|cost|total)[^0-9]{0,20}([0-9][0-9,]*(?:[.][0-9]+)?)", re.I)
+
+
+def parse_spent(note: str) -> float:
+    """Gold spent, if the note says so ('spent 535.42g on all', 'total cost 1,200'). NaN otherwise."""
+    m = _SPENT.search(str(note))
+    return float(m.group(1).replace(",", "")) if m else float("nan")
+
+
+def split_flips(log: pd.DataFrame):
+    """(listing experiment rows, flip rows). Flips are rows whose note starts with 'flipped': units bought off the market and
+    relisted. They are not part of the lane experiment (UNDER/SAME), so they are kept out of its checks and shown on their own."""
+    if log.empty or "is_flip" not in log.columns:
+        return log, log.iloc[0:0]
+    return log[~log["is_flip"]].copy(), log[log["is_flip"]].copy()
 
 
 def check_log(df: pd.DataFrame, cluster_minutes: float = 30.0, max_spread: float = 0.10) -> List[str]:

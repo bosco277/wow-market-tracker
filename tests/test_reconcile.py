@@ -234,3 +234,22 @@ class TestRealSheetQuirks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFlipRows(unittest.TestCase):
+    def rows(self):
+        return pd.DataFrame({
+            "date": ["2026-10-30", "2026-10-30", "2026-10-31"], "time_posted": ["11:13 AM", "11:14 AM", "3:26 PM"], "tz": ["EDT"] * 3,
+            "item_id": ["13466", "13466", "172232"], "lane": ["UNDER", "SAME", "UNDER"], "list_price": ["5.84", "5.85", "2.11"],
+            "quantity": ["35", "35", "306"], "units_sold": ["35", "35", "306"], "units_expired": ["", "", ""],
+            "note": ["", "", '"Flipped; spent 535.42g on all of it. Left 64 up at 2.09"']})
+
+    def test_flip_rows_are_split_off_and_cost_is_read_from_the_note(self):
+        from engine.reconcile import parse_spent, read_log, split_flips
+        log = read_log(self.rows())
+        listings, flips = split_flips(log)
+        self.assertEqual((len(listings), len(flips)), (2, 1))
+        self.assertEqual(int(flips.iloc[0]["item_id"]), 172232)
+        self.assertAlmostEqual(parse_spent(flips.iloc[0]["note"]), 535.42)
+        self.assertTrue(pd.isna(parse_spent("Flipped, bought all for 1.73 or 1.75 gold")))
+        self.assertAlmostEqual(parse_spent("flipped; total cost 1,234.5g"), 1234.5)

@@ -13,6 +13,11 @@ the table so you can judge for yourself):
   size      fits the unit and gold limits you set (inventory is finite). A partial buy leaves cheap units ahead of you,
             which slows the sale, and the speed test counts them.
   margin    net margin at the target, and again if you have to sell 10% under it. Break-even is cost / 0.95.
+  regime    is this a normal price or a temporary one? Compares what you would pay and the target with the item's longer
+            history (median of everything we have, up to 8 days). Fails when you would pay well above the normal price
+            (cost over 1.25x the median), when the last 2 days ran well above the longer-run price and the price is now coming back down (a market
+            reset: the target is likely to normalize), or when the target is over 1.5x the normal price; warns when the
+            target is over 1.25x the normal price or we have under 3 days of history.
   book      the book looks complete: units listed now are not far below normal (a partial book makes fake gaps).
 
 verdict:  candidate = no fail and at most one warn;  weak = no fail;  no = at least one fail.
@@ -43,6 +48,12 @@ class ShelfConfig:
     level_tolerance: float = 0.02    # the price counts as "at the level" within this of the target
     min_level_hours: int = 6         # hours at the level needed to trust the sales rate seen there
     min_level_share: float = 0.10    # share of recent hours the price should have been at the level
+    regime_cost_x: float = 1.25      # paying more than this times the long-run median is buying into a spike
+    regime_target_warn_x: float = 1.25
+    regime_target_fail_x: float = 1.5
+    regime_spike_x: float = 1.3      # the last 48 h median this far above the longer-run median...
+    regime_falling: float = 0.85     # ...with the price now below this share of the last 48 h p90 = a reset in progress
+    regime_min_days: float = 3.0
     min_book_share: float = 0.70     # units now / normal units below this = partial book
     ah_cut: float = AH_CUT
 
@@ -68,6 +79,21 @@ def level_stats(series: pd.DataFrame, target_gold: float, tol: float) -> dict:
     return dict(share=float(at.mean()), hours=int(len(got)), rate=rate)
 
 
+def long_run(series: pd.DataFrame) -> dict:
+    """The item's longer price history from its hourly rows: median / p10 / p90 of the lowest price, the days covered, the
+    median and p90 of the lowest price over the last 48 h, and the lowest price now. (The 48 h median, not the single highest
+    hour, so an item that merely flips between two prices is not mistaken for a spike.)"""
+    s = series.dropna(subset=["floor_gold"]).sort_values("ts")
+    if s.empty:
+        return dict(median=float("nan"), p10=float("nan"), p90=float("nan"), days=0.0, recent_med=float("nan"), recent_p90=float("nan"), now=float("nan"))
+    ts = pd.to_datetime(s["ts"])
+    recent = s[ts > ts.max() - pd.Timedelta(hours=48)]
+    return dict(median=float(s["floor_gold"].median()), p10=float(s["floor_gold"].quantile(0.10)), p90=float(s["floor_gold"].quantile(0.90)),
+                days=float((ts.max() - ts.min()).total_seconds() / 86400.0), recent_med=float(recent["floor_gold"].median()),
+                recent_p90=float(recent["floor_gold"].quantile(0.90)),
+                now=float(s["floor_gold"].iloc[-1]))
+
+
 def shelves_for_item(book: pd.DataFrame, series: pd.DataFrame, rate_per_hour: Dict[str, float], band_p90: float,
                      cfg: ShelfConfig = ShelfConfig()) -> Optional[dict]:
     """The best shelf for one item (by profit if you must undercut), or None. `book` is the latest listings of the item."""
@@ -78,6 +104,7 @@ def shelves_for_item(book: pd.DataFrame, series: pd.DataFrame, rate_per_hour: Di
     units_now = float(book["quantity"].sum())
     med_units = float(series["units_listed"].median()) if len(series) and "units_listed" in series else units_now
     best, best_key = None, -np.inf
+    lr = long_run(series)
     for k in range(1, len(t)):
         if price[k] / price[k - 1] - 1.0 < cfg.min_gap:
             continue
@@ -125,18 +152,30 @@ def shelves_for_item(book: pd.DataFrame, series: pd.DataFrame, rate_per_hour: Di
         t_margin = _tier_test(margin_stress >= cfg.min_stress_margin, warn=margin_stress > 0)
         book_share = units_now / med_units if med_units > 0 else 1.0
         t_book = _tier_test(book_share >= cfg.min_book_share)
-        tests = dict(test_price=t_price, test_speed=t_speed, test_size=t_size, test_margin=t_margin, test_book=t_book)
+        avg_g = avg / COPPER_PER_GOLD
+        med = lr["median"]
+        if med != med or lr["days"] < cfg.regime_min_days:
+            t_regime = "warn"
+        else:
+            reset = lr["recent_med"] >= cfg.regime_spike_x * med and lr["now"] <= cfg.regime_falling * lr["recent_p90"]
+            if avg_g > cfg.regime_cost_x * med or reset or tg > cfg.regime_target_fail_x * med:
+                t_regime = "fail"
+            else:
+                t_regime = "warn" if tg > cfg.regime_target_warn_x * med else "pass"
+        tests = dict(test_price=t_price, test_speed=t_speed, test_size=t_size, test_margin=t_margin, test_regime=t_regime, test_book=t_book)
         fails, warns = sum(v == "fail" for v in tests.values()), sum(v == "warn" for v in tests.values())
         verdict = "candidate" if fails == 0 and warns <= 1 else ("weak" if fails == 0 else "no")
         row = dict(
-            units=int(bought), shelf_units=int(shelf_units), cost_gold=cost / COPPER_PER_GOLD, avg_price_gold=avg / COPPER_PER_GOLD,
+            units=int(bought), shelf_units=int(shelf_units), shelf_top_gold=float(price[k - 1]) / COPPER_PER_GOLD, cost_gold=cost / COPPER_PER_GOLD, avg_price_gold=avg / COPPER_PER_GOLD,
             target_gold=tg, gap=float(price[k] / price[k - 1] - 1.0), breakeven_gold=avg / (1 - cfg.ah_cut) / COPPER_PER_GOLD,
             net_margin=float(margin), net_margin_stress=float(margin_stress),
             profit_gold=float((net_target - avg) * bought / COPPER_PER_GOLD),
             profit_stress_gold=float((stress_price * (1 - cfg.ah_cut) - avg) * bought / COPPER_PER_GOLD),
             sell_hours_low=sell["low"], sell_hours_est=sell["est"], sell_hours_high=sell["high"],
             rate_from_level=bool(use_level), hours_at_level=lv["hours"], share_at_level=lv["share"], cheap_units_ahead=int(ahead),
-            book_share=float(book_share), verdict=verdict, fails=fails, warns=warns, **tests)
+            book_share=float(book_share), long_median_gold=med, long_p10_gold=lr["p10"], long_p90_gold=lr["p90"], long_days=lr["days"],
+            recent_48h_median_gold=lr["recent_med"], cost_vs_long=(avg_g / med if med == med and med > 0 else float("nan")),
+            target_vs_long=(tg / med if med == med and med > 0 else float("nan")), verdict=verdict, fails=fails, warns=warns, **tests)
         key = {"candidate": 2, "weak": 1, "no": 0}[verdict] * 1e9 + row["profit_stress_gold"]
         if key > best_key:
             best, best_key = row, key
