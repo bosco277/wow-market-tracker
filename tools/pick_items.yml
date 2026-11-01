@@ -60,7 +60,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -71,8 +71,10 @@ jobs:
       - name: Install
         run: pip install pandas numpy pyarrow requests tabulate huggingface_hub boto3
 
-      - name: Keep downloaded files between runs
-        uses: actions/cache@v4
+      # Downloaded snapshot files are kept between runs. They are saved even if the run fails or times out, so a retry
+      # does not start the downloads from zero.
+      - name: Restore downloaded files
+        uses: actions/cache/restore@v4
         with:
           path: .lake_cache
           key: lake-cache-${{ github.run_id }}
@@ -102,6 +104,13 @@ jobs:
           if [ "$UPLOAD" = "true" ]; then EXTRA="--upload"; fi
           python tools/lake.py "$MODE" $EXTRA --store hf --days "$DAYS" --ids "$IDS" --max-position-gold "$MAXPOS" --min-floor-gold "$MINFLOOR" --max-units "$MAXUNITS" --n-items "$NITEMS" --trade-units "$TRADE" --horizon-hours "$HORIZON" --log "$LOGPATH" | tee out.txt
           { echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save downloaded files
+        if: ${{ always() }}
+        uses: actions/cache/save@v4
+        with:
+          path: .lake_cache
+          key: lake-cache-${{ github.run_id }}
 
       - name: Save results
         uses: actions/upload-artifact@v4

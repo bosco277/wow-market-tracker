@@ -572,9 +572,12 @@ def _dictionary_names():
 
 def run_derive(store, args, reader=None, names_fn=None):
     """Build the small tables the front end reads (items, item_hourly, profile, flips, calibration) into --out/derived."""
+    import time
     from engine.derive import DeriveConfig, derive
     from engine.reconcile import item_evidence, read_log, reconcile, summarize
+    t_start = time.time()
     snaps = _load_all(store, args, reader)
+    print(f"[timing] snapshots loaded in {(time.time() - t_start) / 60:.1f} min")
     _print_holes(snaps)
     names = (names_fn or (lambda ids: _dictionary_names()))([])
     watch = [int(x) for x in str(args.ids).replace(" ", "").split(",") if x]
@@ -592,7 +595,9 @@ def run_derive(store, args, reader=None, names_fn=None):
     from engine.shelves import ShelfConfig
     shelf = ShelfConfig(max_units=int(getattr(args, "max_units", 300)), max_cost_gold=float(getattr(args, "max_position_gold", 300.0)))
     cfg = DeriveConfig(window_hours=args.window_hours, horizon_hours=args.horizon_hours, shelf=shelf)
+    t_calc = time.time()
     out = derive(snaps, cfg, watch=watch, evidence=evidence, experiment_summary=exp, names=names)
+    print(f"[timing] tables calculated in {(time.time() - t_calc) / 60:.1f} min")
     d = os.path.join(args.out, "derived")
     os.makedirs(d, exist_ok=True)
     if per_exp is not None and len(per_exp):

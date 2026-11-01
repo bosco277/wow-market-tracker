@@ -1,3 +1,4 @@
+import gc
 import os
 import io
 import json
@@ -6,7 +7,7 @@ import pandas as pd
 import boto3
 import duckdb
 from datetime import datetime, timedelta
-from huggingface_hub import HfApi
+from huggingface_hub import CommitOperationDelete, HfApi
 
 # --- CONFIGURATION ---
 REALM_IDS = [73, 96, 118] 
@@ -44,72 +45,116 @@ def item_to_json(item):
         return None
     return json.dumps(_to_jsonable(item), sort_keys=True, separators=(",", ":"))
 
-def compact_folder(folder_prefix):
-    """Merges all hourly files in a folder, drops exact duplicates, and deletes the originals."""
-    # 1. Find all files in yesterday's folder on B2
-    response = s3.list_objects_v2(Bucket=B2_BUCKET_NAME, Prefix=folder_prefix)
-    if 'Contents' not in response:
-        print(f"No files found in {folder_prefix}")
-        return
+def _peak_memory():
+    """' (peak memory so far: 1234 MB)' on Linux, '' elsewhere. If a run is ever killed again, the last line printed shows how close it was."""
+    try:
+        import resource
+        return f" (peak memory so far: {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.0f} MB)"
+    except Exception:
+        return ""
 
-    file_keys = [obj['Key'] for obj in response['Contents'] if 'hour_' in obj['Key'] and obj['Key'].endswith('.parquet')]
-    
+
+def _list_keys(prefix):
+    """Every key under a prefix (follows pagination)."""
+    keys, token = [], None
+    while True:
+        kw = dict(Bucket=B2_BUCKET_NAME, Prefix=prefix)
+        if token:
+            kw["ContinuationToken"] = token
+        resp = s3.list_objects_v2(**kw)
+        keys += [o["Key"] for o in resp.get("Contents", [])]
+        if not resp.get("IsTruncated"):
+            return keys
+        token = resp.get("NextContinuationToken")
+
+
+def _read_existing_daily(daily_key):
+    """The day's daily file if one is already there (an earlier run, possibly cut short). None if not."""
+    try:
+        obj = s3.get_object(Bucket=B2_BUCKET_NAME, Key=daily_key)
+    except Exception as e:
+        code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "404", "NotFound") or "NoSuchKey" in str(e):
+            return None
+        raise                      # anything else (network, permissions): stop rather than risk overwriting a good file
+    return pd.read_parquet(io.BytesIO(obj["Body"].read()))
+
+
+def _delete_hourly(file_keys, hf_has_daily):
+    """Delete merged hourly files. B2 in batches; Hugging Face in ONE commit (and only if the HF daily copy is in place)."""
+    for i in range(0, len(file_keys), 900):
+        chunk = file_keys[i:i + 900]
+        s3.delete_objects(Bucket=B2_BUCKET_NAME, Delete={"Objects": [{"Key": k} for k in chunk], "Quiet": True})
+    if not hf_has_daily:
+        print("  Hugging Face daily copy is not in place, so its hourly files are kept as the backup.")
+        return
+    try:
+        hf_api.create_commit(repo_id=HF_REPO_ID, repo_type="dataset",
+                             operations=[CommitOperationDelete(path_in_repo=k) for k in file_keys],
+                             commit_message=f"compaction: remove {len(file_keys)} merged hourly files")
+    except Exception as e:
+        print(f"  HF batch delete failed ({str(e)[:120]}); trying one by one.")
+        for k in file_keys:
+            try:
+                hf_api.delete_file(path_in_repo=k, repo_id=HF_REPO_ID, repo_type="dataset")
+            except Exception:
+                pass
+
+
+def compact_folder(folder_prefix):
+    """Merges the hourly files of a folder (and any daily file already there), drops exact duplicates, uploads the daily file,
+    checks it arrived, and only then deletes the hourly files that went into it.
+
+    Safe to run again after a cut-short run: an existing daily file is merged in, never overwritten by a partial day, and
+    nothing is deleted unless the daily file has been uploaded."""
+    file_keys = [k for k in _list_keys(folder_prefix) if "hour_" in k and k.endswith(".parquet")]
     if not file_keys:
         print(f"No hourly files to compact in {folder_prefix}")
         return
 
-    print(f"Compacting {len(file_keys)} files in {folder_prefix}...")
+    daily_filename = f"{folder_prefix}daily.parquet"
+    existing = _read_existing_daily(daily_filename)
+    print(f"Compacting {len(file_keys)} files in {folder_prefix}" + (f" (merging the {len(existing):,} rows already in the daily file)..." if existing is not None else "..."))
 
-    # 2. Download from B2 and Merge
+    # Download from B2 and merge
     dataframes = []
     for key in file_keys:
         obj = s3.get_object(Bucket=B2_BUCKET_NAME, Key=key)
-        df = pd.read_parquet(io.BytesIO(obj['Body'].read()))
-        dataframes.append(df)
-
+        dataframes.append(pd.read_parquet(io.BytesIO(obj["Body"].read())))
     merged_df = pd.concat(dataframes, ignore_index=True)
-    
-    # 3. Deduplicate 
     original_count = len(merged_df)
-    merged_df['clean_item_id'] = merged_df['item'].apply(lambda x: x.get('id') if isinstance(x, dict) else x)
+    merged_df["clean_item_id"] = merged_df["item"].apply(lambda x: x.get("id") if isinstance(x, dict) else x)
     # STOPGAP: keep the full item struct as JSON (bonus_lists, modifiers, context...) and record which
     # folder (commodities / realm_N) each row came from, instead of discarding both.
-    merged_df['item_json'] = merged_df['item'].apply(item_to_json)
-    merged_df['source'] = folder_prefix.split('/')[0]
-    merged_df = merged_df.drop(columns=['item'])
+    merged_df["item_json"] = merged_df["item"].apply(item_to_json)
+    merged_df["source"] = folder_prefix.split("/")[0]
+    merged_df = merged_df.drop(columns=["item"])
+    if existing is not None:
+        merged_df = pd.concat([existing, merged_df], ignore_index=True)
     merged_df = merged_df.drop_duplicates().reset_index(drop=True)
-    
-    print(f"Reduced from {original_count} rows to {len(merged_df)} unique records.")
+    print(f"Reduced from {original_count} new rows to {len(merged_df)} unique records in the day.")
 
-    # 4. Upload Daily File
-    daily_filename = f"{folder_prefix}daily.parquet"
+    # Upload the daily file to B2 (primary) and check it arrived before anything is deleted
     parquet_buffer = io.BytesIO()
     merged_df.to_parquet(parquet_buffer, index=False, compression="snappy")
     parquet_bytes = parquet_buffer.getvalue()
-    
-    # Upload to B2 (Primary)
     s3.upload_fileobj(io.BytesIO(parquet_bytes), B2_BUCKET_NAME, daily_filename)
-    
-    # Upload to HF (Backup)
+    size = s3.head_object(Bucket=B2_BUCKET_NAME, Key=daily_filename)["ContentLength"]
+    if size != len(parquet_bytes):
+        raise RuntimeError(f"daily file for {folder_prefix} arrived with {size} bytes, expected {len(parquet_bytes)}; hourly files kept")
+
+    # Upload to Hugging Face (backup)
+    hf_ok = False
     try:
-        hf_api.upload_file(
-            path_or_fileobj=io.BytesIO(parquet_bytes),
-            path_in_repo=daily_filename,
-            repo_id=HF_REPO_ID,
-            repo_type="dataset"
-        )
+        hf_api.upload_file(path_or_fileobj=io.BytesIO(parquet_bytes), path_in_repo=daily_filename, repo_id=HF_REPO_ID, repo_type="dataset")
+        hf_ok = True
     except Exception as e:
         print(f"HF Upload Warning: {e}")
 
-    # 5. Delete the Hourly Files
-    for key in file_keys:
-        s3.delete_object(Bucket=B2_BUCKET_NAME, Key=key)
-        try:
-            hf_api.delete_file(path_in_repo=key, repo_id=HF_REPO_ID, repo_type="dataset")
-        except Exception:
-            pass
-            
-    print(f"Successfully compacted {folder_prefix}")
+    _delete_hourly(file_keys, hf_ok)
+    del dataframes, merged_df, existing, parquet_bytes, parquet_buffer
+    gc.collect()
+    print(f"Successfully compacted {folder_prefix}{_peak_memory()}")
 
 
 def generate_dashboard_payloads():
@@ -224,11 +269,23 @@ def main():
 
     folders_to_check = ["commodities/"] + [f"realm_{r_id}/" for r_id in REALM_IDS]
 
+    failed = []
     for folder in folders_to_check:
         prefix = f"{folder}{date_path}"
-        compact_folder(prefix)
-        
-    generate_dashboard_payloads()
+        try:
+            compact_folder(prefix)
+        except Exception as e:                      # one folder failing must not stop the others
+            print(f"FAILED {prefix}: {e}")
+            failed.append(prefix)
+
+    # The dashboard payloads (a week of daily files from all four folders held in memory at once) fed the OLD app. The new app
+    # reads engine/ tables instead, and this step is the likeliest cause of the runner being killed for running out of memory.
+    if os.environ.get("BUILD_DASHBOARD_PAYLOADS") == "1":
+        generate_dashboard_payloads()
+    else:
+        print("Skipping dashboard payloads (the new app does not use them). Set BUILD_DASHBOARD_PAYLOADS=1 to build them.")
+    if failed:
+        raise SystemExit(f"These folders were not compacted (safe to re-run): {failed}")
 
 if __name__ == "__main__":
     main()
