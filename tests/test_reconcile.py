@@ -253,3 +253,31 @@ class TestFlipRows(unittest.TestCase):
         self.assertAlmostEqual(parse_spent(flips.iloc[0]["note"]), 535.42)
         self.assertTrue(pd.isna(parse_spent("Flipped, bought all for 1.73 or 1.75 gold")))
         self.assertAlmostEqual(parse_spent("flipped; total cost 1,234.5g"), 1234.5)
+
+
+class TestMixedTimeFormats(unittest.TestCase):
+    def rows(self, times, notes=None):
+        n = len(times)
+        return pd.DataFrame({
+            "date": ["2026-10-31"] * n, "time_posted": times, "tz": ["EDT"] * n, "item_id": ["13466"] * n, "lane": ["UNDER"] * n,
+            "list_price": ["5.84"] * n, "quantity": ["35"] * n, "units_sold": ["35"] * n, "units_expired": [""] * n,
+            "note": notes or [""] * n})
+
+    def test_am_pm_and_24_hour_times_can_be_mixed(self):
+        log = read_log(self.rows(["8:22 AM", "2:13 PM", "14:30", "9:05AM"]))
+        got = sorted(log["posted_utc"].dt.strftime("%H:%M"))
+        self.assertEqual(got, sorted(["12:22", "18:13", "18:30", "13:05"]))
+
+    def test_a_time_without_am_pm_is_read_as_24_hour_and_warned_about(self):
+        log = read_log(self.rows(["2:33"]))
+        self.assertEqual(log.iloc[0]["posted_utc"].strftime("%H:%M"), "06:33")        # 02:33 EDT
+        self.assertTrue(any("no AM or PM" in w for w in log.attrs["warnings"]))
+
+    def test_no_warning_for_flip_rows_and_the_warning_goes_with_the_right_row(self):
+        log = read_log(self.rows(["2:33", "3:47 PM"], ["Flipped; spent 17g", ""]))
+        self.assertFalse(any("no AM or PM" in w for w in log.attrs["warnings"]))
+
+    def test_an_unreadable_time_is_named(self):
+        with self.assertRaises(ValueError) as cm:
+            read_log(self.rows(["around noon"]))
+        self.assertIn("around noon", str(cm.exception))

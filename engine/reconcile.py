@@ -20,6 +20,7 @@ produces the numbers we use to decide whether to.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Dict, List, Optional, Sequence
 
 import re
@@ -44,6 +45,25 @@ ITEM_IDS_BY_NAME = {
 }
 COLUMN_ALIASES = {"note 1": "note", "notes": "note", "note1": "note", "comment": "note", "comments": "note"}
 LANE_WORDS = {"UNDER": "UNDER", "BELOW": "UNDER", "SAME": "SAME", "ABOVE": "SAME"}
+
+
+_TIME_FORMATS = (("%I:%M %p", False), ("%I:%M%p", False), ("%H:%M", True), ("%H:%M:%S", True))
+
+
+def _parse_time(date_str: str, time_str: str):
+    """(timestamp or NaT, no_ampm). '8:22 AM', '8:22AM' and '14:05' are read as written; a time like '2:33' has no AM or PM, so it is
+    read as 24-hour and flagged (no_ampm) for a warning."""
+    d = pd.to_datetime(date_str, errors="coerce")
+    t = str(time_str).strip().upper().replace(".", "")
+    if pd.isna(d) or not t:
+        return pd.NaT, False
+    for fmt, plain in _TIME_FORMATS:
+        try:
+            hm = datetime.strptime(t, fmt)
+        except ValueError:
+            continue
+        return d + pd.Timedelta(hours=hm.hour, minutes=hm.minute), bool(plain and hm.hour <= 12)
+    return pd.NaT, False
 
 
 def read_log(source) -> pd.DataFrame:
@@ -86,7 +106,15 @@ def read_log(source) -> pd.DataFrame:
     if off.isna().any():
         bad = sorted(df.loc[off.isna(), "tz"].unique())
         raise ValueError(f"unknown time zone label(s) in the log: {bad}; use EDT or EST")
-    local = pd.to_datetime(df["date"] + " " + df["time_posted"])
+    parsed = [_parse_time(d, t) for d, t in zip(df["date"], df["time_posted"])]
+    local = pd.Series([p[0] for p in parsed], index=df.index)
+    df["no_ampm"] = [p[1] for p in parsed]
+    flip_note = df["note"].str.lower().str.lstrip(" \"'*-").str.startswith("flipped")
+    bad_time = local.isna() & ~flip_note
+    if bad_time.any():
+        raise ValueError("cannot read the posting time of: " + "; ".join(f"{d} {t!r} ({n})" for d, t, n in
+                                                                         zip(df.loc[bad_time, "date"], df.loc[bad_time, "time_posted"], df.loc[bad_time, "item_name"])))
+    local = local.fillna(pd.to_datetime(df["date"], errors="coerce") + pd.Timedelta(hours=12))   # a flip row with an unreadable time: noon
     df["posted_utc"] = local - pd.to_timedelta(off.astype(float), unit="h")
     df["price_copper"] = (df["list_price"] * COPPER_PER_GOLD).round().astype("int64")
     df["lane"] = df["lane"].str.upper().map(LANE_WORDS).fillna("OTHER")
@@ -102,7 +130,11 @@ def read_log(source) -> pd.DataFrame:
     df["done"] = df["units_sold"].notna()
     df["in_progress"] = in_progress
     df = df.sort_values("posted_utc").reset_index(drop=True)
-    df.attrs["warnings"] = check_log(df)
+    warns = check_log(df)
+    amb = df.loc[df["no_ampm"].astype(bool) & ~df["is_flip"]]
+    for _, r in amb.iterrows():
+        warns.append(f"{r['date']} {r['time_posted']} ({r['item_name'] or r['item_id']}): the time has no AM or PM, so it was read as a 24-hour time. Add AM or PM if that is wrong.")
+    df.attrs["warnings"] = warns
     return df
 
 
