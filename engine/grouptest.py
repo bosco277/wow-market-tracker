@@ -18,11 +18,13 @@ RELIABLE = ("Medium", "High")
 ERA_EDGES = (0, 120000, 200000, 240000)       # item-id edges: a rough guess at expansion boundaries, not Blizzard data
 ERA_LABELS = ("old (<120k)", "mid (120-200k)", "previous (200-240k)", "current (240k+)")
 SPLITS = ("era", "id_band", "quality", "era_quality", "tiered", "use")
-MIN_DAYS = 14          # an item needs this many usable days before its day-to-day lifts are scored
+MIN_DAYS = 6           # an item needs this many complete days before its day-to-day lifts are scored (noisy under FULL_DAYS; the median over many items averages it out)
+FULL_DAYS = 14         # below this many days in the history, the lifting-together results are provisional
+MIN_DAYS_DOW = 14      # a day-of-week pattern needs every weekday seen at least twice
 MIN_DAILY_SOLD = 3.0   # and a typical day of at least this many units sold (below that, a day's count is mostly luck)
 SPIKE = 2.0            # a "lift" day: sales at least this many times the item's own typical day
 EXTRA_CORR = 0.10      # a group has its own pattern if its correlation beats the all-items one by this much
-MIN_HOURS = 240        # an item needs this many usable hourly readings (about 10 days) before its daily rhythm is scored
+MIN_HOURS = 96         # an item needs this many usable hourly readings (4 days) before its hour-of-day rhythm is scored
 
 
 def _loo_median(df: pd.DataFrame, keys: list, col: str, min_peers: int = MIN_PEERS) -> np.ndarray:
@@ -211,7 +213,6 @@ def coarse_report(m: pd.DataFrame, min_items: int = 20, spread_over: float = 10.
 def hourly_profiles(h: pd.DataFrame, tz: str = "America/New_York", min_rows: int = MIN_HOURS) -> dict:
     """Per-item daily rhythm from the hourly table, US Eastern. Hours flagged as spikes, blips, wipes or gaps are left out.
     sold_hour: share of an item's sales in each hour of the day (24 numbers summing to 1);
-    sold_dow: the same for day of the week (7 numbers, Monday first);
     price_hour: log10 of the item's typical price in that hour over its overall typical price (24 numbers; 0 = no difference)."""
     need = ["item_id", "ts", "floor_gold", "sold_est"]
     if h is None or h.empty or any(c not in h.columns for c in need):
@@ -229,7 +230,7 @@ def hourly_profiles(h: pd.DataFrame, tz: str = "America/New_York", min_rows: int
         return {}
     t = pd.to_datetime(s["ts"])
     t = (t.dt.tz_localize("UTC") if t.dt.tz is None else t).dt.tz_convert(tz)
-    s["hour"], s["dow"] = t.dt.hour, t.dt.dayofweek
+    s["hour"] = t.dt.hour
     s["sold"] = s["sold_est"].astype(float).clip(lower=0)
     med = s.groupby("item_id")["floor_gold"].transform("median").astype(float)
     s["lp"] = np.log10(s["floor_gold"].astype(float) / med)
@@ -242,11 +243,8 @@ def hourly_profiles(h: pd.DataFrame, tz: str = "America/New_York", min_rows: int
     sh = grid("sold", "hour", 24, "mean", 20)
     sh = sh[sh.sum(axis=1) > 0]
     sh = sh.div(sh.sum(axis=1), axis=0)
-    sd = grid("sold", "dow", 7, "mean", 6)
-    sd = sd[sd.sum(axis=1) > 0]
-    sd = sd.div(sd.sum(axis=1), axis=0)
     ph = grid("lp", "hour", 24, "median", 20)
-    return {"sold_hour": sh, "sold_dow": sd, "price_hour": ph, "items": int(s["item_id"].nunique()), "rows": int(len(s))}
+    return {"sold_hour": sh, "price_hour": ph, "items": int(s["item_id"].nunique()), "rows": int(len(s))}
 
 
 def shape_by(groups: pd.DataFrame, prof: pd.DataFrame, by: str = "group", share: bool = True) -> pd.DataFrame:
@@ -297,17 +295,40 @@ def rhythm_verdict(items, vs_flat, vs_all) -> str:
     return "group-specific rhythm" if vs_all >= HELPS else "same rhythm as every item"
 
 
-def shape_report(groups: pd.DataFrame, hourly: pd.DataFrame) -> dict:
-    """Rhythm results: per group, family and overall, for the hour-of-day sales pattern (hour_*), the day-of-week sales pattern (dow_*)
-    and the hour-of-day price pattern (price_*)."""
-    prof = hourly_profiles(hourly)
-    if not prof:
+def dow_profile(daily: pd.DataFrame, min_days: int = MIN_DAYS_DOW, min_hours: int = 18) -> pd.DataFrame:
+    """Each item's share of sales by day of the week (Monday first, 7 numbers summing to 1) from the item_daily history. Needs min_days
+    complete days, a median day of MIN_DAILY_SOLD units, and every weekday seen at least twice."""
+    need = ["item_id", "day", "hours", "sold_day"]
+    if daily is None or daily.empty or any(c not in daily.columns for c in need):
+        return pd.DataFrame()
+    d = daily[(daily["hours"] >= min_hours) & daily["sold_day"].notna()].copy()
+    cnt = d.groupby("item_id").size()
+    d = d[d["item_id"].isin(cnt[cnt >= min_days].index)]
+    if d.empty:
+        return pd.DataFrame()
+    d = d[d["item_id"].map(d.groupby("item_id")["sold_day"].median()) >= MIN_DAILY_SOLD]
+    d["dow"] = pd.to_datetime(d["day"]).dt.dayofweek
+    g = d.groupby(["item_id", "dow"])["sold_day"]
+    mean = g.mean().unstack("dow").reindex(columns=range(7))
+    n = g.size().unstack("dow").reindex(columns=range(7))
+    mean = mean[(n >= 2).all(axis=1)]
+    mean = mean[mean.sum(axis=1) > 0]
+    return mean.div(mean.sum(axis=1), axis=0)
+
+
+def shape_report(groups: pd.DataFrame, hourly: pd.DataFrame, daily: pd.DataFrame = None) -> dict:
+    """Rhythm results per group, family and overall: hour-of-day sales pattern (hour_*) and hour-of-day price pattern (price_*) from the
+    hourly table, day-of-week sales pattern (dow_*) from the daily history."""
+    prof = hourly_profiles(hourly) if hourly is not None and len(hourly) else {}
+    dow = dow_profile(daily) if daily is not None and len(daily) else pd.DataFrame()
+    if not prof and dow.empty:
         return {}
-    out = {"items": prof["items"], "rows": prof["rows"]}
+    out = {"items": prof.get("items", 0), "rows": prof.get("rows", 0), "dow_items": int(len(dow))}
+    mats = ([("hour", prof["sold_hour"], True), ("price", prof["price_hour"], False)] if prof else []) + ([("dow", dow, True)] if not dow.empty else [])
     for level, by in (("groups", "group"), ("families", "family"), ("overall", "_all")):
         parts = []
-        for tag, key, share in (("hour", "sold_hour", True), ("dow", "sold_dow", True), ("price", "price_hour", False)):
-            t = shape_by(groups, prof[key], by=by, share=share)
+        for tag, mat, share in mats:
+            t = shape_by(groups, mat, by=by, share=share)
             if len(t):
                 parts.append(t.add_prefix(f"{tag}_"))
         if not parts:
@@ -315,55 +336,39 @@ def shape_report(groups: pd.DataFrame, hourly: pd.DataFrame) -> dict:
         df = pd.concat(parts, axis=1)
         df.index.name = by
         df = df.reset_index()
-        if "hour_items" in df.columns:
+        lead = "hour" if "hour_items" in df.columns else "dow"
+        if f"{lead}_items" in df.columns:
             if by == "_all":                                     # group and all-items are the same guess here, so only "better than a flat day" is meaningful
-                df["hour_verdict"] = ["items share a common daily pattern" if v >= HELPS else "no common daily pattern" for v in df["hour_vs_flat"]]
+                df[f"{lead}_verdict"] = ["items share a common daily pattern" if v >= HELPS else "no common daily pattern" for v in df[f"{lead}_vs_flat"]]
             else:
-                df["hour_verdict"] = [rhythm_verdict(n if n == n else 0, a, b) for n, a, b in zip(df["hour_items"], df["hour_vs_flat"], df["hour_vs_all"])]
-            df = df.sort_values("hour_items", ascending=False)
+                df[f"{lead}_verdict"] = [rhythm_verdict(n if n == n else 0, a, b) for n, a, b in zip(df[f"{lead}_items"], df[f"{lead}_vs_flat"], df[f"{lead}_vs_all"])]
+            df = df.sort_values(f"{lead}_items", ascending=False)
         out[level] = df.reset_index(drop=True)
     return out
 
 
 # ------------------------------------------------------------------ co-movement: do items in a group lift on the same days?
-def daily_series(h: pd.DataFrame, tz: str = "America/New_York", min_hours_per_day: int = 18, min_days: int = MIN_DAYS,
-                 min_daily_sold: float = MIN_DAILY_SOLD) -> dict:
-    """Each item's day-by-day lift against ITS OWN typical day, so quantities drop out.
+def daily_series(daily: pd.DataFrame, min_hours_per_day: int = 18, min_days: int = MIN_DAYS, min_daily_sold: float = MIN_DAILY_SOLD) -> dict:
+    """Each item's day-by-day lift against ITS OWN typical day, so quantities drop out, from the item_daily history.
     sales: log10((units sold that day + 1) / (the item's median day + 1)); 0 = a normal day, 0.30 = double, -0.30 = half.
     price: log10(the day's typical price / the item's typical price).
-    A day counts only if it has min_hours_per_day usable hours (spike/blip/wipe/gap hours left out); sales are scaled to 24 hours.
-    Items need min_days such days and a median day of min_daily_sold units. Days are US Eastern dates."""
-    need = ["item_id", "ts", "floor_gold", "sold_est"]
-    if h is None or h.empty or any(c not in h.columns for c in need):
+    A day counts only if it has min_hours_per_day usable hours. Items need min_days such days and a median day of min_daily_sold units."""
+    need = ["item_id", "day", "hours", "sold_day", "price_day"]
+    if daily is None or daily.empty or any(c not in daily.columns for c in need):
         return {}
-    flags = [c for c in ("spike", "blip", "flag_wipe", "flag_long_gap") if c in h.columns]
-    s = h[need + flags].copy()
-    bad = np.zeros(len(s), dtype=bool)
-    for c in flags:
-        bad |= s[c].fillna(False).astype(bool).to_numpy()
-    s = s[~bad].dropna(subset=["sold_est", "floor_gold"])
-    s = s[s["floor_gold"].astype(float) > 0]
-    if s.empty:
-        return {}
-    t = pd.to_datetime(s["ts"])
-    t = (t.dt.tz_localize("UTC") if t.dt.tz is None else t).dt.tz_convert(tz)
-    s = s.assign(day=t.dt.strftime("%Y-%m-%d").to_numpy(), sold=s["sold_est"].astype(float).clip(lower=0).to_numpy(), price=s["floor_gold"].astype(float).to_numpy())
-    d = s.groupby(["item_id", "day"]).agg(n=("sold", "size"), sold=("sold", "mean"), price=("price", "median")).reset_index()
-    d = d[d["n"] >= min_hours_per_day]
-    d["sold"] = d["sold"] * 24.0
-    g = d.groupby("item_id")
-    keep = g.size()[g.size() >= min_days].index
-    d = d[d["item_id"].isin(keep)]
-    base = d.groupby("item_id")["sold"].median()
-    keep = base[base >= min_daily_sold].index
-    d = d[d["item_id"].isin(keep)].copy()
+    d = daily[(daily["hours"] >= min_hours_per_day) & daily["sold_day"].notna() & (daily["price_day"].astype(float) > 0)].copy()
+    cnt = d.groupby("item_id").size()
+    d = d[d["item_id"].isin(cnt[cnt >= min_days].index)]
     if d.empty:
         return {}
-    d["sales_lift"] = np.log10((d["sold"] + 1.0) / (d["item_id"].map(base) + 1.0))
-    d["price_lift"] = np.log10(d["price"] / d.groupby("item_id")["price"].transform("median"))
-    sales = d.pivot(index="item_id", columns="day", values="sales_lift")
-    price = d.pivot(index="item_id", columns="day", values="price_lift")
-    return {"sales": sales, "price": price, "items": int(d["item_id"].nunique()), "days": int(d["day"].nunique())}
+    base = d.groupby("item_id")["sold_day"].median()
+    d = d[d["item_id"].isin(base[base >= min_daily_sold].index)].copy()
+    if d.empty:
+        return {}
+    d["sales_lift"] = np.log10((d["sold_day"].astype(float) + 1.0) / (d["item_id"].map(base) + 1.0))
+    d["price_lift"] = np.log10(d["price_day"].astype(float) / d.groupby("item_id")["price_day"].transform("median").astype(float))
+    return {"sales": d.pivot(index="item_id", columns="day", values="sales_lift"), "price": d.pivot(index="item_id", columns="day", values="price_lift"),
+            "items": int(d["item_id"].nunique()), "days": int(d["day"].nunique())}
 
 
 def _peer_mean(A: np.ndarray, V: np.ndarray, frame: pd.DataFrame, keys: list) -> np.ndarray:
@@ -463,9 +468,9 @@ def comove_verdict(items, extra, corr_group, corr_market) -> str:
     return "no shared movement"
 
 
-def comove_report(groups: pd.DataFrame, hourly: pd.DataFrame) -> dict:
+def comove_report(groups: pd.DataFrame, daily: pd.DataFrame) -> dict:
     """Co-movement results per group, family and overall, for sales lifts (sales_*), price lifts (price_*) and same-day spikes (spike_*)."""
-    ds = daily_series(hourly)
+    ds = daily_series(daily)
     if not ds:
         return {}
     out = {"items": ds["items"], "days": ds["days"]}
@@ -507,13 +512,12 @@ def spike_verdict(events, spike_group, spike_market) -> str:
     return "no shared spikes"
 
 
-def grouptest(groups: pd.DataFrame, items: pd.DataFrame, hourly: pd.DataFrame = None) -> dict:
+def grouptest(groups: pd.DataFrame, items: pd.DataFrame, hourly: pd.DataFrame = None, daily: pd.DataFrame = None) -> dict:
     m = prepare(groups, items)
     if m.empty:
         return {}
     res = {"groups": loo_by(m, "group"), "families": loo_by(m, "family"), "uses": loo_by(m, "use"),
            **{f"tiers_{k}": v for k, v in tier_report(m).items()}, "coarse": coarse_report(m), "n_items": len(m)}
-    if hourly is not None and len(hourly):
-        res["rhythm"] = shape_report(groups, hourly)
-        res["comove"] = comove_report(groups, hourly)
+    res["rhythm"] = shape_report(groups, hourly, daily)
+    res["comove"] = comove_report(groups, daily) if daily is not None and len(daily) else {}
     return res

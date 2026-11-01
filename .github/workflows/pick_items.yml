@@ -16,6 +16,8 @@ name: Market tools
 #   derive  builds the small tables the new front end reads (use days=4; tick upload to publish them to the HF repo)
 #   backtest  replays the flip screener on past hours and shows what happened next (use days=8; tick upload to show it in the app)
 #   reconcile  checks your experiment log (a CSV in the repo, see log_path) against the snapshots (use days=8)
+#   daily  adds days to the permanent per-item daily history (engine/item_daily): days = how many days to read (7), end_date = last day (blank = today); tick upload.
+#          Run it again with an earlier end_date to backfill. The group test's lifting-together part needs 14+ days of it.
 #   grouptest  leave-one-out test of the groups: which ones predict an item better than its family or all items, and what splits the coarse ones
 #   groups  builds the item-groups table (class, subclass, vendor price) from Blizzard's item data; use item_ids to add items; tick upload to publish it
 #   ledger  reads your Journalator.lua from the PRIVATE dataset (log_path = hf:system/Journalator.lua): real profit per flip, deposits, every
@@ -27,7 +29,7 @@ on:
       mode:
         description: "What to run"
         type: choice
-        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger, groups, grouptest]
+        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger, groups, grouptest, daily]
         default: pick
       days:
         description: "How many days of data to load (pick looks back 72 h, so 4 or more)"
@@ -56,6 +58,9 @@ on:
       log_path:
         description: "reconcile: your experiment log CSV in the repo; ledger: hf:system/Journalator.lua (the file in your private dataset)"
         default: "experiment_log.csv"
+      end_date:
+        description: "daily/derive/etc: last UTC date to read, YYYY-MM-DD (blank = today). Use an earlier date to backfill with daily."
+        default: ""
       upload:
         description: "derive: publish the tables to engine/ in the HF repo (one commit)"
         type: boolean
@@ -102,10 +107,12 @@ jobs:
           HORIZON: ${{ inputs.horizon_hours }}
           LOGPATH: ${{ inputs.log_path }}
           UPLOAD: ${{ inputs.upload }}
+          END: ${{ inputs.end_date }}
         run: |
           mkdir -p out
           EXTRA=""
           if [ "$UPLOAD" = "true" ]; then EXTRA="--upload"; fi
+          if [ -n "$END" ]; then EXTRA="$EXTRA --end $END"; fi
           python tools/lake.py "$MODE" $EXTRA --store hf --days "$DAYS" --ids "$IDS" --max-position-gold "$MAXPOS" --min-floor-gold "$MINFLOOR" --max-units "$MAXUNITS" --n-items "$NITEMS" --trade-units "$TRADE" --horizon-hours "$HORIZON" --log "$LOGPATH" | tee out.txt
           { echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 

@@ -11,6 +11,7 @@ import pandas as pd
 _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _root)
 sys.path.insert(0, os.path.join(_root, "tools"))
+from engine import daily as D  # noqa: E402
 from engine import grouptest as GT  # noqa: E402
 
 
@@ -161,7 +162,7 @@ class TestRhythm(unittest.TestCase):
     def test_flagged_hours_and_short_histories_are_left_out(self):
         groups, items = fake_tables()
         h = fake_hourly(groups, days=14)
-        short = h[h["item_id"] == h["item_id"].iloc[0]].head(100)                       # 100 readings: under the 240 needed
+        short = h[h["item_id"] == h["item_id"].iloc[0]].head(60)                        # 60 readings: under the 96 needed
         prof = GT.hourly_profiles(short)
         self.assertEqual(prof, {})
         h["spike"] = True
@@ -173,7 +174,7 @@ class TestRhythm(unittest.TestCase):
         groups, items = fake_tables()
         prof = GT.hourly_profiles(fake_hourly(groups))
         self.assertTrue(np.allclose(prof["sold_hour"].sum(axis=1), 1.0))
-        self.assertTrue(np.allclose(prof["sold_dow"].sum(axis=1), 1.0))
+        self.assertNotIn("sold_dow", prof)
         tight = groups.loc[groups["group"] == "Consumables: Tight", "item_id"].iloc[0]
         self.assertEqual(int(prof["sold_hour"].loc[tight].idxmax()), 20)
 
@@ -204,22 +205,23 @@ def lift_world(market_wide=False, days=30, seed=11):
 class TestLiftingTogether(unittest.TestCase):
     def test_daily_series_drops_quantities_and_thin_items(self):
         h, groups = lift_world()
-        ds = GT.daily_series(h)
+        ds = GT.daily_series(D.daily_table(h))
         self.assertEqual(ds["items"], 36)
         self.assertEqual(ds["days"], 30)
         self.assertLess(abs(ds["sales"].median(axis=1)).max(), 0.05)                  # each item's lift is measured against its own normal day
         quiet = h[h["item_id"] == 5001].assign(sold_est=0.01)
         h2 = pd.concat([h[h["item_id"] != 5001], quiet])
-        self.assertNotIn(5001, GT.daily_series(h2)["sales"].index)                      # under 3 units a day: left out
-        few = h[(h["item_id"] != 5002) | (h["ts"] < h["ts"].min() + pd.Timedelta(days=10))]
-        self.assertNotIn(5002, GT.daily_series(few)["sales"].index)                     # under 14 days: left out
+        self.assertNotIn(5001, GT.daily_series(D.daily_table(h2))["sales"].index)       # under 3 units a day: left out
+        few = h[(h["item_id"] != 5002) | (h["ts"] < h["ts"].min() + pd.Timedelta(days=4))]
+        self.assertNotIn(5002, GT.daily_series(D.daily_table(few))["sales"].index)      # under 6 days: left out
         gappy = h[~((h["item_id"] == 5003) & (pd.to_datetime(h["ts"]).dt.hour % 2 == 0))]
-        self.assertNotIn(5003, GT.daily_series(gappy)["sales"].index)                   # every day missing half its hours: no usable day
+        self.assertNotIn(5003, GT.daily_series(D.daily_table(gappy))["sales"].index)    # every day missing half its hours: no usable day
         self.assertEqual(GT.daily_series(pd.DataFrame()), {})
+        self.assertEqual(GT.daily_series(h), {})                                       # the hourly table is not the daily one: no crash, nothing scored
 
     def test_group_with_its_own_good_days_beats_the_market_and_independent_items_do_not(self):
         h, groups = lift_world()
-        cm = GT.comove_report(groups, h)
+        cm = GT.comove_report(groups, D.daily_table(h))
         g = cm["groups"].set_index("group")
         self.assertGreater(g.loc["Crafting: Cloth", "sales_corr_group"], 0.7)
         self.assertGreater(g.loc["Crafting: Cloth", "sales_extra"], 0.3)
@@ -229,7 +231,7 @@ class TestLiftingTogether(unittest.TestCase):
 
     def test_spikes_on_the_same_days_are_found(self):
         h, groups = lift_world()
-        g = GT.comove_report(groups, h)["groups"].set_index("group")
+        g = GT.comove_report(groups, D.daily_table(h))["groups"].set_index("group")
         self.assertGreaterEqual(g.loc["Crafting: Cloth", "spike_events"], 20)           # 12 items x 2 spike days
         self.assertGreater(g.loc["Crafting: Cloth", "spike_group"], 5)
         self.assertGreater(g.loc["Crafting: Cloth", "spike_group"], 1.15 * g.loc["Crafting: Cloth", "spike_market"])
@@ -238,22 +240,58 @@ class TestLiftingTogether(unittest.TestCase):
 
     def test_a_market_wide_factor_is_not_credited_to_the_group(self):
         h, groups = lift_world(market_wide=True)
-        cm = GT.comove_report(groups, h)
+        cm = GT.comove_report(groups, D.daily_table(h))
         g = cm["groups"].set_index("group")
         self.assertEqual(g.loc["Crafting: Cloth", "sales_verdict"], "moves with the whole market")
         self.assertLess(g.loc["Crafting: Cloth", "sales_extra"], GT.EXTRA_CORR)
         self.assertEqual(cm["overall"].loc[0, "sales_verdict"], "items share market-wide lifts")
 
     def test_nothing_to_score_gives_empty(self):
-        h, groups = lift_world(days=10)
-        self.assertEqual(GT.comove_report(groups, h), {})                              # 10 days: under the 14 needed
+        h, groups = lift_world(days=5)
+        self.assertEqual(GT.comove_report(groups, D.daily_table(h)), {})               # 5 days: under the 6 needed
+
+    def test_a_short_history_is_labelled_provisional(self):
+        import lake
+        h, groups = lift_world(days=8)
+        items = pd.DataFrame({"item_id": groups["item_id"], "floor_gold": 5.0, "daily_est": 100.0, "confidence": "High"})
+        tables = {"items": items, "item_groups": groups.assign(use="", quality="COMMON", siblings=1, tier_guess=0), "item_daily": D.daily_table(h)}
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(buf):
+            res = lake.run_grouptest(None, lake.argparse.Namespace(out=d), read_table=lambda n: tables.get(n, pd.DataFrame()))
+        self.assertEqual(res["comove"]["days"], 8)
+        self.assertIn("PROVISIONAL: the history holds only 8 days", buf.getvalue())
+
+
+class TestDayOfWeek(unittest.TestCase):
+    def test_weekday_pattern_from_the_daily_history(self):
+        days = pd.date_range("2026-10-05", periods=28, freq="D")                       # four full weeks, Monday first
+        rows = []
+        for iid in range(1, 25):
+            g = "A" if iid <= 12 else "B"
+            for d in days:
+                big = (d.dayofweek == 5) if g == "A" else (d.dayofweek == 1)           # A sells on Saturdays, B on Tuesdays
+                rows.append(dict(item_id=iid, day=d.strftime("%Y-%m-%d"), hours=24, sold_day=10.0 * (1 + 4 * big) * iid, price_day=5.0, units_day=100, flagged_hours=0))
+        daily = pd.DataFrame(rows)
+        groups = pd.DataFrame({"item_id": range(1, 25), "name": "x", "group": ["Crafting: A"] * 12 + ["Crafting: B"] * 12, "family": "Crafting"})
+        prof = GT.dow_profile(daily)
+        self.assertEqual(len(prof), 24)
+        self.assertEqual(int(prof.loc[1].idxmax()), 5)
+        self.assertEqual(int(prof.loc[20].idxmax()), 1)
+        rh = GT.shape_report(groups, None, daily)
+        g = rh["groups"].set_index("group")
+        self.assertGreater(g.loc["Crafting: A", "dow_vs_flat"], 2)
+        self.assertGreater(g.loc["Crafting: A", "dow_vs_all"], 2)
+        self.assertEqual(g.loc["Crafting: A", "dow_verdict"], "group-specific rhythm")
+        short = daily[daily["day"] < "2026-10-15"]                                      # 10 days: under the 14 needed
+        self.assertTrue(GT.dow_profile(short).empty)
 
 
 class TestCommand(unittest.TestCase):
     def test_prints_and_writes_files(self):
         import lake
         groups, items = fake_tables()
-        tables = {"items": items, "item_groups": groups, "item_hourly": fake_hourly(groups)}
+        lh, lg = lift_world()
+        tables = {"items": items, "item_groups": groups, "item_hourly": fake_hourly(groups), "item_daily": D.daily_table(lh)}
         buf = io.StringIO()
         with tempfile.TemporaryDirectory() as d:
             args = lake.argparse.Namespace(out=d)
@@ -276,7 +314,8 @@ class TestCommand(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(buf):
             res = lake.run_grouptest(None, lake.argparse.Namespace(out=d), read_table=lambda n: tables.get(n, pd.DataFrame()))
         self.assertTrue(res)
-        self.assertIn("tests skipped", buf.getvalue())
+        self.assertIn("Lifting-together test skipped: engine/item_daily.parquet does not exist yet", buf.getvalue())
+        self.assertIn("Daily-rhythm test skipped", buf.getvalue())
 
     def test_missing_tables_say_what_to_run(self):
         import lake

@@ -775,8 +775,8 @@ def run_grouptest(store, args, read_table=None):
     if items.empty or groups.empty:
         print("grouptest needs engine/items.parquet and engine/item_groups.parquet. Run derive with upload ticked, then groups with upload ticked.")
         return {}
-    hourly = read_table("item_hourly")
-    res = GT.grouptest(groups, items, hourly if len(hourly) else None)
+    hourly, daily = read_table("item_hourly"), read_table("item_daily")
+    res = GT.grouptest(groups, items, hourly if len(hourly) else None, daily if len(daily) else None)
     if not res:
         print("Nothing to score: no items with both a group and a sales rate.")
         return {}
@@ -828,11 +828,14 @@ def run_grouptest(store, args, read_table=None):
         coarse.to_csv(os.path.join(args.out, "grouptest_coarse.csv"), index=False)
     rh = res.get("rhythm")
     if rh:
-        print(f"\n== PART 2 - DAILY RHYTHM: do items in a group sell (and price) on the same daily pattern? ({rh['items']} items with enough hourly history, {rh['rows']:,} hourly readings) ==")
+        print(f"\n== PART 2 - DAILY RHYTHM: do items in a group sell (and price) on the same daily and weekly pattern? ({rh['items']} items with hourly history for the hour-of-day pattern, "
+              f"{rh['rows']:,} hourly readings; {rh.get('dow_items', 0)} items with enough days for the day-of-week pattern) ==")
         print("  Each item's pattern is guessed from the average of the OTHER items in its group. hour_miss / dow_miss = share of sales sitting in the wrong hours / days")
         print("  (0 = perfect); price_miss = typical gap in log10 price by hour (0.05 = about 12%). vs_flat = miss of a flat day / miss of the group guess; vs_all = miss of the")
-        print(f"  all-items average / miss of the group guess. Needs {GT.MIN_HOURS}+ usable hourly readings per item; {GT.MIN_SCORED}+ items per group for a verdict.")
-        keep = ["hour_items", "hour_miss_group", "hour_vs_flat", "hour_vs_all", "dow_miss_group", "dow_vs_flat", "dow_vs_all", "price_miss_group", "price_vs_flat", "price_vs_all", "hour_verdict"]
+        print(f"  all-items average / miss of the group guess. Hour-of-day needs {GT.MIN_HOURS}+ usable hourly readings per item; day-of-week needs {GT.MIN_DAYS_DOW}+ complete days (item_daily);")
+        print(f"  {GT.MIN_SCORED}+ items per group for a verdict.")
+        keep = ["hour_items", "hour_miss_group", "hour_vs_flat", "hour_vs_all", "dow_items", "dow_miss_group", "dow_vs_flat", "dow_vs_all", "price_miss_group", "price_vs_flat",
+                "price_vs_all", "hour_verdict", "dow_verdict"]
         for level, key, title in (("overall", "_all", "ALL ITEMS"), ("families", "family", "BY FAMILY"), ("groups", "group", "BY GROUP")):
             df = rh.get(level)
             if df is not None and len(df):
@@ -845,6 +848,9 @@ def run_grouptest(store, args, read_table=None):
         print("  Each day is compared with the item's OWN typical day, so quantities drop out: sales_lift 0.30 = double its normal, -0.30 = half. For each item we correlate its")
         print("  day-by-day lifts with the average of the OTHER items in its group (corr_group) and of every item OUTSIDE its group (corr_market). extra = corr_group - corr_market: how much")
         print(f"  the group moves together beyond everything moving at once (reset days, patches, weekends). Needs {GT.MIN_DAYS}+ good days and 3+ units a day per item; 0 = no link, 1 = identical.")
+        if cm["days"] < GT.FULL_DAYS:
+            print(f"  PROVISIONAL: the history holds only {cm['days']} days (the full test wants {GT.FULL_DAYS}+). Correlations from so few days are noisy for any single item; the group figures are medians over")
+            print("  items, so read only the big groups (50+ items) and the family rows, and treat small groups and spike counts as unsettled. They firm up as days are added.")
         print(f"  spike_events = item-days with sales at least {GT.SPIKE:g}x normal. spike_group / spike_market = how many times more likely the item's peers (in its group / outside it) are to lift on")
         print("  those same days than on a random day (1.0 = no link). price_* is the same test on the day's price.")
         keep = ["sales_items", "sales_corr_group", "sales_corr_market", "sales_extra", "price_corr_group", "price_corr_market", "price_extra", "spike_events", "spike_group",
@@ -855,14 +861,60 @@ def run_grouptest(store, args, read_table=None):
                 print(f"\n-- {title} --")
                 print(df[[key] + [c for c in keep if c in df.columns]].round(2).to_string(index=False))
                 df.to_csv(os.path.join(args.out, f"grouptest_comove_{level}.csv"), index=False)
-    elif rh:
-        print(f"\n(Lifting-together test skipped: no item has {GT.MIN_DAYS}+ complete days with {GT.MIN_DAILY_SOLD:g}+ units a day yet.)")
+    elif daily is not None and len(daily):
+        from engine.daily import coverage
+        cov = coverage(daily)
+        full = int((cov["complete_items"] >= 0.5 * max(cov["complete_items"].max(), 1)).sum())
+        print(f"\n(Lifting-together test skipped: no item has {GT.MIN_DAYS}+ complete days with {GT.MIN_DAILY_SOLD:g}+ units a day yet. item_daily holds {len(cov)} days, "
+              f"about {full} of them well covered. Run mode daily again for earlier weeks (end_date) to add more.)")
+    else:
+        print("\n(Lifting-together test skipped: engine/item_daily.parquet does not exist yet. Run mode daily with upload ticked, and again with an earlier end_date to backfill.)")
     if not rh:
-        if hourly is None or not len(hourly):
-            print("\n(Daily-rhythm and lifting-together tests skipped: engine/item_hourly.parquet is missing or empty.)")
-        else:
-            print(f"\n(Daily-rhythm and lifting-together tests skipped: no item has {GT.MIN_HOURS}+ usable hourly readings yet.)")
+        print("(Daily-rhythm test skipped: no item has enough hourly readings or days yet.)")
     return res
+
+
+def run_daily(store, args, reader=None, read_table=None):
+    """Add days to the permanent per-item history (engine/item_daily): load the snapshots for --days ending at --end, turn them into one row
+    per item per US Eastern day, and merge with what is already stored (the row with more usable hours wins). Run it with upload ticked;
+    run it again with an earlier end_date to backfill. The items covered are the ones in engine/items (plus --ids)."""
+    from engine import daily as D
+    from engine.classifier import classify_series
+    read_table = read_table or _read_engine_table
+    items = read_table("items")
+    ids = set(items["item_id"].astype(int)) if len(items) else set()
+    for tok in str(args.ids or "").replace(";", ",").split(","):
+        if tok.strip().isdigit():
+            ids.add(int(tok))
+    if not ids:
+        print("No items to cover: engine/items.parquet is empty or missing (run derive with upload first), and no --ids were given.")
+        return pd.DataFrame()
+    snaps = sorted((s for s in _load_all(store, args, reader) if s.kind == "commodity"), key=lambda s: s.ts)
+    if len(snaps) < 3:
+        print("Need at least 3 commodity snapshots in the window.")
+        return pd.DataFrame()
+    print(f"{len(snaps)} snapshots from {_et_any(snaps[0].ts)} to {_et_any(snaps[-1].ts)} (US Eastern); classifying sales for {len(ids)} items ...")
+    intervals = classify_series(snaps)
+    new = D.daily_table(D.build_hourly(snaps, intervals, ids))
+    if new.empty:
+        print("No usable hours for these items in this window.")
+        return new
+    old = read_table("item_daily")
+    merged = D.merge_daily(old, new)
+    print(f"item_daily: {len(old):,} rows before, {len(new):,} computed now, {len(merged):,} after merging.")
+    cov = D.coverage(merged)
+    print("\n== DAYS STORED (complete = 18+ usable hours; the lifting-together test needs 14+ complete days per item) ==")
+    print(cov.tail(45).round(1).to_string(index=False))
+    done = int((cov["complete_items"] > 0.5 * max(cov["complete_items"].max(), 1)).sum())
+    print(f"\n{len(cov)} days stored, {done} of them well covered. " + ("Enough for the lifting-together test." if done >= 14 else f"{14 - done} more well-covered days needed for the lifting-together test."))
+    os.makedirs(args.out, exist_ok=True)
+    merged.to_csv(os.path.join(args.out, "item_daily.csv"), index=False)
+    if getattr(args, "upload", False):
+        folder = os.path.join(args.out, "daily_upload")
+        os.makedirs(folder, exist_ok=True)
+        merged.to_parquet(os.path.join(folder, "item_daily.parquet"), index=False)
+        _upload_folder_to_engine(folder, "item daily history")
+    return merged
 
 
 def _et_any(ts):
@@ -993,7 +1045,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -1014,7 +1066,7 @@ def main(argv=None):
     ap.add_argument("--upload", action="store_true", help="derive: push the tables to engine/ in the HF repo")
     args = ap.parse_args(argv)
     store = None if args.command in ("ledger", "groups", "grouptest") else make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest}[args.command](store, args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily}[args.command](store, args)
 
 
 if __name__ == "__main__":

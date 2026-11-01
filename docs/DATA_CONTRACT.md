@@ -388,17 +388,30 @@ family". Also printed: how higher quality tiers compare with the lowest tier of 
 better than the group; and, for big groups with spread >= 10, which extra split (item-id band as a stand-in for expansion, quality,
 has-tiers, name use) lowers the miss most. Splits tried on the coarse groups: `era` (item-id range, old < 120k, mid 120-200k, previous 200-240k, current 240k+; a rough guess at
 the expansion, not Blizzard data), `id_band` (blocks of 20,000), `quality`, `era_quality`, `tiered`, `use`; each slice is printed with its
-median sales per day and median price. If engine/item_hourly.parquet exists, a rhythm test follows: each item's daily pattern (share of
-sales by hour of day, by day of week, and price by hour, US Eastern, spike/blip/wipe/gap hours left out, items with 240+ usable hours) is
+median sales per day and median price. A rhythm test follows: each item's pattern (share of sales by hour of day and price by hour from
+engine/item_hourly, US Eastern, spike/blip/wipe/gap hours left out, items with 96+ usable hours; share of sales by day of week from
+engine/item_daily, items with 14+ complete days and every weekday seen twice) is
 guessed from the average of the other items in its group, family and all items and from a flat day; verdicts are "group-specific rhythm",
 "same rhythm as every item" or "no better than a flat day".
-Part 3, lifting together (needs engine/item_hourly.parquet): quantities drop out because each item's day is compared with ITS OWN
+Part 3, lifting together (reads engine/item_daily.parquet, see 2j): quantities drop out because each item's day is compared with ITS OWN
 typical day (sales_lift = log10((units that day + 1) / (median day + 1)); price_lift likewise; days need 18+ usable hours, items 14+ days
 and a median day of 3+ units). For each item the lift series is correlated with the average of the other items in its group (corr_group)
 and with the average of every item OUTSIDE its group (corr_market, so a strong group cannot inflate its own control); extra = the
-difference. Spike days (sales >= 2x the item's normal): how many times more likely its peers are to lift the same day than on a random
+difference. Under 14 days of history the results are labelled PROVISIONAL (items need only 6 complete days; the median over many items averages
+the noise down, so only big groups and families can be read). The day-of-week pattern waits for 14 days. Spike days (sales >= 2x the item's normal): how many times more likely its peers are to lift the same day than on a random
 day, in the group (spike_group) and outside it (spike_market). Verdicts: "moves together beyond the market" (extra >= 0.10 and
 corr_group >= 0.25), "moves with the whole market", "no shared movement"; "spikes together beyond the market" needs 10+ spike days.
 Parts 2 and 3 are the ones that ask whether items MOVE alike; part 1 only asks whether they sell similar quantities.
 Nothing here feeds a forecast; it decides which groups are safe to lean on. Planned next:
 a model group per item (separate from the official group, which never changes), set only on strong, repeated evidence, every move logged.
+
+## 2j. Daily history per item (engine/daily.py, `tools/lake.py daily`, table `engine/item_daily.parquet`)
+
+`derive` keeps only 8 days of hourly rows (`history_hours`), too short to see whether items move together from day to day. `daily` turns
+the hourly series into ONE ROW PER ITEM PER US-EASTERN DAY and merges it into what is stored, so the history only grows:
+`item_id, day (YYYY-MM-DD), hours` (usable hours that day: no price spike, listing blip, wipe or long gap, and a sales estimate exists),
+`sold_day` (units sold in a 24 hour day, scaled up from the usable hours), `price_day` (median lowest price, gold), `units_day` (median
+units listed), `flagged_hours`, `engine_version`. For a day present twice the row with more usable hours wins (the new one on a tie), so
+a partial first run is repaired by a later one. A day with under 18 usable hours is stored but not scored. Items covered: those in
+engine/items (plus --ids). Run with upload ticked; run again with an earlier `end_date` to backfill. The group test's lifting-together part
+needs 14+ complete days per item.
