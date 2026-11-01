@@ -376,5 +376,15 @@ for example Healing potion, Feast / cauldron, Ore or bar; a guess), `siblings` /
 tier_guess ranks them by item id and is a guess). Only ids not yet in the table are fetched, so later runs are short. The summary the
 command prints gives, per group, items, median price, median sales per day and `spread` (p75 / p25 of sales per day): a group is only
 useful for extrapolation if its items behave alike, so spread near 1 is good and a large spread means the group is too coarse.
-Community groups (TSM public groups) are not used: they are partial and personal. Planned: a leave-one-out test (does an item's
-group predict its sales better than no group?) before any group value feeds the forecasts.
+Community groups (TSM public groups) are not used: they are partial and personal.
+
+### 2i. Group test (engine/grouptest.py, `tools/lake.py grouptest`; reads engine/items + engine/item_groups, writes nothing back)
+
+Leave-one-out: every item is guessed from the OTHER items in its group (median in log space, at least 3 peers), and the same item is
+guessed from its family and from all items. The miss is reported as a multiple (x2.0 = about double or half) for sales per day and for
+price, scored on every item and again on Medium/High-confidence items only. Verdict per group: "too few to judge" (< 6 scored),
+"no better than guessing" (miss not at least 15% smaller than guessing from all items), "helps, family is as good", or "adds to its
+family". Also printed: how higher quality tiers compare with the lowest tier of the same name; whether a same-name sibling guesses
+better than the group; and, for big groups with spread >= 10, which extra split (item-id band as a stand-in for expansion, quality,
+has-tiers, name use) lowers the miss most. Nothing here feeds a forecast; it decides which groups are safe to lean on. Planned next:
+a model group per item (separate from the official group, which never changes), set only on strong, repeated evidence, every move logged.

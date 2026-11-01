@@ -766,6 +766,64 @@ def run_groups(store, args, get=None, read_table=None):
     return g
 
 
+def run_grouptest(store, args, read_table=None):
+    """Leave-one-out test of the item groups (needs engine/items.parquet and engine/item_groups.parquet): is each item better guessed
+    from its group than from its family or from all items, which groups are too coarse, and what would split them. Feeds nothing."""
+    from engine import grouptest as GT
+    read_table = read_table or _read_engine_table
+    items, groups = read_table("items"), read_table("item_groups")
+    if items.empty or groups.empty:
+        print("grouptest needs engine/items.parquet and engine/item_groups.parquet. Run derive with upload ticked, then groups with upload ticked.")
+        return {}
+    res = GT.grouptest(groups, items)
+    if not res:
+        print("Nothing to score: no items with both a group and a sales rate.")
+        return {}
+    os.makedirs(args.out, exist_ok=True)
+    show = {"items": "items", "scored": "scored", "sales_off_group": "sales_miss", "sales_gain": "vs_all", "sales_vs_family": "vs_family",
+            "price_off_group": "price_miss", "price_gain": "price_vs_all", "rel_scored": "reliable", "rel_sales_gain": "rel_vs_all",
+            "rel_sales_vs_family": "rel_vs_family", "verdict": "verdict"}
+
+    def table(df, key):
+        d = df[[key] + [c for c in show if c in df.columns]].rename(columns=show)
+        return d.round(2).to_string(index=False)
+
+    print(f"GROUP TEST on {res['n_items']} items. Each item is guessed from the OTHER items in its group, never from itself.")
+    print("  *_miss = how far off the typical guess is, as a multiple (2.0 = about double or half). Smaller is better.")
+    print("  vs_all / vs_family = how many times smaller the miss is than guessing from all items / from the item's family (1.0 = no help).")
+    print(f"  reliable = items whose own numbers are Medium/High confidence; rel_* repeat the test on those only. Verdict needs {GT.MIN_SCORED}+ scored items and a {int((GT.HELPS - 1) * 100)}%+ smaller miss.")
+    for name, key, title in (("families", "family", "BY FAMILY"), ("groups", "group", "BY GROUP (class: subclass)"), ("uses", "use", "BY FINER USE (name guess)")):
+        df = res.get(name)
+        if df is not None and len(df):
+            print(f"\n== {title} ==")
+            print(table(df, key))
+            df.to_csv(os.path.join(args.out, f"grouptest_{name}.csv"), index=False)
+    g = res["groups"]
+    judged = g[g["verdict"] != "too few to judge"]
+    if len(judged):
+        helped = judged["verdict"].str.startswith(("adds", "helps"))
+        adds = judged["verdict"].str.startswith("adds")
+        print(f"\n{len(judged)} groups had enough items to judge: {int(helped.sum())} beat guessing from all items, {int(adds.sum())} also beat guessing from their family; "
+              f"{len(g) - len(judged)} too small to judge.")
+    ratios, guess = res.get("tiers_ratios"), res.get("tiers_guess")
+    if ratios is not None and len(ratios):
+        print("\n== SAME-NAME QUALITY TIERS (reliable items only; tier = rank by item id, a guess) ==")
+        print(ratios.round(2).to_string(index=False))
+        ratios.to_csv(os.path.join(args.out, "grouptest_tiers.csv"), index=False)
+    if guess is not None and len(guess):
+        print("\nFor items that have same-name tiers, the typical miss when guessing from:")
+        print(guess.round(2).to_string(index=False))
+    coarse = res.get("coarse")
+    if coarse is not None and len(coarse):
+        print("\n== BIG GROUPS WHOSE ITEMS BEHAVE VERY DIFFERENTLY: WHAT SPLITS THEM? (sales per day) ==")
+        print("  id_band = item id in blocks of 20,000 (roughly which expansion); quality; tiered = has same-name tiers; use = name guess.")
+        print(coarse.drop(columns=["slices"]).round(2).to_string(index=False))
+        for r in coarse.itertuples():
+            print(f"  {r.group} split by {r.best_split}: {r.slices}")
+        coarse.to_csv(os.path.join(args.out, "grouptest_coarse.csv"), index=False)
+    return res
+
+
 def _et_any(ts):
     if ts is None or pd.isna(ts):
         return ""
@@ -894,7 +952,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -914,8 +972,8 @@ def main(argv=None):
     ap.add_argument("--min-coverage", type=float, default=0.5, help="pick: share of the window that must have been observed")
     ap.add_argument("--upload", action="store_true", help="derive: push the tables to engine/ in the HF repo")
     args = ap.parse_args(argv)
-    store = None if args.command in ("ledger", "groups") else make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups}[args.command](store, args)
+    store = None if args.command in ("ledger", "groups", "grouptest") else make_store(args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest}[args.command](store, args)
 
 
 if __name__ == "__main__":
