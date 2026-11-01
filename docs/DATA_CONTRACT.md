@@ -353,3 +353,16 @@ long_median_gold, long_p10_gold, long_p90_gold, long_days): fail if avg cost > 1
 >= 1.3x the median and the price is now below 0.85x the last 48 h p90 (a market reset in progress), or the target > 1.5x the
 median; warn if the target > 1.25x the median or under 3 days of history. cost_vs_long and target_vs_long are the ratios.
 The `shelves` table also carries daily_low / daily_est / daily_high (units sold per day) of the item.
+
+## 2g. Real results from Journalator (engine/journalator.py, `tools/lake.py ledger`)
+
+Reads the add-on's saved file `WTF/Account/<ACCOUNT>/SavedVariables/Journalator.lua` (type /reload in game first; the add-on archives
+its logs then). The logs sit in `JOURNALATOR_ARCHIVE` as LibSerialize -> raw DEFLATE -> LibDeflate "EncodeForPrint" text; the decoder
+is checked against a real file (counts equal the CSV exports). Times are Unix seconds (UTC). A sale's time is when the mail was
+collected: an upper bound on when it sold. Sale invoices carry no item link, only the name, so sales are matched to listings by
+name and price.
+- invoice (buyer): value = total paid. invoice (seller): value = gross, consignment = the 5% cut, deposit = deposit returned;
+  money received = value - consignment + deposit (verified on 20 sales).
+- an expired listing forfeits its deposit; a sold unit returns it.
+- Tables: purchases, sales, postings, failures; `match_listings` (units sold / expired / open per posting, hours to collect, deposit
+  lost); `flip_ledger` (per item bought: profit on sold units after the cut, unsold stock at cost, deposits).

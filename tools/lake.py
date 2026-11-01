@@ -667,6 +667,102 @@ def _upload_derived(folder, cal_row, shelves=None):
     print(f"Uploaded {len(os.listdir(folder))} files to engine/ in {HF_REPO} (one commit): {', '.join(sorted(os.listdir(folder)))}")
 
 
+def _fetch_private_file(rel_path):
+    """Download one file from the private HF dataset (needs HF_TOKEN). Returns the local path, or None with a plain message."""
+    tok = os.environ.get("HF_TOKEN")
+    if not tok:
+        print("Reading from the private dataset needs HF_TOKEN.")
+        return None
+    try:
+        from huggingface_hub import hf_hub_download
+        return hf_hub_download(HF_REPO, rel_path, repo_type="dataset", token=tok, force_download=True)
+    except Exception as e:                               # the message names the file, never its contents
+        print(f"Could not download {rel_path} from the private dataset ({type(e).__name__}). Is it uploaded to that path?")
+        return None
+
+
+def _upload_folder_to_engine(folder, message):
+    from huggingface_hub import HfApi
+    tok = os.environ.get("HF_TOKEN")
+    if not tok:
+        raise SystemExit("--upload needs HF_TOKEN")
+    HfApi(token=tok).upload_folder(folder_path=folder, path_in_repo="engine", repo_id=HF_REPO, repo_type="dataset", commit_message=message)
+    print(f"Uploaded {len(os.listdir(folder))} files to engine/ in the private dataset: {', '.join(sorted(os.listdir(folder)))}")
+
+
+def _et_any(ts):
+    if ts is None or pd.isna(ts):
+        return ""
+    t = pd.Timestamp(ts)
+    t = t.tz_localize("UTC") if t.tzinfo is None else t
+    return t.tz_convert("America/New_York").strftime("%a %m-%d %H:%M")
+
+
+def run_ledger(store, args):
+    """Read your Journalator.lua (the saved-variables file; give its path with --log) and report real results: what each flip
+    returned after the 5% cut, deposits kept and lost, and what happened to every listing. Needs no snapshots."""
+    from engine import journalator as jr
+    path = args.log
+    if str(path).startswith("hf:"):                      # e.g. hf:system/Journalator.lua, read from the PRIVATE dataset
+        path = _fetch_private_file(str(path)[3:])
+        if path is None:
+            return pd.DataFrame()
+    elif not os.path.exists(path):
+        print(f"File not found: {args.log}. Put Journalator.lua (from WTF/Account/<ACCOUNT>/SavedVariables/) in the private Hugging Face dataset "
+              f"and give log_path as hf:system/Journalator.lua.")
+        return pd.DataFrame()
+    logs = jr.read_savedvars(path)
+    for w in logs.pop("warnings", []):
+        print(f"  CHECK THE FILE: {w}")
+    t = jr.tables(logs)
+    if t["postings"].empty and t["purchases"].empty and t["sales"].empty:
+        print("No auction records found.")
+        return pd.DataFrame()
+    L = jr.match_listings(t)
+    F = jr.flip_ledger(t, L)
+    # Account, character and other players' names are never printed or saved: the tables drop them here.
+    t["purchases"] = t["purchases"].drop(columns=["seller"], errors="ignore")
+    t["sales"] = t["sales"].drop(columns=["buyer"], errors="ignore")
+    os.makedirs(args.out, exist_ok=True)
+    for name, df in (("ledger_purchases", t["purchases"]), ("ledger_sales", t["sales"]), ("ledger_listings", L), ("ledger_flips", F)):
+        if len(df):
+            df.to_csv(os.path.join(args.out, f"{name}.csv"), index=False)
+    first = min(x["time_utc"].min() for x in (t["purchases"], t["postings"]) if len(x))
+    last = max(x["collected_utc" if k == "sales" else "time_utc"].max() for k, x in t.items() if len(x))
+    print(f"Journalator file: {len(t['purchases'])} purchases, {len(t['postings'])} listings, {len(t['sales'])} sale invoices, {len(t['failures'])} expiries / cancels. "
+          f"{_et_any(first)} to {_et_any(last)} ET.")
+    print("Sale times are when you collected the mail, so 'hours to collect' is an UPPER bound on the real time to sell.")
+    if len(L):
+        print("\n== EACH LISTING ==")
+        show = pd.DataFrame({
+            "posted_ET": L["time_utc"].map(_et_any), "item": L["name"].str[:24], "units": L["units"], "price_g": L["unit_gold"].round(2),
+            "sold": L["units_sold"], "expired": L["units_expired"], "open": L["units_open"], "collected_ET": L["first_collected_utc"].map(_et_any),
+            "hours<=": L["hours_to_collect"].round(1), "net_g": L["net_gold"].round(2), "deposit_lost_g": L["deposit_lost_gold"].round(2)})
+        print(show.to_string(index=False))
+        print(f"   deposits lost on expired listings: {L['deposit_lost_gold'].sum():.1f} g;  net from sales after the 5% cut: {L['net_gold'].sum():.1f} g")
+    if len(F):
+        print("\n== ITEMS YOU BOUGHT (profit counts only units that SOLD; unsold units shown at cost) ==")
+        fs = pd.DataFrame({
+            "first_buy_ET": F["first_buy_utc"].map(_et_any), "item": F["name"].str[:24], "bought": F["bought"].astype(int), "avg_cost_g": F["avg_cost_gold"].round(2),
+            "listed_at_g": F["listed_at_gold"].round(2), "sold": F["sold"].astype(int), "unsold": F["unsold"].astype(int),
+            "profit_on_sold_g": F["profit_on_sold_gold"].round(1), "margin_on_sold_%": (F["margin_on_sold"] * 100).round(0),
+            "unsold_at_cost_g": F["unsold_at_cost_gold"].round(1), "deposit_lost_g": F["deposit_lost_gold"].round(2), "hours<=": F["hours_to_collect"].round(1)})
+        print(fs.to_string(index=False))
+        sold_cost = F["cost_of_sold_gold"].sum()
+        print(f"   TOTAL: profit on sold units {F['profit_on_sold_gold'].sum():+.1f} g on {sold_cost:.1f} g of cost "
+              f"({(F['net_return_gold'].sum() / sold_cost - 1) * 100 if sold_cost else float('nan'):+.0f}%), still unsold {F['unsold_at_cost_gold'].sum():.1f} g at cost, "
+              f"deposits lost {F['deposit_lost_gold'].sum():.1f} g")
+    print(f"\nFiles written to {args.out}/: ledger_listings.csv, ledger_flips.csv, ledger_sales.csv, ledger_purchases.csv")
+    print("Account, character and other players' names are not printed or saved in these results.")
+    if getattr(args, "upload", False) and len(L):
+        folder = os.path.join(args.out, "ledger_upload")
+        os.makedirs(folder, exist_ok=True)
+        L.to_parquet(os.path.join(folder, "ledger_listings.parquet"), index=False)
+        F.to_parquet(os.path.join(folder, "ledger_flips.parquet"), index=False)
+        _upload_folder_to_engine(folder, "ledger refresh")
+    return F
+
+
 def run_backtest(store, args, reader=None, names_fn=None):
     """Replay the flip screener on the snapshots we hold and see what happened after each shelf (no gold at risk)."""
     from engine.classifier import aggregate_rates, classify_series
@@ -722,7 +818,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -737,13 +833,13 @@ def main(argv=None):
     ap.add_argument("--max-units", type=int, default=300)
     ap.add_argument("--horizon-hours", type=float, default=4.0, help="market: how many hours of sales the price wall must cover")
     ap.add_argument("--trade-units", type=float, default=500.0, help="market: the biggest trade you would make (for the deep-market test)")
-    ap.add_argument("--log", default="experiment_log.csv", help="reconcile: the experiment log CSV")
+    ap.add_argument("--log", default="experiment_log.csv", help="reconcile: the experiment log CSV; ledger: the Journalator.lua file")
     ap.add_argument("--window-hours", type=float, default=72.0, help="pick: how far back item statistics look")
     ap.add_argument("--min-coverage", type=float, default=0.5, help="pick: share of the window that must have been observed")
     ap.add_argument("--upload", action="store_true", help="derive: push the tables to engine/ in the HF repo")
     args = ap.parse_args(argv)
-    store = make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest}[args.command](store, args)
+    store = None if args.command == "ledger" else make_store(args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger}[args.command](store, args)
 
 
 if __name__ == "__main__":
