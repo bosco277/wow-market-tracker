@@ -155,3 +155,76 @@ class TestOldShelfTable(unittest.TestCase):
         self.assertEqual(lib.normal_price_text(1.2, 0.9, 1.5, 5.0), "1g 20s 0c (90s 0c - 1g 50s 0c, 5d)")
         self.assertEqual(len(lib.shelf_table(t)), 2)
         self.assertTrue(lib.ensure_shelf_columns(pd.DataFrame()).empty)
+
+
+class TestNumericTables(unittest.TestCase):
+    def market(self):
+        it = items().assign(band_p10=[0.8, 15.0, 0.4], band_p90=[1.2, 25.0, 0.7], gold_flow=0, wall_est_gold=[1.1, 22.0, 0.6],
+                            daily_low=[900, 5, 100], daily_est=[1000, 10, 150], daily_high=[1100, 40, 200],
+                            confidence_reason=["a", "b", "c"])
+        return lib.market_table(it)
+
+    def test_market_numbers_are_numeric_and_sort(self):
+        t = lib.market_numbers(self.market())
+        for c in ("Lowest price (g)", "Sold/day low", "Sold/day best", "Sold/day high", "Gold/day best (g)", "Price wall (g)", "Item ID"):
+            self.assertTrue(pd.api.types.is_numeric_dtype(t[c]), c)
+        self.assertEqual(list(t["Item ID"]), [1, 2, 3])
+        self.assertTrue(pd.api.types.is_bool_dtype(t["Watched"]))
+
+    def test_flip_numbers_split_ranges_and_handle_inf(self):
+        sh = TestOldShelfTable().old_table()
+        sh.loc[1, "sell_hours_low"] = float("inf")
+        t = lib.flip_numbers(lib.ensure_shelf_columns(sh), {"candidate": (0.61, 0.82, 0.48)})
+        for c in ("Net margin (%)", "Profit at target (g)", "Normal price median (g)", "Sold/day best", "Hours to sell (slow case)",
+                  "Checks passed", "Past 4h hit (%)", "Avg cost (g)"):
+            self.assertTrue(pd.api.types.is_numeric_dtype(t[c]), c)
+        self.assertAlmostEqual(t["Net margin (%)"].iloc[0], 30.0)
+        self.assertAlmostEqual(t["Past 4h hit (%)"].iloc[0], 61.0)
+        self.assertTrue(np.isnan(t["Past 4h hit (%)"].iloc[1]))              # weak has no rates here
+        self.assertTrue(np.isnan(t["Hours to sell (slow case)"].iloc[1]))    # inf shown as blank, not text
+        self.assertEqual(int(t["Checks passed"].iloc[0]), 5)
+        self.assertEqual(int(t["Checks warned"].iloc[1]), 5)
+
+    def test_watch_ids_and_labels(self):
+        self.assertEqual(lib.parse_ids("12, 5 12;7\nx 9.5"), [12, 5, 7])
+        self.assertEqual(lib.parse_ids(None), [])
+        t = lib.market_table(items(), watch_ids=[1])
+        self.assertEqual(list(t.loc[t["watched"], "item_id"]), [1])
+        self.assertEqual(list(lib.market_table(items(), watched_only=True, watch_ids=[3])["item_id"]), [3])
+        lab = lib.item_labels(items())
+        self.assertEqual(lab[2], "Saronite Ore (2)")
+        self.assertEqual(lab[3], "item 3")
+
+
+class TestTimeProfiles(unittest.TestCase):
+    def hourly(self, days=10):   # ends before daylight saving time ends (Nov 1), so the -4 h offset holds
+        ts = pd.date_range("2026-10-20 00:00", periods=days * 24, freq="h")
+        hour_et = (ts - pd.Timedelta(hours=4)).hour                     # EDT during October
+        price = 10.0 * np.where(hour_et >= 20, 0.8, 1.0)                # 20% cheaper from 8 PM Eastern
+        units = np.where(hour_et >= 18, 2000, 1000)
+        return pd.DataFrame({"ts": ts, "floor_gold": price, "units_listed": units, "sold_est": np.where(hour_et == 21, 5.0, 1.0),
+                             "spike": False, "blip": False})
+
+    def test_hour_of_day_finds_the_cheap_hour(self):
+        tp = lib.time_profiles(self.hourly())
+        hod = tp["hod"].set_index("hour")
+        self.assertLess(hod.loc[20, "price_rel"], -15)
+        self.assertAlmostEqual(hod.loc[12, "price_rel"], 0.0, places=0)
+        self.assertGreater(hod.loc[19, "units_rel"], hod.loc[9, "units_rel"])
+        self.assertAlmostEqual(hod.loc[21, "sold_per_hour"], 5.0)
+        self.assertEqual(len(hod), 24)
+
+    def test_grid_shape_counts_and_masking_inputs(self):
+        tp = lib.time_profiles(self.hourly())
+        self.assertEqual(tp["grid_price"].shape, (7, 6))
+        self.assertEqual(int(tp["grid_n"].to_numpy().sum()), tp["hours"])
+        self.assertLess(tp["grid_price"].loc[:, 5].mean(), tp["grid_price"].loc[:, 2].mean())   # 20-24 block holds the cheap hour
+
+    def test_flagged_hours_excluded_and_timezone_aware_input(self):
+        h = self.hourly(3)
+        h.loc[5, ["floor_gold", "spike"]] = [1000.0, True]
+        tp = lib.time_profiles(h)
+        self.assertEqual(tp["hours"], len(h) - 1)
+        h2 = h.assign(ts=h["ts"].dt.tz_localize("UTC"))
+        self.assertEqual(lib.time_profiles(h2)["hours"], len(h) - 1)
+        self.assertEqual(lib.time_profiles(pd.DataFrame()), {})

@@ -14,6 +14,18 @@ HF_REPO = "bosco277/wow-market-data-lake"
 st.set_page_config(page_title="WoW Market Desk", layout="wide")
 
 
+def _stretch() -> dict:
+    """Streamlit 1.50+ wants width="stretch"; older versions only know use_container_width. Use whichever this server has."""
+    try:
+        v = tuple(int(x) for x in st.__version__.split(".")[:2])
+    except Exception:
+        v = (0, 0)
+    return {"width": "stretch"} if v >= (1, 50) else {"use_container_width": True}
+
+
+WIDE = _stretch()
+
+
 @st.cache_data(ttl=600, show_spinner="Loading tables...")
 def load(name: str) -> pd.DataFrame:
     local = os.environ.get("DERIVED_DIR")
@@ -48,12 +60,67 @@ st.caption(f"Data {state}: built from snapshots up to {pd.Timestamp(cal['data_la
            f"({hrs:.1f} h ago) | engine {ver} | ranges are low - best - high; labels say how much to trust them")
 
 
+def column_config(df: pd.DataFrame) -> dict:
+    """Numbers stay numbers (so the column sorts properly) and are only formatted for display. Gold is exact to 2 decimals (one silver)."""
+    cfg = {}
+    for c in df.columns:
+        if c == "_id" or not pd.api.types.is_numeric_dtype(df[c]) or pd.api.types.is_bool_dtype(df[c]):
+            continue
+        if c == "Item ID":
+            cfg[c] = st.column_config.NumberColumn(c, format="%d")
+        elif c.endswith("(g)"):
+            cfg[c] = st.column_config.NumberColumn(c, format="%.2f")
+        elif c.endswith("(%)"):
+            cfg[c] = st.column_config.NumberColumn(c, format="%.1f%%")
+        elif c.endswith(("(units)", "passed", "failed", "warned")):
+            cfg[c] = st.column_config.NumberColumn(c, format="%d")
+        else:
+            cfg[c] = st.column_config.NumberColumn(c, format="%.1f")
+    if "Watched" in df.columns:
+        cfg["Watched"] = st.column_config.CheckboxColumn("Watched")
+    return cfg
+
+
 def pick_row(df: pd.DataFrame, key: str, height: int = 520):
     """Show a table where one row can be clicked. Returns the item_id of the clicked row, or None."""
-    ev = st.dataframe(df.drop(columns=["_id"]), use_container_width=True, hide_index=True, height=height, key=key,
-                      on_select="rerun", selection_mode="single-row")
+    ev = st.dataframe(df.drop(columns=["_id"]), **WIDE, hide_index=True, height=height, key=key,
+                      column_config=column_config(df), on_select="rerun", selection_mode="single-row")
     rows = ev.selection.rows if ev is not None and hasattr(ev, "selection") else []
     return int(df["_id"].iloc[rows[0]]) if rows else None
+
+
+def time_charts(h: pd.DataFrame, key: str):
+    """Time of day (24 bars) and day of week x 4-hour block (heatmap), for price, units listed and units sold. US Eastern."""
+    tp = lib.time_profiles(h)
+    if not tp:
+        return
+    st.markdown("**When it happens: time of day and day of week (US Eastern)**")
+    days = (h["ts"].max() - h["ts"].min()).total_seconds() / 86400 if len(h) else 0
+    st.caption(f"Built from {tp['hours']} hourly readings ({days:.1f} days). Price is shown against the item's own level around that time, "
+               "so a price that simply fell over the week is not read as an evening discount. A day-of-week cell needs several weeks to mean "
+               f"much: cells with fewer than {tp['min_obs']} readings are greyed out. Treat all of this as a draft until about 4 weeks exist.")
+    hod = tp["hod"]
+    specs = [("price_rel", "Price vs its own level (%)", "#2B4C59"), ("units_rel", "Units listed vs usual (%)", "#6B8E9B"),
+             ("sold_per_hour", "Units sold per hour (best estimate)", "#C28A1B")]
+    cols = st.columns(3)
+    for c, (col, title, color) in zip(cols, specs):
+        f = go.Figure(go.Bar(x=hod["hour"], y=hod[col], marker_color=color, customdata=hod["n_obs"],
+                             hovertemplate="%{x}:00  %{y:,.1f}  (%{customdata} readings)<extra></extra>"))
+        f.update_layout(title=f"{title}, by hour", height=280, margin=dict(l=10, r=10, t=50, b=10), xaxis=dict(dtick=3, title="hour of day"),
+                        showlegend=False)
+        c.plotly_chart(f, **WIDE, key=f"{key}_hod_{col}")
+    grids = [("grid_price", "Price vs its own level (%)", "RdBu_r"), ("grid_units", "Units listed vs usual (%)", "RdBu"),
+             ("grid_sold", "Units sold per hour", "YlOrBr")]
+    n = tp["grid_n"]
+    cols = st.columns(3)
+    for c, (gk, title, scale) in zip(cols, grids):
+        z = tp[gk].where(n >= tp["min_obs"])
+        mid = 0 if gk != "grid_sold" else None
+        f = go.Figure(go.Heatmap(z=z.values, x=lib.BLOCKS, y=lib.DOW, colorscale=scale, zmid=mid, customdata=n.values,
+                                 hovertemplate="%{y} %{x}h: %{z:,.1f}  (%{customdata} readings)<extra></extra>", xgap=2, ygap=2,
+                                 colorbar=dict(thickness=10)))
+        f.update_layout(title=f"{title}, by day and time", height=300, margin=dict(l=10, r=10, t=50, b=10), yaxis=dict(autorange="reversed"))
+        c.plotly_chart(f, **WIDE, key=f"{key}_dow_{gk}")
 
 
 def item_detail(pick: int, key: str):
@@ -76,24 +143,36 @@ def item_detail(pick: int, key: str):
         st.info("No hourly history for this item in the tables yet.")
         return
     fig = go.Figure()
-    fig.add_hrect(y0=r["band_p10"], y1=r["band_p90"], fillcolor="#2B4C59", opacity=0.10, line_width=0, annotation_text="typical band")
-    fig.add_trace(go.Scatter(x=h["ts"], y=h["floor_gold"], name="lowest price", line=dict(color="#2B4C59")))
+    # Constant lines are drawn as traces (not hline / hrect) so hovering anywhere shows their numbers, same for every point.
+    g = lambda v: f"{v:,.2f}g"
+    fig.add_trace(go.Scatter(x=h["ts"], y=[r["band_p90"]] * len(h), line=dict(width=0), name="typical high (p90)",
+                             hovertemplate="%{y:,.2f}g", showlegend=False))
+    fig.add_trace(go.Scatter(x=h["ts"], y=[r["band_p10"]] * len(h), line=dict(width=0), fill="tonexty", fillcolor="rgba(43,76,89,0.12)",
+                             name=f"typical band (p10 {g(r['band_p10'])} - p90 {g(r['band_p90'])})", hovertemplate="%{y:,.2f}g"))
+    fig.add_trace(go.Scatter(x=h["ts"], y=h["floor_gold"], name="lowest price", line=dict(color="#2B4C59"), hovertemplate="%{y:,.2f}g"))
     sp = h.loc[lib.flag_mask(h, "spike")]
-    fig.add_trace(go.Scatter(x=sp["ts"], y=sp["floor_gold"], mode="markers", name="price spike", marker=dict(color="#B5483A", size=8)))
+    fig.add_trace(go.Scatter(x=sp["ts"], y=sp["floor_gold"], mode="markers", name="price spike", marker=dict(color="#B5483A", size=8),
+                             hovertemplate="%{y:,.2f}g"))
     bl = h.loc[lib.flag_mask(h, "blip")]
-    fig.add_trace(go.Scatter(x=bl["ts"], y=bl["floor_gold"], mode="markers", name="listing blip (likely API)", marker=dict(color="#C28A1B", symbol="x", size=8)))
-    for col, nm in (("wall_low_gold", "wall low"), ("wall_high_gold", "wall high")):
-        fig.add_hline(y=r[col], line_dash="dot", line_color="#8A9BA3", annotation_text=nm)
-    fig.update_layout(title=f"Lowest price per hour (UTC), {len(h)} hours of history", height=380, margin=dict(l=10, r=10, t=40, b=10), yaxis_title="gold")
-    st.plotly_chart(fig, use_container_width=True, key=f"{key}_price")
+    fig.add_trace(go.Scatter(x=bl["ts"], y=bl["floor_gold"], mode="markers", name="listing blip (likely API)",
+                             marker=dict(color="#C28A1B", symbol="x", size=8), hovertemplate="%{y:,.2f}g"))
+    for col, nm, first in (("wall_low_gold", "wall low", True), ("wall_high_gold", "wall high", False)):
+        if col in r and r[col] == r[col]:
+            fig.add_trace(go.Scatter(x=h["ts"], y=[r[col]] * len(h), name="price wall (low / high)", legendgroup="wall", showlegend=first,
+                                     line=dict(dash="dot", color="#8A9BA3"), hovertemplate=nm + " %{y:,.2f}g"))
+    fig.update_layout(title=f"Lowest price per hour (UTC), {len(h)} hours of history", height=420, hovermode="x unified",
+                      margin=dict(l=10, r=10, t=40, b=10), yaxis_title="gold",
+                      legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="left", x=0))
+    st.plotly_chart(fig, **WIDE, key=f"{key}_price")
 
     rb = lib.daily_ribbon(h)
     fig2 = go.Figure()
     fig2.add_trace(go.Scatter(x=rb["ts"], y=rb["high"], line=dict(width=0), showlegend=False, hoverinfo="skip"))
     fig2.add_trace(go.Scatter(x=rb["ts"], y=rb["low"], fill="tonexty", fillcolor="rgba(43,76,89,0.18)", line=dict(width=0), name="low - high"))
     fig2.add_trace(go.Scatter(x=rb["ts"], y=rb["est"], name="best estimate", line=dict(color="#2B4C59")))
-    fig2.update_layout(title="Units sold in the last 24 hours (rolling), as a range", height=320, margin=dict(l=10, r=10, t=40, b=10))
-    st.plotly_chart(fig2, use_container_width=True, key=f"{key}_sales")
+    fig2.update_layout(title="Units sold in the last 24 hours (rolling), as a range", height=340, margin=dict(l=10, r=10, t=40, b=10),
+                       legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="left", x=0))
+    st.plotly_chart(fig2, **WIDE, key=f"{key}_sales")
     st.caption(f"{len(lib.hole_hours(h))} hours have no estimate (a hole in our data or a flagged interval). The shaded band is the range; "
                "it is not a statistical confidence interval, it is the spread between the cautious and the generous reading of the same data.")
 
@@ -106,16 +185,7 @@ def item_detail(pick: int, key: str):
                         f"{x['net_margin_stress']:.0%} if you sell 10% under. Hours to sell {lib.shelf_hours(x)}.")
             st.table(pd.DataFrame({"Check": [lib.TEST_INFO[c][0] for c in lib.TEST_COLS], "Result": [lib.MARK[x[c]] for c in lib.TEST_COLS],
                                    "What it asks": [lib.TEST_INFO[c][1] for c in lib.TEST_COLS]}).set_index("Check"))
-    p = prof[prof["item_id"] == pick] if len(prof) else prof
-    if len(p) and ("price_vs_level" in p or "sold_share" in p):
-        fig3 = go.Figure()
-        if "price_vs_level" in p:
-            fig3.add_trace(go.Bar(x=p["block"], y=p["price_vs_level"] * 100, name="price vs its own level (%)", marker_color="#2B4C59"))
-        if "sold_share" in p:
-            fig3.add_trace(go.Bar(x=p["block"], y=p["sold_share"] * 100, name="share of day's sales (%)", marker_color="#C28A1B"))
-        fig3.update_layout(barmode="group", title="By hour of day (US Eastern). A draft until a full week of data exists.", height=300,
-                           margin=dict(l=10, r=10, t=40, b=10))
-        st.plotly_chart(fig3, use_container_width=True, key=f"{key}_hod")
+    time_charts(h, key)
     if len(flips):
         f = flips[flips["item_id"] == pick]
         if len(f):
@@ -127,29 +197,40 @@ tab_market, tab_flip, tab_exp, tab_conf = st.tabs(["Market", "Flips", "Experimen
 
 # ---------------------------------------------------------------- Market
 with tab_market:
-    c1, c2, c3, c4 = st.columns([2, 1, 2, 1])
-    q = c1.text_input("Find an item (name or id)")
-    minf = c2.number_input("Min price (gold)", 0.0, 100000.0, 0.0, 0.5)
-    conf = c3.multiselect("Confidence", lib.CONF_ORDER, default=lib.CONF_ORDER)
-    watched = c4.checkbox("Watched only")
-    t = lib.market_table(items, minf, tuple(conf), q, watched)
-    st.write(f"{len(t):,} items, ranked by estimated gold flow per day (best estimate). The range columns are the honest part. "
-             "Click a row to see the item's charts below.")
+    labels = lib.item_labels(items)                              # {item_id: "Name (id)"}
+    by_label = {v: k for k, v in labels.items()}
+    options = sorted(by_label)
+
+    # Watch list: kept in the page address (?watch=1,2,3), so bookmark the page and it comes back.
+    if "watch_sel" not in st.session_state:
+        saved = lib.parse_ids(st.query_params.get("watch", ""))
+        st.session_state["watch_sel"] = [labels[i] for i in saved if i in labels]
+    c1, c2 = st.columns([3, 3])
+    found = c1.selectbox("Find an item (type part of a name or an ID)", options, index=None, placeholder="e.g. 'saronite' or 'Saron' or 224828",
+                         key="find_item")
+    with c2:
+        watch_labels = st.multiselect("Watch list (type to add items)", options, key="watch_sel",
+                                      help="Your own list. It is saved in this page's web address: bookmark the page to keep it.")
+    watch_ids = [by_label[x] for x in watch_labels]
+    try:
+        st.query_params["watch"] = ",".join(str(i) for i in watch_ids)
+    except Exception:
+        pass
+    c3, c4, c5 = st.columns([1, 3, 1])
+    minf = c3.number_input("Min price (gold)", 0.0, 100000.0, 0.0, 0.5)
+    conf = c4.multiselect("Confidence", lib.CONF_ORDER, default=lib.CONF_ORDER)
+    watched = c5.checkbox("Watched only")
+    if found:
+        item_detail(by_label[found], "find")
+        st.divider()
+    if watched and not watch_ids:
+        st.info("Your watch list is empty. Add items in the Watch list box above.")
+    t = lib.market_table(items, minf, tuple(conf), "", watched, watch_ids=watch_ids)
+    st.write(f"{len(t):,} items, ranked by estimated gold flow per day (best estimate). The low / best / high columns are the honest part. "
+             "Click a row to see the item's charts below. Click a column heading to sort by it.")
     sel = None
     if len(t):
-        show = pd.DataFrame({
-            "Item": t["name"].where(t["name"] != "", "(no name)"),
-            "Item ID": t["item_id"].astype(int),
-            "Lowest price": t["floor_gold"].map(lib.gsc),
-            "Vs typical": t.apply(lib.price_position, axis=1),
-            "Sold / day (low - best - high)": [lib.rng(a, b, c) for a, b, c in zip(t["daily_low"], t["daily_est"], t["daily_high"])],
-            "Gold / day (low - best - high)": [lib.rng(a, b, c) for a, b, c in zip(t["gold_flow_low"], t["gold_flow"], t["gold_flow_high"])],
-            "Price wall (est)": t["wall_est_gold"].map(lib.gsc),
-            "Confidence": t["confidence"],
-            "Why": t["confidence_reason"],
-            "_id": t["item_id"].astype(int),
-        })
-        sel = pick_row(show, "market_table")
+        sel = pick_row(lib.market_numbers(t), "market_table")
     if sel is not None:
         item_detail(sel, "market")
 
@@ -168,28 +249,7 @@ with tab_flip:
     if sh.empty:
         st.info("No shelves pass right now. That is normal; they are rare.")
     else:
-        show = pd.DataFrame({
-            "Item": sh["name"].where(sh["name"] != "", "(no name)"),
-            "Item ID": sh["item_id"].astype(int),
-            "Verdict": sh["verdict"],
-            "Checks": sh.apply(lib.shelf_checks, axis=1),
-            "Past hit rate, similar shelves (4 h / 12 h)": sh["verdict"].map(lambda v: lib.past_hit_rate(v, bt_rates)),
-            "Watch out for": sh.apply(lib.shelf_watch, axis=1),
-            "Buy (units)": sh["units"],
-            "Avg cost": sh["avg_price_gold"].map(lib.gsc),
-            "Break-even": sh["breakeven_gold"].map(lib.gsc),
-            "Relist at": sh["target_gold"].map(lib.gsc),
-            "Normal price (median, p10 - p90)": [lib.normal_price_text(m, a, b, d) for m, a, b, d in
-                                                 zip(sh["long_median_gold"], sh["long_p10_gold"], sh["long_p90_gold"], sh["long_days"])],
-            "Sold / day (low - best - high)": [lib.rng(a, b, c) for a, b, c in zip(sh["daily_low"], sh["daily_est"], sh["daily_high"])],
-            "Net margin": (sh["net_margin"] * 100).round(1).astype(str) + "%",
-            "If 10% under": (sh["net_margin_stress"] * 100).round(1).astype(str) + "%",
-            "Profit (at target / if 10% under)": [f"{lib.gsc(a)} / {lib.gsc(b)}" for a, b in zip(sh["profit_gold"], sh["profit_stress_gold"])],
-            "Hours to sell (best, high-low rate)": sh.apply(lib.shelf_hours, axis=1),
-            "Cost": sh["cost_gold"].map(lib.gsc),
-            "Item confidence": sh["confidence"],
-            "_id": sh["item_id"].astype(int),
-        })
+        show = lib.flip_numbers(sh, bt_rates)
         sel = pick_row(show, "flip_table")
     with st.expander("What the checks mean"):
         st.markdown("Each shelf is tested six ways. **Verdict: candidate** means no check failed and at most one warned; **weak** means none failed "
@@ -205,7 +265,7 @@ with tab_flip:
             st.write("We replayed the screener on past snapshots, using only what was known at each moment, and looked at what happened next. "
                      "Each shelf is counted once, the first time it appeared. Compare the verdict rows and the pass / warn / fail rows: "
                      "a check is useful if shelves that pass do better than shelves that fail.")
-            st.dataframe(lib.backtest_table(backtest), hide_index=True, use_container_width=True)
+            st.dataframe(lib.backtest_table(backtest), hide_index=True, **WIDE)
             st.caption("The cheap units stay in the book in the replay, so 'reached' is a cautious reading. Undercut risk is the better "
                        "read of whether cheaper listings would have appeared. This is price behaviour, not a record of profit.")
 
@@ -225,7 +285,7 @@ with tab_exp:
             st.warning(f"{sc['stayed']} of {sc['unsold_n']} unsold listings sat first in line and still did not sell, although the tool predicted a sale.")
         cols = [c for c in ("posted_utc", "item_id", "lane", "price_gold", "quantity", "units_sold", "units_expired", "appeared_share",
                             "front_share", "still_there_h", "observed_hours_to_clear", "pred_lifo_h_est", "status") if c in exp.columns]
-        st.dataframe(exp[cols], hide_index=True, use_container_width=True)
+        st.dataframe(exp[cols], hide_index=True, **WIDE)
 
 # ---------------------------------------------------------------- Confidence
 with tab_conf:
@@ -237,12 +297,12 @@ with tab_conf:
         m = mix[mix["tier"] == tier]
         fig.add_trace(go.Scatter(x=m["data_last_ts"], y=m["items"], name=tier, stackgroup="one", line=dict(color=lib.CONF_COLOR[tier])))
     fig.update_layout(title="Items by confidence label over time", height=340, margin=dict(l=10, r=10, t=40, b=10))
-    a.plotly_chart(fig, use_container_width=True, key="conf_mix")
+    a.plotly_chart(fig, **WIDE, key="conf_mix")
     if "median_range_ratio" in hist:
         fig = go.Figure(go.Scatter(x=hist["data_last_ts"], y=hist["median_range_ratio"], line=dict(color="#2B4C59")))
         fig.update_layout(title="Median range width (high / low sales per day). Smaller = tighter error bars", height=340,
                           margin=dict(l=10, r=10, t=40, b=10))
-        b.plotly_chart(fig, use_container_width=True, key="conf_range")
+        b.plotly_chart(fig, **WIDE, key="conf_range")
     st.markdown("""
 **How labels are decided**
 - **Low**: under 24 hours of data; lumpy and slow demand (testing showed these were overstated); a range more than 5x wide; or it sold nothing while first in line although the tool predicted a sale.

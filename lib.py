@@ -5,6 +5,8 @@ Confidence screen shows how many items are High / Medium / Low over time and how
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 
@@ -50,7 +52,7 @@ def rng(low, est, high) -> str:
 
 
 def market_table(items: pd.DataFrame, min_floor_gold: float = 0.0, conf: tuple = tuple(CONF_ORDER),
-                 text: str = "", watched_only: bool = False, sort: str = "gold_flow") -> pd.DataFrame:
+                 text: str = "", watched_only: bool = False, sort: str = "gold_flow", watch_ids=None) -> pd.DataFrame:
     """The screener: one row per item, with gold flow (best-estimate units/day x price) and its low/high."""
     if items is None or items.empty:
         return pd.DataFrame()
@@ -59,6 +61,8 @@ def market_table(items: pd.DataFrame, min_floor_gold: float = 0.0, conf: tuple =
     t["gold_flow_low"] = t["daily_low"] * t["floor_gold"]
     t["gold_flow_high"] = t["daily_high"] * t["floor_gold"]
     t = t[(t["floor_gold"] >= min_floor_gold) & t["confidence"].isin(conf)]
+    if watch_ids is not None:                       # the viewer's own watch list (see parse_ids)
+        t["watched"] = t["item_id"].isin(set(int(i) for i in watch_ids))
     if watched_only:
         t = t.loc[flag_mask(t, "watched")]
     if text:
@@ -241,3 +245,135 @@ def past_hit_rate(verdict: str, rates: dict) -> str:
     a, b, u = rates[verdict]
     pct = lambda v: "-" if v != v else f"{v * 100:.0f}%"
     return f"{pct(a)} / {pct(b)} (undercut {pct(u)})"
+
+
+def parse_ids(text) -> list:
+    """'123, 456 789' -> [123, 456, 789]. Anything that is not a whole number is ignored; duplicates are dropped, order kept."""
+    out, seen = [], set()
+    for tok in str(text or "").replace(";", ",").replace("\n", ",").replace(" ", ",").split(","):
+        tok = tok.strip()
+        if tok.isdigit() and int(tok) not in seen:
+            seen.add(int(tok))
+            out.append(int(tok))
+    return out
+
+
+def item_labels(items: pd.DataFrame) -> dict:
+    """{item_id: 'Name (id)'} for search boxes: typing part of the name or the id finds it."""
+    if items is None or items.empty:
+        return {}
+    names = items["name"].fillna("") if "name" in items else pd.Series("", index=items.index)
+    return {int(i): (f"{n} ({int(i)})" if n else f"item {int(i)}") for i, n in zip(items["item_id"], names)}
+
+
+def _inf_to_nan(s: pd.Series) -> pd.Series:
+    return s.replace([np.inf, -np.inf], np.nan)
+
+
+def market_numbers(t: pd.DataFrame) -> pd.DataFrame:
+    """The Market table with NUMBERS in numeric columns (gold as decimals, percentages as numbers) so every column sorts properly.
+    Ranges are split into low / best / high columns."""
+    return pd.DataFrame({
+        "Item": t["name"].where(t["name"] != "", "(no name)"),
+        "Item ID": t["item_id"].astype(int),
+        "Watched": flag_mask(t, "watched"),
+        "Lowest price (g)": t["floor_gold"].astype(float),
+        "Vs typical": t.apply(price_position, axis=1),
+        "Typical low p10 (g)": t["band_p10"].astype(float),
+        "Typical high p90 (g)": t["band_p90"].astype(float),
+        "Sold/day low": t["daily_low"].astype(float),
+        "Sold/day best": t["daily_est"].astype(float),
+        "Sold/day high": t["daily_high"].astype(float),
+        "Gold/day low (g)": t["gold_flow_low"].astype(float),
+        "Gold/day best (g)": t["gold_flow"].astype(float),
+        "Gold/day high (g)": t["gold_flow_high"].astype(float),
+        "Price wall (g)": t["wall_est_gold"].astype(float),
+        "Confidence": t["confidence"],
+        "Why": t["confidence_reason"],
+        "_id": t["item_id"].astype(int),
+    })
+
+
+def flip_numbers(sh: pd.DataFrame, rates: Optional[dict] = None) -> pd.DataFrame:
+    """The Flips table with numbers in numeric columns, ranges split into separate columns, and the checks as counts."""
+    rates = rates or {}
+    pass_n = sh.apply(lambda r: sum(r[c] == "pass" for c in TEST_COLS if c in r and r[c] != "n/a"), axis=1)
+    fail_n = sh.apply(lambda r: sum(r[c] == "fail" for c in TEST_COLS if c in r), axis=1)
+    warn_n = sh.apply(lambda r: sum(r[c] == "warn" for c in TEST_COLS if c in r), axis=1)
+    hit = lambda i: sh["verdict"].map(lambda x: (rates[x][i] * 100.0) if x in rates and rates[x][i] == rates[x][i] else np.nan)
+    f = lambda c: sh[c].astype(float)
+    return pd.DataFrame({
+        "Item": sh["name"].where(sh["name"] != "", "(no name)"),
+        "Item ID": sh["item_id"].astype(int),
+        "Verdict": sh["verdict"],
+        "Checks passed": pass_n.astype(int),
+        "Checks failed": fail_n.astype(int),
+        "Checks warned": warn_n.astype(int),
+        "Watch out for": sh.apply(shelf_watch, axis=1),
+        "Past 4h hit (%)": hit(0),
+        "Past 12h hit (%)": hit(1),
+        "Past undercut (%)": hit(2),
+        "Buy (units)": sh["units"].astype(int),
+        "Avg cost (g)": f("avg_price_gold"),
+        "Break-even (g)": f("breakeven_gold"),
+        "Relist at (g)": f("target_gold"),
+        "Normal price median (g)": f("long_median_gold"),
+        "Normal p10 (g)": f("long_p10_gold"),
+        "Normal p90 (g)": f("long_p90_gold"),
+        "History (days)": f("long_days"),
+        "Sold/day low": f("daily_low"),
+        "Sold/day best": f("daily_est"),
+        "Sold/day high": f("daily_high"),
+        "Net margin (%)": f("net_margin") * 100.0,
+        "If 10% under (%)": f("net_margin_stress") * 100.0,
+        "Profit at target (g)": f("profit_gold"),
+        "Profit if 10% under (g)": f("profit_stress_gold"),
+        "Hours to sell (best)": _inf_to_nan(f("sell_hours_est")),
+        "Hours to sell (fast case)": _inf_to_nan(f("sell_hours_high")),
+        "Hours to sell (slow case)": _inf_to_nan(f("sell_hours_low")),
+        "Cost (g)": f("cost_gold"),
+        "Item confidence": sh["confidence"],
+        "_id": sh["item_id"].astype(int),
+    })
+
+
+DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+BLOCKS = ["00-04", "04-08", "08-12", "12-16", "16-20", "20-24"]
+
+
+def time_profiles(h: pd.DataFrame, tz: str = "America/New_York", min_obs: int = 3) -> dict:
+    """Time-of-day and day-of-week patterns for ONE item from its hourly rows (ts, floor_gold, units_listed, spike, blip).
+
+    hod            per hour of day: median price, p25 / p75, median units listed, price vs the item's own level (so a price that
+                   simply fell over the week is not read as an evening discount), number of observations
+    grid_price     day of week x 4-hour block: price vs its own level (%), blanks where there is no data
+    grid_units     same grid: units listed vs the item's overall median (%)
+    grid_n         observations behind each cell (cells under `min_obs` are a draft: with under a few weeks of data most are)
+    Spike and blip hours are left out."""
+    if h is None or h.empty:
+        return {}
+    s = h.sort_values("ts").reset_index(drop=True).copy()
+    bad = pd.Series(flag_mask(s, "spike") | flag_mask(s, "blip"), index=s.index)
+    t = pd.to_datetime(s["ts"])
+    t = (t.dt.tz_localize("UTC") if t.dt.tz is None else t).dt.tz_convert(tz)
+    s["hour"], s["dow"], s["block"] = t.dt.hour, t.dt.dayofweek, (t.dt.hour // 4)
+    f = s["floor_gold"].astype(float)
+    ref = f.where(~bad).rolling(25, center=True, min_periods=21).median()
+    s["price_rel"] = (f / ref - 1.0) * 100.0
+    u = s["units_listed"].astype(float)
+    base = float(u.where(~bad).median()) if u.where(~bad).notna().any() else np.nan
+    s["units_rel"] = (u / base - 1.0) * 100.0 if base == base and base > 0 else np.nan
+    s["sold"] = s["sold_est"].astype(float) if "sold_est" in s else np.nan
+    g = s[~bad]
+    hod = g.groupby("hour").agg(n_obs=("floor_gold", "count"), price_median=("floor_gold", "median"),
+                                price_p25=("floor_gold", lambda x: x.quantile(0.25)), price_p75=("floor_gold", lambda x: x.quantile(0.75)),
+                                units_median=("units_listed", "median"), price_rel=("price_rel", "median"),
+                                units_rel=("units_rel", "median"), sold_per_hour=("sold", "mean")).reindex(range(24)).reset_index()
+    gp = g.groupby(["dow", "block"])
+    cell = gp.agg(n=("floor_gold", "count"), price_rel=("price_rel", "median"), units_rel=("units_rel", "median"),
+                  sold_per_hour=("sold", "mean"))
+    full = pd.MultiIndex.from_product([range(7), range(6)], names=["dow", "block"])
+    cell = cell.reindex(full)
+    shape = lambda col: cell[col].unstack("block").reindex(index=range(7), columns=range(6))
+    return dict(hod=hod, grid_price=shape("price_rel"), grid_units=shape("units_rel"), grid_sold=shape("sold_per_hour"), grid_n=shape("n").fillna(0).astype(int),
+                min_obs=min_obs, hours=int(len(g)), base_units=base)
