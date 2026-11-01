@@ -62,36 +62,59 @@ def _tier_test(ok: bool, warn: bool = False) -> str:
     return "pass" if ok else ("warn" if warn else "fail")
 
 
+class _LevelData:
+    """The item's hourly rows as numpy arrays (spike hours and hours without a price left out), so the per-target questions are
+    cheap: the screener asks them once per price gap, and the backtest asks them for every shelf in every hour."""
+
+    def __init__(self, series: pd.DataFrame):
+        f = series["floor_gold"].to_numpy(dtype="float64")
+        keep = ~np.isnan(f)
+        if "spike" in series:
+            keep &= ~series["spike"].fillna(False).astype(bool).to_numpy()
+        self.f = f[keep]
+        self.sold = {k: series[f"sold_{k}"].to_numpy(dtype="float64")[keep] for k in ("low", "est", "high")}
+
+    def stats(self, target_gold: float, tol: float) -> dict:
+        if len(self.f) == 0:
+            return dict(share=0.0, hours=0, rate=None)
+        at = self.f >= target_gold * (1 - tol)
+        got = at & ~np.isnan(self.sold["est"])
+        n = int(got.sum())
+        rate = None
+        if n:
+            rate = {}
+            for k, v in self.sold.items():
+                x = v[got]
+                x = x[~np.isnan(x)]
+                rate[k] = float(x.mean()) if len(x) else float("nan")
+        return dict(share=float(at.mean()), hours=n, rate=rate)
+
+
 def level_stats(series: pd.DataFrame, target_gold: float, tol: float) -> dict:
     """From the item's hourly rows (floor_gold, sold_low/est/high, spike): share of hours with the lowest price at or above
     the target, and the sales rate seen in those hours. The sold_* of an hour is the interval ending at it, so this is
     approximate at the edges."""
-    s = series.dropna(subset=["floor_gold"])
-    if "spike" in s:
-        s = s[~s["spike"].astype(bool)]
-    if s.empty:
-        return dict(share=0.0, hours=0, rate=None)
-    at = s["floor_gold"] >= target_gold * (1 - tol)
-    got = s[at & s["sold_est"].notna()]
-    rate = None
-    if len(got):
-        rate = {k: float(got[f"sold_{k}"].mean()) for k in ("low", "est", "high")}
-    return dict(share=float(at.mean()), hours=int(len(got)), rate=rate)
+    return _LevelData(series).stats(target_gold, tol)
 
 
 def long_run(series: pd.DataFrame) -> dict:
     """The item's longer price history from its hourly rows: median / p10 / p90 of the lowest price, the days covered, the
     median and p90 of the lowest price over the last 48 h, and the lowest price now. (The 48 h median, not the single highest
     hour, so an item that merely flips between two prices is not mistaken for a spike.)"""
-    s = series.dropna(subset=["floor_gold"]).sort_values("ts")
-    if s.empty:
-        return dict(median=float("nan"), p10=float("nan"), p90=float("nan"), days=0.0, recent_med=float("nan"), recent_p90=float("nan"), now=float("nan"))
-    ts = pd.to_datetime(s["ts"])
-    recent = s[ts > ts.max() - pd.Timedelta(hours=48)]
-    return dict(median=float(s["floor_gold"].median()), p10=float(s["floor_gold"].quantile(0.10)), p90=float(s["floor_gold"].quantile(0.90)),
-                days=float((ts.max() - ts.min()).total_seconds() / 86400.0), recent_med=float(recent["floor_gold"].median()),
-                recent_p90=float(recent["floor_gold"].quantile(0.90)),
-                now=float(s["floor_gold"].iloc[-1]))
+    f = series["floor_gold"].to_numpy(dtype="float64")
+    ok = ~np.isnan(f)
+    nan = float("nan")
+    if not ok.any():
+        return dict(median=nan, p10=nan, p90=nan, days=0.0, recent_med=nan, recent_p90=nan, now=nan)
+    ts = pd.to_datetime(series["ts"]).to_numpy()[ok]
+    f = f[ok]
+    if len(ts) > 1 and (ts[1:] < ts[:-1]).any():
+        order = np.argsort(ts, kind="stable")
+        ts, f = ts[order], f[order]
+    recent = f[ts > ts[-1] - np.timedelta64(48, "h")]
+    return dict(median=float(np.median(f)), p10=float(np.quantile(f, 0.10)), p90=float(np.quantile(f, 0.90)),
+                days=float((ts[-1] - ts[0]) / np.timedelta64(1, "D")), recent_med=float(np.median(recent)),
+                recent_p90=float(np.quantile(recent, 0.90)), now=float(f[-1]))
 
 
 def shelves_for_item(book: pd.DataFrame, series: pd.DataFrame, rate_per_hour: Dict[str, float], band_p90: float,
@@ -105,6 +128,7 @@ def shelves_for_item(book: pd.DataFrame, series: pd.DataFrame, rate_per_hour: Di
     med_units = float(series["units_listed"].median()) if len(series) and "units_listed" in series else units_now
     best, best_key = None, -np.inf
     lr = long_run(series)
+    ld = _LevelData(series)
     for k in range(1, len(t)):
         if price[k] / price[k - 1] - 1.0 < cfg.min_gap:
             continue
@@ -138,7 +162,7 @@ def shelves_for_item(book: pd.DataFrame, series: pd.DataFrame, rate_per_hour: Di
         margin_stress = stress_price * (1 - cfg.ah_cut) / avg - 1.0
         ahead = shelf_units - bought                      # cheap units left in the book, ahead of your relisted units
         tg = target / COPPER_PER_GOLD
-        lv = level_stats(series, tg, cfg.level_tolerance)
+        lv = ld.stats(tg, cfg.level_tolerance)
         use_level = lv["rate"] is not None and lv["hours"] >= cfg.min_level_hours
         rates = lv["rate"] if use_level else {k_: float(v) for k_, v in rate_per_hour.items()}
         sell = {k_: ((ahead + bought) / rates[k_] if rates[k_] > 0 else float("inf")) for k_ in ("low", "est", "high")}

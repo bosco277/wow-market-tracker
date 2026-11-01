@@ -157,4 +157,17 @@ def summarize_backtest(bt: pd.DataFrame) -> pd.DataFrame:
             g = f[f[t] == res]
             if len(g):
                 out.append(dict(group=f"{t.replace('test_', '')}: {res}", **_line(g)))
+    # What else separates shelves that worked from shelves that did not: the size of the margin, of the buy, and the selling time
+    def buckets(col, edges, labels, name):
+        c = pd.cut(f[col], edges, labels=labels, right=False)
+        for lab in labels:
+            g = f[c == lab]
+            if len(g):
+                out.append(dict(group=f"{name}: {lab}", **_line(g)))
+    buckets("net_margin", [-np.inf, 0.25, 0.5, 1.0, np.inf], ["under 25%", "25-50%", "50-100%", "over 100%"], "margin")
+    buckets("units", [0, 26, 101, np.inf], ["1-25", "26-100", "over 100"], "units")
+    buckets("sell_hours_est", [0, 1, 4, 24, np.inf], ["under 1 h", "1-4 h", "4-24 h", "over 24 h"], "est. hours to sell")
+    passes = (f[TESTS] == "pass").sum(axis=1)
+    for k in sorted(passes.unique(), reverse=True):
+        out.append(dict(group=f"checks passed: {k} of {len(TESTS)}", **_line(f[passes == k])))
     return pd.DataFrame(out)

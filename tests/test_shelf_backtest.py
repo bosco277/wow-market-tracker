@@ -91,3 +91,12 @@ class TestBacktest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSummaryBuckets(unittest.TestCase):
+    def test_extra_groups_exist(self):
+        bt = backtest_shelves(snaps(), ShelfConfig(), step=1, min_history_hours=48.0)
+        groups = set(summarize_backtest(bt)["group"])
+        self.assertTrue(any(g.startswith("margin:") for g in groups))
+        self.assertTrue(any(g.startswith("checks passed:") for g in groups))
+        self.assertTrue(any(g.startswith("units:") for g in groups))

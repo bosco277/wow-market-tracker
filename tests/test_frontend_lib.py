@@ -122,3 +122,36 @@ class TestBacktestTable(unittest.TestCase):
         self.assertEqual(t.iloc[0]["Median hours to get there"], "-")
         self.assertEqual(t.iloc[0]["Price 4 h later vs relist price"], "0.98x")
         self.assertTrue(lib.backtest_table(pd.DataFrame()).empty)
+
+
+class TestBacktestRates(unittest.TestCase):
+    def test_rates_by_verdict(self):
+        s = pd.DataFrame({"group": ["all shelves", "verdict: candidate", "verdict: weak"], "n": [10, 5, 3],
+                          "reached_4h": [0.1, 0.61, 0.41], "reached_12h": [0.2, 0.82, 0.6], "median_hours": [2, 2, 2],
+                          "median_floor_ratio_4h": [0, 0.9, 0.8], "undercut_risk": [0.6, 0.48, 0.52]})
+        r = lib.backtest_rates(s)
+        self.assertEqual(lib.past_hit_rate("candidate", r), "61% / 82% (undercut 48%)")
+        self.assertEqual(lib.past_hit_rate("no", r), "-")
+        self.assertEqual(lib.backtest_rates(pd.DataFrame()), {})
+
+
+class TestOldShelfTable(unittest.TestCase):
+    def old_table(self):
+        """What the v0.6.2 engine wrote: no long-run columns, no regime test, no sales per day."""
+        return pd.DataFrame({"item_id": [1, 2], "name": ["A", "B"], "verdict": ["candidate", "weak"], "units": [10, 20],
+                             "avg_price_gold": [1.0, 2.0], "breakeven_gold": [1.05, 2.1], "target_gold": [1.5, 3.0], "net_margin": [0.3, 0.4],
+                             "net_margin_stress": [0.2, 0.3], "profit_gold": [4.0, 9.0], "profit_stress_gold": [2.0, 5.0], "cost_gold": [10.0, 40.0],
+                             "sell_hours_low": [3.0, 5.0], "sell_hours_est": [2.0, 4.0], "sell_hours_high": [1.0, 3.0], "confidence": ["Medium"] * 2,
+                             **{c: ["pass", "warn"] for c in ("test_price", "test_speed", "test_size", "test_margin", "test_book")}})
+
+    def test_missing_columns_are_filled_and_the_app_pieces_still_work(self):
+        t = lib.ensure_shelf_columns(self.old_table())
+        for c in lib.SHELF_NUMERIC + lib.TEST_COLS:
+            self.assertIn(c, t.columns)
+        row = t.iloc[0]
+        self.assertEqual(lib.shelf_checks(row), "5 of 5 pass")
+        self.assertEqual(lib.shelf_watch(t.iloc[1]), "WARN: Price history, Sells fast enough, Fits your limits, Still profitable if undercut, Complete listing snapshot")
+        self.assertEqual(lib.normal_price_text(row["long_median_gold"], row["long_p10_gold"], row["long_p90_gold"], row["long_days"]), "-")
+        self.assertEqual(lib.normal_price_text(1.2, 0.9, 1.5, 5.0), "1g 20s 0c (90s 0c - 1g 50s 0c, 5d)")
+        self.assertEqual(len(lib.shelf_table(t)), 2)
+        self.assertTrue(lib.ensure_shelf_columns(pd.DataFrame()).empty)

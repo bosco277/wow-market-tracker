@@ -30,7 +30,10 @@ def load(name: str) -> pd.DataFrame:
 items, hourly, prof = load("items"), load("item_hourly"), load("profile")
 cal, hist, exp, flips = load("calibration"), load("calibration_history"), load("experiment"), load("flips")
 shelves = load("shelves")
+shelves_old = len(shelves) > 0 and "test_regime" not in shelves.columns
+shelves = lib.ensure_shelf_columns(shelves)
 backtest = load("backtest_summary")
+bt_rates = lib.backtest_rates(backtest)
 if hist.empty:
     hist = cal
 
@@ -154,6 +157,9 @@ with tab_flip:
     st.write("Cheap units sitting below a gap in the price tiers: buy them, relist at the tier above the gap. These are candidates to "
              "check against the live auction house, not instructions. Limits per flip come from the engine run (units and gold). "
              "Click a row to see the item's charts and its full list of checks below.")
+    if shelves_old:
+        st.warning("This flip table was written by an older engine run, so the normal-price check and sales-per-day columns are blank. "
+                   "Run the Market tools workflow with mode=derive (upload ticked) to refresh it.")
     only = st.checkbox("Candidates only (hide weak)", value=False)
     sh = lib.shelf_table(shelves, ("candidate",) if only else ("candidate", "weak"))
     sel = None
@@ -165,12 +171,13 @@ with tab_flip:
             "Item ID": sh["item_id"].astype(int),
             "Verdict": sh["verdict"],
             "Checks": sh.apply(lib.shelf_checks, axis=1),
+            "Past hit rate, similar shelves (4 h / 12 h)": sh["verdict"].map(lambda v: lib.past_hit_rate(v, bt_rates)),
             "Watch out for": sh.apply(lib.shelf_watch, axis=1),
             "Buy (units)": sh["units"],
             "Avg cost": sh["avg_price_gold"].map(lib.gsc),
             "Break-even": sh["breakeven_gold"].map(lib.gsc),
             "Relist at": sh["target_gold"].map(lib.gsc),
-            "Normal price (median, p10 - p90)": [f"{lib.gsc(m)} ({lib.gsc(a)} - {lib.gsc(b)}, {d:.0f}d)" for m, a, b, d in
+            "Normal price (median, p10 - p90)": [lib.normal_price_text(m, a, b, d) for m, a, b, d in
                                                  zip(sh["long_median_gold"], sh["long_p10_gold"], sh["long_p90_gold"], sh["long_days"])],
             "Sold / day (low - best - high)": [lib.rng(a, b, c) for a, b, c in zip(sh["daily_low"], sh["daily_est"], sh["daily_high"])],
             "Net margin": (sh["net_margin"] * 100).round(1).astype(str) + "%",

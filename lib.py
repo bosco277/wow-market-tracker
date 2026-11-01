@@ -124,8 +124,38 @@ def freshness(cal: pd.DataFrame, now=None) -> tuple:
     return h, ("fresh" if h <= 3 else "stale" if h <= 12 else "very stale")
 
 
-MARK = {"pass": "pass", "warn": "WARN", "fail": "FAIL"}
+MARK = {"pass": "pass", "warn": "WARN", "fail": "FAIL", "n/a": "n/a"}
 TEST_COLS = ["test_price", "test_speed", "test_size", "test_margin", "test_regime", "test_book"]
+
+
+SHELF_NUMERIC = ["units", "avg_price_gold", "breakeven_gold", "target_gold", "net_margin", "net_margin_stress", "profit_gold", "profit_stress_gold",
+                 "cost_gold", "sell_hours_low", "sell_hours_est", "sell_hours_high", "long_median_gold", "long_p10_gold", "long_p90_gold",
+                 "long_days", "daily_low", "daily_est", "daily_high"]
+
+
+def ensure_shelf_columns(sh: pd.DataFrame) -> pd.DataFrame:
+    """The shelves table written by an older engine run may lack columns the app now shows. Fill them with blanks so the app
+    still opens; the Flips screen tells the user to run derive again."""
+    if sh is None or sh.empty:
+        return sh
+    sh = sh.copy()
+    for c in SHELF_NUMERIC:
+        if c not in sh.columns:
+            sh[c] = np.nan
+    for c in TEST_COLS:
+        if c not in sh.columns:
+            sh[c] = "n/a"
+    for c, v in (("name", ""), ("confidence", ""), ("verdict", "weak")):
+        if c not in sh.columns:
+            sh[c] = v
+    return sh
+
+
+def normal_price_text(median, p10, p90, days) -> str:
+    """'1g 20s 0c (90s - 1g 50s, 5d)', or '-' when the engine run did not have it."""
+    if median is None or median != median:
+        return "-"
+    return f"{gsc(median)} ({gsc(p10)} - {gsc(p90)}, {days:.0f}d)"
 
 
 def shelf_table(shelves: pd.DataFrame, verdicts: tuple = ("candidate", "weak")) -> pd.DataFrame:
@@ -160,9 +190,9 @@ TEST_INFO = {
 
 
 def shelf_checks(row) -> str:
-    """'5 of 6 pass'."""
-    n = sum(row[c] == "pass" for c in TEST_COLS if c in row)
-    return f"{n} of {len(TEST_COLS)} pass"
+    """'5 of 6 pass' (checks a table from an older engine run does not have are left out of the count)."""
+    have = [c for c in TEST_COLS if c in row and row[c] != "n/a"]
+    return f"{sum(row[c] == 'pass' for c in have)} of {len(have)} pass"
 
 
 def shelf_watch(row) -> str:
@@ -189,3 +219,25 @@ def backtest_table(summ: pd.DataFrame) -> pd.DataFrame:
         "Price 4 h later vs relist price": summ["median_floor_ratio_4h"].map(lambda v: "-" if v != v else f"{v:.2f}x"),
         "Undercut risk (new cheap listings within 2 h)": summ["undercut_risk"].map(pct),
     })
+
+
+def backtest_rates(summ: pd.DataFrame) -> dict:
+    """{'candidate': (reached 4 h, reached 12 h, undercut risk), 'weak': ...} from the backtest summary, for the Flips table."""
+    out = {}
+    if summ is None or summ.empty:
+        return out
+    for v in ("candidate", "weak"):
+        r = summ[summ["group"] == f"verdict: {v}"]
+        if len(r):
+            r = r.iloc[0]
+            out[v] = (r["reached_4h"], r["reached_12h"], r["undercut_risk"])
+    return out
+
+
+def past_hit_rate(verdict: str, rates: dict) -> str:
+    """'61% / 82% (undercut 48%)': how often similar shelves reached the relist price in 4 h / 12 h in the replay."""
+    if verdict not in rates:
+        return "-"
+    a, b, u = rates[verdict]
+    pct = lambda v: "-" if v != v else f"{v * 100:.0f}%"
+    return f"{pct(a)} / {pct(b)} (undercut {pct(u)})"
