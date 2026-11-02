@@ -61,7 +61,7 @@ class Cfg:
     """Everything that depends on the step of the series. The defaults ARE the daily test, so the daily bake-off is unchanged; HOURLY below is the same test on hourly steps.
     season = steps in one cycle (7 days / 24 hours); ma = window of the rolling median; alphas = the exponential averages (name, weight on the newest step);
     slow = the name of a slower average used as an extra anchor by the pooled models (hourly only); phase = what a step's position in the cycle is read from (dow = day of
-    week, hour = hour of day); big / move = the 'big miss' and the 'direction call' thresholds in plain ratio terms; labels = display names for the methods whose meaning changes."""
+    week, hour = hour of day); big / move = the 'big miss' and the 'direction call' thresholds in plain ratio terms; age_by_obs = burn-in is counted in real readings an item has had, not in clock steps since its first one (hourly: a hole in the data must not use up the burn-in); labels = display names for the methods whose meaning changes."""
     unit: str = "day"
     season: int = 7
     ma: int = 7
@@ -81,6 +81,7 @@ class Cfg:
     phase: str = "dow"
     big: float = 1.25
     move: float = 1.03
+    age_by_obs: bool = False
     labels: Tuple[Tuple[str, str], ...] = ()
 
     @property
@@ -104,7 +105,7 @@ DAILY = Cfg()
 # a slow 24-hour-memory average joins the candidates, and the thresholds are tighter because hourly moves are smaller than daily ones.
 HOURLY_HORIZONS = (1, 4, 12, 24)
 HOURLY = Cfg(unit="hour", season=24, ma=6, vol_window=24, warmup=48, min_item=72, min_span=96, test_step=1, fit_step=1, min_bin=200, hw=(0.3, 0.2, 0.15),
-             alphas=(("ema50", 0.5), ("ema25", 0.25), ("ema10", 0.1), ("ema04", 0.04)), slow="ema04", phase="hour", big=1.10, move=1.01,
+             alphas=(("ema50", 0.5), ("ema25", 0.25), ("ema10", 0.1), ("ema04", 0.04)), slow="ema04", phase="hour", big=1.10, move=1.01, age_by_obs=True,
              labels=(("week_ago", "day_ago"), ("median7", "median6"), ("weekday", "hour_of_day")))
 
 
@@ -347,7 +348,10 @@ def walk_forward(Y: np.ndarray, days: pd.DatetimeIndex, gi: Optional[np.ndarray]
     wk = cfg.phase_of(days)
     obs = np.isfinite(Y)
     first = np.where(obs.any(1), obs.argmax(1), T)
-    age_ok = (np.arange(T)[None, :] - first[:, None]) >= cfg.warmup
+    if cfg.age_by_obs:      # readings an item has had BEFORE this step (a hole in the data does not count as burn-in)
+        age_ok = (np.cumsum(obs, axis=1) - obs) >= cfg.warmup
+    else:
+        age_ok = (np.arange(T)[None, :] - first[:, None]) >= cfg.warmup
     sig = volatility(Y, cfg.vol_window)
     static, base = static_forecasts(Y, wk, hs, cfg)
     feat = _features(Y, base, gi)
@@ -355,6 +359,9 @@ def walk_forward(Y: np.ndarray, days: pd.DatetimeIndex, gi: Optional[np.ndarray]
     acc = {(m, h): _Acc(n, cfg.move_log) for m in models for h in hs}
     acc_fit = {(m, h): _Acc(n, cfg.move_log) for m in models for h in hs} if sarima else {}     # the same cases, but only items SARIMA really fitted
     T0 = cfg.warmup
+    if cfg.age_by_obs:       # testing starts once at least half of the items are burned in
+        ready = np.nonzero(age_ok.mean(axis=0) >= 0.5)[0]
+        T0 = int(ready[0]) if len(ready) else T
     span = T - 1 - T0
     cuts = [T0 + int(span * (cfg.start_frac + k * (1 - cfg.start_frac) / cfg.folds)) for k in range(cfg.folds)] + [T - 1]
     done, sar_info = [], []
@@ -531,17 +538,42 @@ def family_table(res: dict, fam: np.ndarray) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+TIER_ORDER = ("under 1g", "1g to 10g", "10g to 100g", "100g and up")
+
+
+def price_tiers(Y: np.ndarray) -> np.ndarray:
+    """Each item's price level from its median price over the grid (Y is log10 gold): under 1g / 1g to 10g / 10g to 100g / 100g and up. Items with no reading get ''."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        med = np.nanmedian(Y, axis=1)
+    out = np.array([""] * len(med), dtype=object)
+    ok = np.isfinite(med)
+    out[ok] = np.array(TIER_ORDER, dtype=object)[np.digitize(med[ok], [0.0, 1.0, 2.0])]
+    return out
+
+
+def tier_table(res: dict, tiers: np.ndarray) -> pd.DataFrame:
+    """family_table by price level, in price order: items, naive's average miss, the best method (naive unless 3%+ better) and its miss against naive."""
+    t = family_table(res, tiers)
+    if t.empty:
+        return t
+    t = t.rename(columns={"family": "price_level"})
+    t["_o"] = t["price_level"].map({k: i for i, k in enumerate(TIER_ORDER)})
+    return t.sort_values(["horizon", "_o"]).drop(columns="_o").reset_index(drop=True)
+
+
 def bake_off(hist: pd.DataFrame, groups: Optional[pd.DataFrame] = None, metric: str = "price", hs=HORIZONS, sarima: bool = True) -> dict:
     """The full test for one metric on the DAILY history. {} when the history is too thin. sarima=False leaves SARIMA out (it is the slow one); it is also left out, with a note, when scipy is missing."""
     g = build_grid(hist, metric)
     if g is None:
         return {}
     ids, days, Y = g
-    return bake_off_grid(ids, days, Y, groups, hs, sarima, DAILY)
+    return bake_off_grid(ids, days, Y, groups, hs, sarima, DAILY, tiers=price_tiers(Y) if metric == "price" else None)
 
 
-def bake_off_grid(ids, days, Y, groups: Optional[pd.DataFrame] = None, hs=HORIZONS, sarima: bool = False, cfg: Cfg = DAILY) -> dict:
-    """The full test on an items x steps grid of log10 values (days for DAILY, hours for HOURLY). {} when there are too few steps. SARIMA only exists for the daily cycle."""
+def bake_off_grid(ids, days, Y, groups: Optional[pd.DataFrame] = None, hs=HORIZONS, sarima: bool = False, cfg: Cfg = DAILY, tiers: Optional[np.ndarray] = None) -> dict:
+    """The full test on an items x steps grid of log10 values (days for DAILY, hours for HOURLY). {} when there are too few steps. SARIMA only exists for the daily cycle.
+    tiers = optional price level per item (see price_tiers); adds a table by price level."""
     if len(days) < cfg.min_span:
         return {}
     if cfg.season != 7:
@@ -569,6 +601,8 @@ def bake_off_grid(ids, days, Y, groups: Optional[pd.DataFrame] = None, hs=HORIZO
     out = {"summary": summ, "summary_fit": fit, "bins": bin_table(res), "best": best_models(summ), "family": family_table(res, fam), "items": len(ids), "days": len(days),
            "first": days[0], "last": days[-1], "folds": res["folds"], "grouped": gi is not None,
            "sarima_info": res["sarima_info"], "sarima_note": note}
+    if tiers is not None:
+        out["tiers"] = tier_table(res, np.asarray(tiers, dtype=object))
     return relabel(out, cfg)
 
 
@@ -580,7 +614,7 @@ def relabel(out: dict, cfg: Cfg) -> dict:
     for key in ("summary", "summary_fit"):
         if isinstance(out.get(key), pd.DataFrame) and "model" in out[key].columns:
             out[key] = out[key].assign(model=out[key]["model"].replace(names))
-    for key in ("bins", "family"):
+    for key in ("bins", "family", "tiers"):
         if isinstance(out.get(key), pd.DataFrame) and "best" in out[key].columns:
             out[key] = out[key].assign(best=out[key]["best"].replace(names))
     out["best"] = {h: names.get(m, m) for h, m in out["best"].items()}

@@ -251,7 +251,7 @@ class TestRunner(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             lake.run_forecast_test(None, type("A", (), {"ids": "sarima"})(), read_table=lambda name: tables.get(name, pd.DataFrame()))
         out = buf.getvalue()
-        for s in ("FORECAST BAKE-OFF", "naive", "ema25", "weekday", "sarima", "kinked", "pooled_grp", "BEST GUESS", "hit80", "BY HOW JUMPY", "SARIMA CHECK"):
+        for s in ("FORECAST BAKE-OFF", "naive", "ema25", "weekday", "sarima", "kinked", "pooled_grp", "BEST GUESS", "BEST GUESS BY PRICE LEVEL", "hit80", "BY HOW JUMPY", "SARIMA CHECK"):
             self.assertIn(s, out)
         self.assertFalse(any(line.startswith("==") for line in out.splitlines()))
 
@@ -334,6 +334,17 @@ class TestHourlyConfig(unittest.TestCase):
         np.testing.assert_allclose(a["week_ago"][24], Y)                      # a 24-hour horizon: the same clock hour yesterday is today's reading
         self.assertTrue(np.isnan(a["week_ago"][4][:, :20]).all())
 
+    def test_burn_in_counts_real_readings_so_a_hole_cannot_use_it_up(self):
+        import dataclasses
+        ids, idx, Y = hworld("noise")                                         # 25 empty hours near the start
+        by_obs = FO.walk_forward(Y, idx, None, (1,), cfg=FO.HOURLY)["acc"][("naive", 1)]
+        by_slot = FO.walk_forward(Y, idx, None, (1,), cfg=dataclasses.replace(FO.HOURLY, age_by_obs=False))["acc"][("naive", 1)]
+        self.assertTrue(FO.HOURLY.age_by_obs)
+        self.assertFalse(FO.DAILY.age_by_obs)
+        # 5 readings before the hole + 43 after it are needed: nothing can be scored before slot 73
+        self.assertLessEqual(by_obs.cnt.max(), len(idx) - 73)
+        self.assertLess(by_obs.cnt.sum(), by_slot.cnt.sum())
+
     def test_the_slow_anchor_feature_exists_only_for_hourly(self):
         ids, idx, Y = hworld("noise", n=12, hours=120, hole=False)
         _, base = FO.static_forecasts(Y, FO.HOURLY.phase_of(idx), (1,), FO.HOURLY)
@@ -409,6 +420,39 @@ class TestHourlyBakeOff(unittest.TestCase):
         r = FO.bake_off_grid(ids, idx, Y, None, FO.HOURLY_HORIZONS, True, FO.HOURLY)
         self.assertNotIn("sarima", set(r["summary"]["model"]))
         self.assertEqual(r["sarima_info"], [])
+
+
+class TestPriceTiers(unittest.TestCase):
+    def test_levels_follow_the_median_price(self):
+        Y = np.array([[-1.0, -1.0, np.nan], [0.5, 0.5, 0.5], [1.5, 1.5, 9.0], [3.0, 3.0, 3.0], [np.nan, np.nan, np.nan]])
+        t = FO.price_tiers(Y)
+        self.assertEqual(t.tolist(), ["under 1g", "1g to 10g", "10g to 100g", "100g and up", ""])
+
+    def test_the_table_is_in_price_order_with_display_names_and_is_added_for_both_steps(self):
+        ids, idx, Y = hworld("walk", n=120)
+        tiers = FO.price_tiers(Y)
+        r = FO.bake_off_grid(ids, idx, Y, None, FO.HOURLY_HORIZONS, False, FO.HOURLY, tiers=tiers)
+        t = r["tiers"]
+        self.assertIn("price_level", t.columns)
+        self.assertEqual(set(t["price_level"]), set(tiers) - {""})
+        for h, th in t.groupby("horizon"):
+            order = [FO.TIER_ORDER.index(x) for x in th["price_level"]]
+            self.assertEqual(order, sorted(order))
+        self.assertTrue(set(t["best"]) <= set(r["summary"]["model"]))
+        self.assertNotIn("tiers", FO.bake_off_grid(ids, idx, Y, None, FO.HOURLY_HORIZONS, False, FO.HOURLY))
+        d = run("walk", n=48, days=420)
+        self.assertIn("tiers", d)
+
+    def test_a_tier_with_a_different_behaviour_is_told_apart(self):
+        # cheap items bounce around by +-0.1 log10 (noise: smoothing helps); dear items walk (naive wins)
+        rng = np.random.default_rng(11)
+        ids, idx, _ = hworld("walk", n=100)
+        n, T = 100, len(idx)
+        Y = np.where(np.arange(n)[:, None] < 50, 0.3 + rng.normal(0, 0.1, (n, T)), 2.0 + np.cumsum(rng.normal(0, 0.01, (n, T)), axis=1))
+        r = FO.bake_off_grid(ids, idx, Y, None, FO.HOURLY_HORIZONS, False, FO.HOURLY, tiers=FO.price_tiers(Y))
+        t = r["tiers"][r["tiers"]["horizon"] == 1].set_index("price_level")
+        self.assertLess(t.loc["1g to 10g", "vs_naive"], 0.9)
+        self.assertEqual(t.loc["100g and up", "best"], "naive")
 
 
 def _snap(ts, items, price_scale=1.0, first_id=0):
@@ -520,7 +564,7 @@ class TestHourlyRunner(unittest.TestCase):
         snaps, n = self._world_snaps()
         res, out = self._run(snaps, n)
         for s in ("HOURLY FORECAST BAKE-OFF (PRELIMINARY)", "naive", "day_ago", "median6", "ema04", "hour_of_day", "kinked", "pooled_grp", "BEST GUESS", "hit80", "BY HOW JUMPY",
-                  "IS THERE A DAILY CYCLE", "partial snapshots left out", "1 hour ahead", "4 hours ahead", "12 hours ahead", "24 hours ahead", "PRICE", "STOCK"):
+                  "IS THERE A DAILY CYCLE", "partial snapshots left out", "BEST GUESS BY PRICE LEVEL", "real readings of burn-in", "1 hour ahead", "4 hours ahead", "12 hours ahead", "24 hours ahead", "PRICE", "STOCK"):
             self.assertIn(s, out)
         self.assertFalse(any(line.startswith("==") for line in out.splitlines()))
         self.assertEqual(set(res), {"price", "stock"})

@@ -611,6 +611,20 @@ writes nothing, prints group-level numbers only. Why: the daily test could not s
 * Honest limits: about a week of usable hourly history (first snapshots Oct 25 19:31 ET, Oct 26 missing), so the pooled fit's first stretch is thin at 24 hours and every figure is PRELIMINARY;
   retail is the test bed, and Forever's own hourly track record has to be earned the same way.
 
+First real `forecast_hourly` log (v0.7.27, Nov 2, 2026; 2,998 items, 187 clock hours Oct 25 19:00 to Nov 2 13:00 ET, of which the loader had dropped Oct 25 20:00 to Oct 26 18:00 as partial captures, so about 6.75 continuous days):
+* Price: "it stays put" is unbeaten at 1 and 4 hours (best rival: pooled 1.08 and 1.01 of naive's average miss). Typical 1-hour miss of naive is 0.00% (more than half of item-hours do not change), average 8.5%, 12.8% of
+  cases miss by over 10%; WAPE 11.7%. At 12 and 24 hours kinked / pooled are 0.96 and 0.93 of naive; gains sit in crafting materials (0.91, 0.89), enhancements and the jumpiest fifth of cases (0.91 at 12h, 0.84 at 24h);
+  consumables and gems get nothing. Same shape as the daily test: pullback after a spike, nothing else.
+* No shared daily price rhythm: the typical item sits 0.00-0.03% from its 24-hour average at every hour, items leaning the same way 0.52-0.58; hour_of_day loses at 1-12 hours (1.65, 1.14, 1.00) and ties at 24 (0.96).
+* Stock (units listed) has a small shared daily cycle: lowest 6-9 AM ET, highest 8-10 PM ET, about 5 points peak to trough, 72% of items leaning the same way at 10 PM. Too small to forecast alone (1-hour naive
+  miss 12.5%); pooled / kinked are 0.94 / 0.93 of naive at 12 / 24 hours, nothing at 1-4 hours.
+* Ranges hold: hit80 0.79-0.82 for every method and horizon (hit50 0.69 for naive at 1 hour because the median change is exactly zero). The calmest fifth of cases has a 1-hour 80% range under 1% wide and holds 83-89%.
+  "Calm over the last day" does not carry over a day: the calmest fifth at 24 hours still missed 44% on average (hit80 0.77).
+* Caveats found in the log: (1) the 48-hour burn-in was counted in clock hours, so the Oct 26 hole ate half of it and hour_of_day / ema04 had about one day to learn; (2) day_ago's median miss is exactly 10.00% and its 95th
+  percentile exactly 400.00%, which points at price steps in the cheapest items (copper granularity), not yet confirmed.
+* v0.7.28: burn-in for hourly is now counted in real readings an item has had (`Cfg.age_by_obs`; testing starts once half of the items are burned in); both bake-offs print a BEST GUESS BY PRICE LEVEL table (under 1g /
+  1g to 10g / 10g to 100g / 100g and up, by each item's median price) so the result can be checked on items worth trading.
+
 First real `api_probe` log (Nov 1, 2026, 21:4x ET), and what v0.7.20 adds to the mode:
 * Known namespaces behaved as expected (retail, classic, classic1x, classicann all 200); the made-up namespace answered 403 on both paths. Of 30 guesses exactly one differed: `forever`
   (`static-forever-us` item classes 403, `dynamic-forever-us` connected-realm index 404). `camelot` and every other guess matched the made-up one.
