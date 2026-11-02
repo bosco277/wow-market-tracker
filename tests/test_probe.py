@@ -246,6 +246,74 @@ class TestAhledgerProbe(unittest.TestCase):
         self.assertTrue(all(d["status"] == 0 for d in res["docs"]))
 
 
+def forever_world(listings=False, index=False, n=6):
+    """What the log of Nov 1 showed for 'forever': a dynamic namespace with a realm index and no connected-realm index, no static namespace, no commodities."""
+    realms = [{"id": 5000 + i, "name": f"Market {i}", "slug": f"market-{i}", "key": {"href": "x"}} for i in range(n)]
+    dyn = {"/data/wow/realm/index": (200, {"realms": realms})}
+    for i, r in enumerate(realms[:3]):
+        cid = 9000 + i
+        dyn[f"/data/wow/realm/{r['slug']}"] = (200, {"id": r["id"], "name": r["name"], "connected_realm": {"href": f"https://us.api.blizzard.com/data/wow/connected-realm/{cid}?namespace=dynamic-forever-us"}})
+        dyn[f"/data/wow/connected-realm/{cid}"] = (200, {"id": cid, "status": {"type": "UP"}})
+        if index:
+            dyn[f"/data/wow/connected-realm/{cid}/auctions/index"] = (200, {"auctions": [{"id": 2, "name": "SECRETVALUE"}]})
+        if listings:
+            dyn[f"/data/wow/connected-realm/{cid}/auctions/2"] = (200, {"auctions": [{"id": 1, "buyout": 5, "quantity": 3, "seller": "SECRETVALUE"}]})
+            dyn[f"/data/wow/connected-realm/{cid}/auctions"] = (200, {"auctions": [{"id": 1, "buyout": 5}]})
+    return {"dynamic-forever-us": dyn, "dynamic-forever-eu": {"/data/wow/realm/index": (200, {"realms": realms[:2]})}}
+
+
+class TestForeverFollowUp(unittest.TestCase):
+    def test_a_namespace_with_only_a_realm_index_is_flagged_listed_and_followed(self):
+        fb = FakeBlizz(forever_world())
+        res = P.blizzard_probe(fb, sleep=NOSLEEP)
+        self.assertEqual(res["flagged"], ["forever"])
+        self.assertEqual(res["rows"]["forever"], {"/data/wow/item-class/index": 403, "/data/wow/connected-realm/index": 404})   # exactly the Nov 1 pattern
+        self.assertEqual([n for n, _, _ in res["names"]["forever"]], [f"Market {i}" for i in range(6)])
+        paths = {path for path, ns in fb.calls if ns == "dynamic-forever-us"}
+        for i in range(3):
+            self.assertIn(f"/data/wow/realm/market-{i}", paths)                                   # the first three realms are followed
+            self.assertIn(f"/data/wow/connected-realm/{9000 + i}/auctions/index", paths)           # via the connected realm id the realm names
+        self.assertNotIn("/data/wow/realm/market-3", paths)
+        v = res["verdicts"]["forever"]
+        self.assertEqual((v["realms"], v["static_items"], v["auction_index"], v["auction_listings"]), (6, 403, False, False))
+        self.assertEqual(res["regions"]["forever"], {"eu": (200, 2), "kr": (403, None), "tw": (403, None)})
+
+    def test_the_report_gives_a_plain_verdict_and_the_realm_names(self):
+        text = P.format_blizzard(P.blizzard_probe(FakeBlizz(forever_world()), sleep=NOSLEEP))
+        for needle in ("VERDICT for 'forever'", "Blizzard knows this namespace: YES", "6 realms listed", "not published yet (answers 403)", "Auction LISTINGS (prices and quantities): not reachable",
+                       "Other regions: eu answers (2 realms), kr 403, tw 403", "Realms in dynamic-forever-us (6): Market 0 [5000], Market 1 [5001]"):
+            self.assertIn(needle, text)
+        self.assertFalse(any(line.startswith("==") for line in text.splitlines()))
+        self.assertNotIn("SECRETVALUE", text)
+
+    def test_reachable_auction_index_and_listings_are_told_apart(self):
+        v = P.blizzard_probe(FakeBlizz(forever_world(index=True)), sleep=NOSLEEP)["verdicts"]["forever"]
+        self.assertEqual((v["auction_index"], v["auction_listings"]), (True, False))            # the houses are named but no prices: like Classic Era
+        res = P.blizzard_probe(FakeBlizz(forever_world(index=True, listings=True)), sleep=NOSLEEP)
+        v = res["verdicts"]["forever"]
+        self.assertEqual((v["auction_index"], v["auction_listings"]), (True, True))
+        labels = [lab for lab, st, _ in res["deep"]["forever"] if st == 200]
+        self.assertTrue(any("auction house id" in lab for lab in labels))                       # the first house named by the index was asked for its listing
+        text = P.format_blizzard(res)
+        self.assertIn("REACHABLE - see the shape below", text)
+        self.assertNotIn("SECRETVALUE", text)
+
+    def test_known_classic_namespaces_get_the_same_follow_up_for_comparison_but_their_realm_names_are_not_printed(self):
+        res = P.blizzard_probe(FakeBlizz(), sleep=NOSLEEP)
+        self.assertIn("classic1x", res["deep"])
+        self.assertTrue(any(lab.startswith("realm 1:") for lab, _, _ in res["deep"]["classic1x"]))
+        self.assertEqual(res["names"], {})
+        self.assertEqual(res["verdicts"], {})
+        self.assertNotIn("VERDICT", P.format_blizzard(res))
+
+    def test_a_dead_realm_index_does_not_break_the_follow_up(self):
+        world = forever_world()
+        world["dynamic-forever-us"]["/data/wow/realm/index"] = (200, {"realms": []})
+        res = P.blizzard_probe(FakeBlizz(world), sleep=NOSLEEP)
+        self.assertEqual(res["verdicts"]["forever"]["realms"], None)
+        self.assertIn("not listed", P.format_blizzard(res))
+
+
 class TestCommands(unittest.TestCase):
     def _args(self, **kw):
         import lake

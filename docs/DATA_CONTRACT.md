@@ -308,7 +308,7 @@ When Forever data exists:
 8. Forever has NO realms (per AHledger's explainer, citing Blizzard): 18 markets = 3 rulesets (Normal, PvP, RP) x 2 factions x 3 regions (US, EU, CN), plus neutral
    auctioneers (Gadgetzan, Booty Bay, Everlook; 15% cut, faction houses 5%); listings run 12 / 24 / 48 hours. `source` should be the market id (for example
    `forever.normal.alliance.us`). Unverified: whether Forever has commodity-style stacks at all.
-9. NO-API FALLBACK. As of Oct 26-28 independent probes found no Forever namespace on the Battle.net API (403 for every guess), and the Classic Era / Anniversary auction
+9. NO-API FALLBACK. UPDATE Nov 1, 2026: our own `api_probe` found `dynamic-forever-us` (see 2m): Blizzard knows the namespace and lists 51 realms; static data, the connected-realm index, commodities and the auction-house index were not reachable. As of Oct 26-28 independent probes found no Forever namespace on the Battle.net API (403 for every guess), and the Classic Era / Anniversary auction
    endpoints return 404 (index only, no listings), so Forever may never expose listings. Backup sources, in order: (a) the free AHledger API (api.ahledger.com, no key,
    300 requests/min, aggregates per market: lowest price, median, quantity, auction count; per-scan points for 24 h, hourly buckets for 7 d, daily for 30 / 90 d; terms:
    credit AHledger with a link wherever its data is shown, do not present it as our own scan or resell it as a feed); (b) our own scans through an addon + SavedVariables
@@ -536,3 +536,16 @@ is 3% better). `launch_backtest` with upload stores `engine/launch_prior` (scope
 (from `daily`; ages count from each item's first day in that table, so the table must start at the launch).
 Limits: retail launches add items to an economy that already has gold and stock; Forever starts empty, so levels may differ. The ranges are a prior; checklist item 11 says how they are
 scored on Forever's own data. Tested on synthetic launches only (hit rates near 0.5 / 0.8 on hidden launches); the first real result is the `launch_backtest` log.
+
+
+First real `api_probe` log (Nov 1, 2026, 21:4x ET), and what v0.7.20 adds to the mode:
+* Known namespaces behaved as expected (retail, classic, classic1x, classicann all 200); the made-up namespace answered 403 on both paths. Of 30 guesses exactly one differed: `forever`
+  (`static-forever-us` item classes 403, `dynamic-forever-us` connected-realm index 404). `camelot` and every other guess matched the made-up one.
+* Followed up, `dynamic-forever-us` `/data/wow/realm/index` answered 200 with 51 realm entries (fields key, name, id, slug). Commodities, `auctions/index` and `market/index` answered 404;
+  static realm index and item 2589 under `static-forever-us` answered 403 (static data not published). Compare: classic 50 realms and full listings, classic1x 66 realms with an auction-house
+  index of 3 houses but no listing path, classicann 5 realms, same. So Blizzard has created a Forever dynamic namespace with a realm list; whether auction data will be served, and under
+  which path, is not yet visible. Era-style (index only, no listings) is a live possibility and is what the fallbacks in checklist item 9 are for.
+* 51 realm entries sits oddly with "no realms, 18 markets" (6 US markets would be expected); the entry names will say what they are.
+* v0.7.20: for any flagged namespace the probe now (1) prints the realm names and ids, (2) follows the first three realms through `/data/wow/realm/{slug}`, the connected realm it names,
+  `auctions/index`, `auctions` and the first auction house's listing, (3) asks the eu, kr and tw hosts the same realm-index question, (4) prints a plain VERDICT (namespace known, realms,
+  static data, auction index reachable, auction LISTINGS reachable). `classic` and `classic1x` get the same follow-up for comparison. Realm names are game data, not account data, so they are printed.

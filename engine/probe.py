@@ -27,6 +27,9 @@ STAGE2 = (
     ("static", "/data/wow/item/2589"),
 )
 REALM_PATHS = ("/data/wow/connected-realm/{id}/auctions/index", "/data/wow/connected-realm/{id}/auctions")
+DIVE_CONTROLS = ("classic", "classic1x")      # known namespaces that get the same realm-by-realm follow-up as a flagged one, for comparison
+MAX_DIVE_REALMS = 3
+OTHER_REGIONS = ("eu", "kr", "tw")
 
 USER_AGENT = "wow-market-tracker/0.7 research probe (personal, non-commercial; about 1 request per second)"
 AHL_BASE = "https://api.ahledger.com"
@@ -77,11 +80,14 @@ def _stage1(get, region, name, sleep):
 
 
 def _deep(get, region, name, sleep, first_js=None):
-    """Status and shape for the auction-related paths of one namespace, plus the first connected realm's auction paths when there is one."""
-    out = []
+    """Status and shape for the auction-related paths of one namespace, plus the first connected realm's auction paths when there is one.
+    Returns (entries, realm_index_json_or_None)."""
+    out, realm_js = [], None
     for kind, path in STAGE2:
         status, js = _call(get, region, kind, name, path, sleep)
         out.append((f"{kind} {path}", status, describe(js) if status == 200 else ""))
+        if kind == "dynamic" and path == "/data/wow/realm/index" and status == 200:
+            realm_js = js
     realm_id = None
     if isinstance(first_js, dict):
         for r in first_js.get("connected_realms") or []:
@@ -94,7 +100,59 @@ def _deep(get, region, name, sleep, first_js=None):
             path = tpl.format(id=realm_id)
             status, js = _call(get, region, "dynamic", name, path, sleep)
             out.append((f"dynamic {tpl}", status, describe(js, depth=2) if status == 200 else ""))
+    return out, realm_js
+
+
+def _realm_list(js):
+    """[(name, slug, id)] from a realm index answer."""
+    out = []
+    if isinstance(js, dict):
+        for r in js.get("realms") or []:
+            if isinstance(r, dict) and r.get("id") is not None:
+                out.append((str(r.get("name", "")), str(r.get("slug", "")), r.get("id")))
     return out
+
+
+def _dive(get, region, name, sleep, realms):
+    """Follow the first few realms of a realm index: the realm itself, its connected realm, the auction-house index, the listing path, and the first auction
+    house's listing when the index names one. This is the step that says whether any auction data is reachable at all."""
+    out = []
+    for rname, slug, rid in realms[:MAX_DIVE_REALMS]:
+        status, js = _call(get, region, "dynamic", name, f"/data/wow/realm/{slug}", sleep)
+        cid = rid
+        if status == 200 and isinstance(js, dict):
+            m = re.search(r"/connected-realm/(\d+)", str((js.get("connected_realm") or {}).get("href", "")))
+            if m:
+                cid = m.group(1)
+        out.append((f"realm {rid}: /data/wow/realm/{{slug}}", status, describe(js, depth=2) if status == 200 else ""))
+        ah_id = None
+        for label, path in (("/data/wow/connected-realm/{id}", f"/data/wow/connected-realm/{cid}"),
+                            ("/data/wow/connected-realm/{id}/auctions/index", f"/data/wow/connected-realm/{cid}/auctions/index"),
+                            ("/data/wow/connected-realm/{id}/auctions", f"/data/wow/connected-realm/{cid}/auctions")):
+            st, j = _call(get, region, "dynamic", name, path, sleep)
+            out.append((f"realm {rid}: {label}", st, describe(j, depth=2) if st == 200 else ""))
+            if label.endswith("auctions/index") and st == 200 and isinstance(j, dict):
+                first = (j.get("auctions") or [None])[0]
+                if isinstance(first, dict) and first.get("id") is not None:
+                    ah_id = first["id"]
+        if ah_id is not None:
+            st, j = _call(get, region, "dynamic", name, f"/data/wow/connected-realm/{cid}/auctions/{ah_id}", sleep)
+            out.append((f"realm {rid}: /data/wow/connected-realm/{{id}}/auctions/{{auction house id}}", st, describe(j, depth=2) if st == 200 else ""))
+    return out
+
+
+def _auction_evidence(items):
+    """(index_reachable, listings_reachable) from deep entries: a 200 whose shape holds an `auctions` list. The auction-house INDEX only names the houses;
+    a listing is any other auctions path (commodities, a realm's auctions, one house's auctions)."""
+    index = listings = False
+    for label, status, shape in items:
+        if status != 200 or "auctions: list[" not in shape:
+            continue
+        if label.endswith("auctions/index"):
+            index = True
+        elif "auctions" in label:
+            listings = True
+    return index, listings
 
 
 def blizzard_probe(get, region="us", extra=(), sleep=time.sleep):
@@ -111,16 +169,28 @@ def blizzard_probe(get, region="us", extra=(), sleep=time.sleep):
         if any(res[p][0] not in (0, baseline[p][0]) for p in paths):
             flagged.append(name)
     token_ok = controls["retail"][paths[1]][0] == 200
-    deep = {}
+    deep, names_found, regions, verdicts = {}, {}, {}, {}
     if token_ok:
         for c in CONTROLS:
-            deep[c or "retail"] = _deep(get, region, c, sleep, controls[c or "retail"][paths[1]][1])
+            key = c or "retail"
+            deep[key], rjs = _deep(get, region, c, sleep, controls[key][paths[1]][1])
+            if c in DIVE_CONTROLS:
+                deep[key] += _dive(get, region, c, sleep, _realm_list(rjs))
         for name in flagged:
             res = _stage1(get, region, name, sleep)
-            deep[name] = _deep(get, region, name, sleep, res[paths[1]][1])
+            deep[name], rjs = _deep(get, region, name, sleep, res[paths[1]][1])
+            realms = _realm_list(rjs)
+            names_found[name] = realms
+            deep[name] += _dive(get, region, name, sleep, realms)
+            regions[name] = {}
+            for rg in OTHER_REGIONS:
+                st, j = _call(get, rg, "dynamic", name, "/data/wow/realm/index", sleep)
+                regions[name][rg] = (st, len(_realm_list(j)) if st == 200 else None)
+            index, listings = _auction_evidence(deep[name])
+            verdicts[name] = {"realms": len(realms) if realms else None, "static_items": rows[name][paths[0]], "auction_index": index, "auction_listings": listings}
     return {"region": region, "paths": paths, "controls": {k: {p: v[p][0] for p in paths} for k, v in controls.items()},
             "baseline": {p: baseline[p][0] for p in paths}, "rows": rows, "flagged": flagged, "deep": deep, "errors": errors,
-            "token_ok": token_ok, "tried": names}
+            "token_ok": token_ok, "tried": names, "names": names_found, "regions": regions, "verdicts": verdicts}
 
 
 def format_blizzard(res):
@@ -144,6 +214,21 @@ def format_blizzard(res):
     else:
         out.append(f"\nNone of the {n} guesses answers differently from the made-up one: no Forever namespace among them yet.")
         out.append("Tried: " + ", ".join(res["tried"]))
+    for name in res["flagged"]:
+        v = res.get("verdicts", {}).get(name)
+        if not v:
+            continue
+        rg = res.get("regions", {}).get(name, {})
+        out.append(f"\nVERDICT for '{name}' (namespace dynamic-{name}-{region}):")
+        out.append(f"  Blizzard knows this namespace: YES. Realm index: " + (f"{v['realms']} realms listed" if v["realms"] else "not listed") + ".")
+        out.append(f"  Static data (items, item classes): " + ("answers" if v["static_items"] == 200 else f"not published yet (answers {v['static_items']})") + ".")
+        out.append("  Auction-house index (names the houses): " + ("reachable" if v["auction_index"] else "not reachable") + ".")
+        out.append("  Auction LISTINGS (prices and quantities): " + ("REACHABLE - see the shape below." if v["auction_listings"] else "not reachable at any path tried."))
+        if rg:
+            out.append("  Other regions: " + ", ".join(f"{r} " + (f"answers ({n} realms)" if st == 200 else f"{st}") for r, (st, n) in rg.items()) + ".")
+        names = res.get("names", {}).get(name) or []
+        if names:
+            out.append(f"  Realms in dynamic-{name}-{region} ({len(names)}): " + ", ".join(f"{n} [{i}]" for n, _, i in names[:80]) + (" ..." if len(names) > 80 else ""))
     for name, items in res["deep"].items():
         tag = "(known, for comparison)" if name in [c or "retail" for c in CONTROLS] else "(flagged)"
         out.append(f"\n-- {name} {tag} --")
