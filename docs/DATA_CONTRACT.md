@@ -654,8 +654,10 @@ after mode `daily`, once a day, with upload ticked. Reads item_daily, market_his
   Manual start only (`workflow_dispatch`, inputs `days` and `end_date`); concurrency group `daily-chain`, never two at once; step 2 does not run if step 1 fails. Needs only the `HF_TOKEN` secret.
 * Start time: 06:17 UTC every day. The US Eastern day ends at 05:00 UTC (04:00 UTC in summer time), its last snapshot is published about :31 past the hour and fetched about :01 after, so the day is on the
   Hugging Face mirror by about 05:05 UTC; 06:17 leaves an hour of slack and avoids the top of the hour, when scheduled jobs queue up. 06:17 UTC is 1:17 AM Eastern now and 2:17 AM after the March change.
-* The trigger is a Cloudflare Worker (`cloudflare-worker/worker.js`, `wrangler.toml`), not in this repo: its cron string "17 6 * * *" is looked up in a JOBS table and the matching workflow is dispatched through the
-  GitHub API (`POST /repos/{repo}/actions/workflows/{file}/dispatches`, answer 204). Secret `GITHUB_TOKEN` (fine-grained token, one repo, Actions read and write) is set with `wrangler secret put` and is never in a file.
+* The trigger is the owner's existing Cloudflare Worker (the one that starts `compact.yml`; code lives in the Cloudflare dashboard, not in this repo). It reads `event.cron`: the cron "17 6 * * *" starts
+  `daily_chain.yml`, any other cron starts `compact.yml` as before. Both calls are `POST /repos/{owner}/{repo}/actions/workflows/{file}/dispatches` with `{"ref": "main"}` (answer 204), using
+  the Worker's existing secret `GITHUB_PAT` (no second token). The second cron time is added under the Worker's Settings > Triggers > Cron Triggers.
+  If "Daily chain" does not appear in Actions at 06:17 UTC but compaction runs then, the cron text entered in the dashboard does not match the text in the Worker exactly.
 
 First real `api_probe` log (Nov 1, 2026, 21:4x ET), and what v0.7.20 adds to the mode:
 * Known namespaces behaved as expected (retail, classic, classic1x, classicann all 200); the made-up namespace answered 403 on both paths. Of 30 guesses exactly one differed: `forever`

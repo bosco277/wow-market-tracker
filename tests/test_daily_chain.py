@@ -96,21 +96,5 @@ class TestDailyChainWorkflow(unittest.TestCase):
             self.assertNotIn(word.lower(), text.lower())
 
 
-class TestWorkerFiles(unittest.TestCase):
-    """The Worker lives outside this repo; if its folder sits next to the engine (as in the build sandbox) check that cron and workflow name agree."""
-
-    def test_worker_cron_and_workflow_agree(self):
-        wdir = os.path.join(os.path.dirname(_root), "cloudflare-worker")
-        if not os.path.isdir(wdir):
-            self.skipTest("cloudflare-worker folder not next to the engine")
-        js = _read(os.path.join(wdir, "worker.js"))
-        toml = _read(os.path.join(wdir, "wrangler.toml"))
-        keys = re.findall(r'^\s*"([^"]+)":\s*\{\s*workflow:\s*"([^"]+)"', js, flags=re.M)
-        crons = re.findall(r'"([^"]+)"', re.search(r"crons\s*=\s*\[(.*?)\]", toml, flags=re.S).group(1))
-        self.assertEqual(sorted(k for k, _ in keys), sorted(crons))
-        for _, wf in keys:
-            self.assertTrue(os.path.exists(os.path.join(_root, ".github", "workflows", wf)), wf)
-
-
 if __name__ == "__main__":
     unittest.main()
