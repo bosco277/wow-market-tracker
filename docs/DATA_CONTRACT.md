@@ -495,7 +495,7 @@ identifying. They are meant to be run now and again around the Forever launch (N
   FLAGGED when either status differs from that baseline (a 404 on realms but a 200 on item classes, for example, would mean the namespace exists but has no realms, which is
   what a realmless game might look like). Flagged names, and the known ones for comparison, then get: auctions/commodities, auctions/index, realm/index, market/index, a static
   realm index and item 2589, plus the first connected realm's `auctions` and `auctions/index` when a realm list exists. About 80 requests in all. Candidates are in
-  `probe.CANDIDATES` (camelot is in because it is the datamined internal codename; there is no sign of it in any API address so far, so it is a long shot). Typing words into
+  `probe.CANDIDATES` (camelot is in because it is the datamined internal codename; no namespace is called that, but see the Nov 1 note below: the realm names INSIDE the forever namespace start with CAMWOW). Typing words into
   item_ids adds guesses; digits are ignored. This only tests the namespace pattern Blizzard has used for Classic; a Forever API could also arrive as new paths. If a flagged
   namespace answers on auctions, the printed shape is the first look at Forever's listing format and should be checked against checklist items 1, 5 and 8.
 * `ahledger_check` asks api.ahledger.com for its own description (`/openapi.json`, `/swagger.json`, `/docs`, `/`, `/v1`, `/api`, `/api/v1`, `/health`), lists every endpoint with its
@@ -549,3 +549,14 @@ First real `api_probe` log (Nov 1, 2026, 21:4x ET), and what v0.7.20 adds to the
 * v0.7.20: for any flagged namespace the probe now (1) prints the realm names and ids, (2) follows the first three realms through `/data/wow/realm/{slug}`, the connected realm it names,
   `auctions/index`, `auctions` and the first auction house's listing, (3) asks the eu, kr and tw hosts the same realm-index question, (4) prints a plain VERDICT (namespace known, realms,
   static data, auction index reachable, auction LISTINGS reachable). `classic` and `classic1x` get the same follow-up for comparison. Realm names are game data, not account data, so they are printed.
+
+Second `api_probe` log (Nov 1, 2026, ~21:55 ET) and v0.7.21:
+* Same statuses as the first run (still only `forever` flagged; realm index 200, connected-realm records 404, no auction path reachable). New: the 51 realm names, all starting "CAMWOW" (almost
+  certainly Camelot WoW; the earlier "no Camelot in the API" answer had only looked at namespace names). 25 look like game servers ("US1 Realm 1 PvE" .. "Realm 10 RP": clusters US1 10, US2 11,
+  AU1 4; rulesets PvE 9, PvP 9, RP PvP 4, RP 3); 26 look like internal infrastructure (US2 CSI 80-88 and 180-188 = 18, Web x3, GMSS x3, Account, Log). That looks like a staging / test realm list, not the
+  launch market list. EU answers with 26 realms, Taiwan 5, Korea 403.
+* Hypothesis (from beta play: one US PvP server, but a friend showed on "PvP 2" and the user on "PvP"): the realms are SHARDS of one logical server per ruleset, all sharing one market. Test:
+  each realm record names its connected realm (`connected_realm.href`); in Classic a connected realm is what shares one auction house. v0.7.21 reads every realm record and prints how many
+  different connected realms the realms point to, with the ruleset mix of each. Few connected realms for many realms supports the shard idea and tells us how many separate markets (sources) to
+  expect; one connected realm per realm says the list is not grouped (yet). The connected-realm records themselves (`/data/wow/connected-realm/{id}`) still answered 404 on Nov 1.
+* Also printed since v0.7.21: the realm names of the EU / KR / TW namespaces that answer.

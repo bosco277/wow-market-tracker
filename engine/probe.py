@@ -141,6 +141,29 @@ def _dive(get, region, name, sleep, realms):
     return out
 
 
+def _realm_map(get, region, name, sleep, realms, limit=80):
+    """Read every realm record (up to `limit`) and group the realms by the connected realm each one names. In Classic a connected realm is what shares one auction
+    house, so this shows how many separate markets the realm list really holds, before any auction data is served. Game data only: ids, ruleset, timezone."""
+    ok, failed, groups, types = 0, 0, {}, {}
+    for rname, slug, rid in realms[:limit]:
+        st, js = _call(get, region, "dynamic", name, f"/data/wow/realm/{slug}", sleep)
+        if st != 200 or not isinstance(js, dict):
+            failed += 1
+            continue
+        ok += 1
+        m = re.search(r"/connected-realm/(\d+)", str((js.get("connected_realm") or {}).get("href", "")))
+        t = js.get("type")
+        tname = str(t.get("name") or t.get("type") or "") if isinstance(t, dict) else str(t or "")
+        g = groups.setdefault(m.group(1) if m else None, {"cid": m.group(1) if m else None, "realms": 0, "types": {}, "timezones": set(), "categories": set()})
+        g["realms"] += 1
+        g["types"][tname] = g["types"].get(tname, 0) + 1
+        g["timezones"].add(str(js.get("timezone", "")))
+        g["categories"].add(str(js.get("category", "")))
+        types[tname] = types.get(tname, 0) + 1
+    ordered = sorted(groups.values(), key=lambda g: (-g["realms"], str(g["cid"])))
+    return {"read": ok, "failed": failed, "groups": ordered, "types": types}
+
+
 def _auction_evidence(items):
     """(index_reachable, listings_reachable) from deep entries: a 200 whose shape holds an `auctions` list. The auction-house INDEX only names the houses;
     a listing is any other auctions path (commodities, a realm's auctions, one house's auctions)."""
@@ -169,7 +192,7 @@ def blizzard_probe(get, region="us", extra=(), sleep=time.sleep):
         if any(res[p][0] not in (0, baseline[p][0]) for p in paths):
             flagged.append(name)
     token_ok = controls["retail"][paths[1]][0] == 200
-    deep, names_found, regions, verdicts = {}, {}, {}, {}
+    deep, names_found, regions, verdicts, realm_maps, region_names = {}, {}, {}, {}, {}, {}
     if token_ok:
         for c in CONTROLS:
             key = c or "retail"
@@ -182,15 +205,18 @@ def blizzard_probe(get, region="us", extra=(), sleep=time.sleep):
             realms = _realm_list(rjs)
             names_found[name] = realms
             deep[name] += _dive(get, region, name, sleep, realms)
-            regions[name] = {}
+            realm_maps[name] = _realm_map(get, region, name, sleep, realms)
+            regions[name], region_names[name] = {}, {}
             for rg in OTHER_REGIONS:
                 st, j = _call(get, rg, "dynamic", name, "/data/wow/realm/index", sleep)
                 regions[name][rg] = (st, len(_realm_list(j)) if st == 200 else None)
+                region_names[name][rg] = [n for n, _, _ in _realm_list(j)]
             index, listings = _auction_evidence(deep[name])
             verdicts[name] = {"realms": len(realms) if realms else None, "static_items": rows[name][paths[0]], "auction_index": index, "auction_listings": listings}
     return {"region": region, "paths": paths, "controls": {k: {p: v[p][0] for p in paths} for k, v in controls.items()},
             "baseline": {p: baseline[p][0] for p in paths}, "rows": rows, "flagged": flagged, "deep": deep, "errors": errors,
-            "token_ok": token_ok, "tried": names, "names": names_found, "regions": regions, "verdicts": verdicts}
+            "token_ok": token_ok, "tried": names, "names": names_found, "regions": regions, "verdicts": verdicts,
+            "realm_maps": realm_maps, "region_names": region_names}
 
 
 def format_blizzard(res):
@@ -229,6 +255,22 @@ def format_blizzard(res):
         names = res.get("names", {}).get(name) or []
         if names:
             out.append(f"  Realms in dynamic-{name}-{region} ({len(names)}): " + ", ".join(f"{n} [{i}]" for n, _, i in names[:80]) + (" ..." if len(names) > 80 else ""))
+        rm = res.get("realm_maps", {}).get(name)
+        if rm and rm["read"]:
+            gs = rm["groups"]
+            out.append(f"  Realm map: {rm['read']} realm records read" + (f" ({rm['failed']} could not be read)" if rm["failed"] else "") + f", pointing to {len(gs)} different connected realms"
+                       " (in Classic a connected realm is one shared auction house). Realm types: " + ", ".join(f"{t or '?'} {n}" for t, n in sorted(rm["types"].items(), key=lambda kv: -kv[1])) + ".")
+            if all(g["realms"] == 1 for g in gs):
+                out.append("    Every realm points to its own connected realm: no realms share an auction house in this list.")
+            else:
+                for g in gs[:25]:
+                    out.append(f"    connected realm {g['cid'] or '(none named)'}: {g['realms']} realms; types " + ", ".join(f"{t or '?'} {n}" for t, n in sorted(g["types"].items(), key=lambda kv: -kv[1]))
+                               + "; timezone " + "/".join(sorted(g["timezones"])) + "; category " + "/".join(sorted(g["categories"])))
+                if len(gs) > 25:
+                    out.append(f"    ... and {len(gs) - 25} more connected realms")
+        for rg, rnames in (res.get("region_names", {}).get(name) or {}).items():
+            if rnames:
+                out.append(f"  Realms in dynamic-{name}-{rg} ({len(rnames)}): " + ", ".join(rnames[:60]) + (" ..." if len(rnames) > 60 else ""))
     for name, items in res["deep"].items():
         tag = "(known, for comparison)" if name in [c or "retail" for c in CONTROLS] else "(flagged)"
         out.append(f"\n-- {name} {tag} --")

@@ -273,7 +273,8 @@ class TestForeverFollowUp(unittest.TestCase):
         for i in range(3):
             self.assertIn(f"/data/wow/realm/market-{i}", paths)                                   # the first three realms are followed
             self.assertIn(f"/data/wow/connected-realm/{9000 + i}/auctions/index", paths)           # via the connected realm id the realm names
-        self.assertNotIn("/data/wow/realm/market-3", paths)
+        self.assertIn("/data/wow/realm/market-5", paths)                                          # the realm map reads every record
+        self.assertFalse(any(x.startswith("/data/wow/connected-realm/9003") for x in paths))        # but only the first three realms are followed into auctions
         v = res["verdicts"]["forever"]
         self.assertEqual((v["realms"], v["static_items"], v["auction_index"], v["auction_listings"]), (6, 403, False, False))
         self.assertEqual(res["regions"]["forever"], {"eu": (200, 2), "kr": (403, None), "tw": (403, None)})
@@ -312,6 +313,60 @@ class TestForeverFollowUp(unittest.TestCase):
         res = P.blizzard_probe(FakeBlizz(world), sleep=NOSLEEP)
         self.assertEqual(res["verdicts"]["forever"]["realms"], None)
         self.assertIn("not listed", P.format_blizzard(res))
+
+
+def shard_world(n=6):
+    """Six realm records in three rulesets sharing connected realms: PvE x3 -> 9000, PvP x2 -> 9001, RP x1 -> 9002 (the shard idea: several realms, one market)."""
+    layout = [("PvE", 9000), ("PvP", 9001), ("PvE", 9000), ("PvP", 9001), ("PvE", 9000), ("RP", 9002)]
+    realms = [{"id": 5000 + i, "name": f"Shard {i}", "slug": f"shard-{i}", "key": {"href": "x"}} for i in range(n)]
+    dyn = {"/data/wow/realm/index": (200, {"realms": realms})}
+    for i, (typ, cid) in enumerate(layout[:n]):
+        dyn[f"/data/wow/realm/shard-{i}"] = (200, {"id": 5000 + i, "name": f"Shard {i}", "type": {"type": typ.upper(), "name": typ}, "category": "Forever", "timezone": "America/New_York",
+                                                   "locale": "enUS", "connected_realm": {"href": f"https://us.api.blizzard.com/data/wow/connected-realm/{cid}?namespace=dynamic-forever-us"}})
+    return {"dynamic-forever-us": dyn}
+
+
+class TestRealmMap(unittest.TestCase):
+    def test_realms_are_grouped_by_the_connected_realm_they_name(self):
+        res = P.blizzard_probe(FakeBlizz(shard_world()), sleep=NOSLEEP)
+        rm = res["realm_maps"]["forever"]
+        self.assertEqual((rm["read"], rm["failed"]), (6, 0))
+        self.assertEqual([(g["cid"], g["realms"]) for g in rm["groups"]], [("9000", 3), ("9001", 2), ("9002", 1)])
+        self.assertEqual(rm["types"], {"PvE": 3, "PvP": 2, "RP": 1})
+        self.assertEqual(rm["groups"][0]["types"], {"PvE": 3})
+        text = P.format_blizzard(res)
+        self.assertIn("6 realm records read, pointing to 3 different connected realms", text)
+        self.assertIn("connected realm 9000: 3 realms; types PvE 3; timezone America/New_York; category Forever", text)
+        self.assertIn("Realm types: PvE 3, PvP 2, RP 1", text)
+        self.assertNotIn("Every realm points to its own connected realm", text)
+
+    def test_when_nothing_is_shared_it_says_so_in_one_line(self):
+        world = shard_world()
+        for i in range(6):
+            r = world["dynamic-forever-us"][f"/data/wow/realm/shard-{i}"][1]
+            r["connected_realm"]["href"] = f"https://us.api.blizzard.com/data/wow/connected-realm/{9100 + i}"
+        res = P.blizzard_probe(FakeBlizz(world), sleep=NOSLEEP)
+        self.assertEqual(len(res["realm_maps"]["forever"]["groups"]), 6)
+        text = P.format_blizzard(res)
+        self.assertIn("pointing to 6 different connected realms", text)
+        self.assertIn("Every realm points to its own connected realm", text)
+        self.assertNotIn("connected realm 9100:", text)
+
+    def test_unreadable_records_are_counted_and_other_regions_names_are_listed(self):
+        world = shard_world()
+        del world["dynamic-forever-us"]["/data/wow/realm/shard-5"]
+        world["dynamic-forever-eu"] = {"/data/wow/realm/index": (200, {"realms": [{"id": 1, "name": "Euro 1", "slug": "euro-1"}, {"id": 2, "name": "Euro 2", "slug": "euro-2"}]})}
+        res = P.blizzard_probe(FakeBlizz(world), sleep=NOSLEEP)
+        rm = res["realm_maps"]["forever"]
+        self.assertEqual((rm["read"], rm["failed"]), (5, 1))
+        text = P.format_blizzard(res)
+        self.assertIn("(1 could not be read)", text)
+        self.assertIn("Realms in dynamic-forever-eu (2): Euro 1, Euro 2", text)
+        self.assertEqual(res["region_names"]["forever"]["kr"], [])
+
+    def test_known_namespaces_get_no_realm_map(self):
+        res = P.blizzard_probe(FakeBlizz(), sleep=NOSLEEP)
+        self.assertEqual(res["realm_maps"], {})
 
 
 class TestCommands(unittest.TestCase):
