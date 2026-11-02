@@ -259,7 +259,7 @@ class TestRunner(unittest.TestCase):
         for rel in (".github/workflows/pick_items.yml", "tools/pick_items.yml"):
             with open(os.path.join(_root, rel)) as f:
                 text = f.read()
-            self.assertIn("forecast_test, target_test, forecast_hourly]", text)
+            self.assertIn("forecast_test", text.split("options:")[1].splitlines()[0])
             self.assertIn("inputs.mode != 'forecast_test'", text)
             self.assertIn("boto3 scipy", text)      # SARIMA needs scipy on the runner
 
@@ -592,7 +592,7 @@ class TestHourlyRunner(unittest.TestCase):
         for rel in (".github/workflows/pick_items.yml", "tools/pick_items.yml"):
             with open(os.path.join(_root, rel)) as f:
                 text = f.read()
-            self.assertIn("forecast_hourly]", text)
+            self.assertIn("forecast_hourly", text.split("options:")[1].splitlines()[0])
             self.assertIn("inputs.mode != 'forecast_hourly'", text)
         with open(os.path.join(_root, "tools", "lake.py")) as f:
             src = f.read()

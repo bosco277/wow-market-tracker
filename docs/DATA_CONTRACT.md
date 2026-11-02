@@ -625,6 +625,30 @@ First real `forecast_hourly` log (v0.7.27, Nov 2, 2026; 2,998 items, 187 clock h
 * v0.7.28: burn-in for hourly is now counted in real readings an item has had (`Cfg.age_by_obs`; testing starts once half of the items are burned in); both bake-offs print a BEST GUESS BY PRICE LEVEL table (under 1g /
   1g to 10g / 10g to 100g / 100g and up, by each item's median price) so the result can be checked on items worth trading.
 
+First real `forecast_hourly` price-level split (v0.7.28 log, Nov 2, 2026; same 2,998 items): the average miss of "stays put" falls steeply with price: 1 hour 20.2% (under 1g) / 11.8% (1-10g) / 7.1% (10-100g) /
+3.7% (100g and up); 4 hours 43 / 26 / 17 / 8.8%; 12 hours 73 / 45 / 30 / 17%; 24 hours 95 / 62 / 41 / 25%. Nothing beats it at any horizon for 100g and up; 10-100g gains 5% only at 24 hours; the 4-11% pullback gains
+at 12-24 hours sit in items under 10g (so the earlier crafting-materials gain is mostly a cheap-item story). Stock gains 4-8% at 12-24 hours in every price tier. The burn-in fix changed nothing (hour_of_day 1.65 / 1.14 /
+1.00 / 0.96 again), so there is no daily price rhythm in the floors. hit80 stays 0.79-0.82. The "exactly 10.00%" worry was a coincidence (10.29% now). Reading: for items worth trading the forecast is today's price
+plus an honest range; the edge is in range width and sell speed, not in predicting direction.
+
+### 2r. Forecast ledger (engine/ledger.py, `tools/lake.py forecast_ledger`; v0.7.29)
+The live record the bake-off cannot give: guesses are written down with ranges BEFORE the day happens and graded against our own daily price (`item_daily.price_day`, complete days only) when it arrives. Run it
+after mode `daily`, once a day, with upload ticked. Reads item_daily, market_history (Undermine) and forecast_ledger; writes only engine/forecast_ledger.parquet in the private dataset; prints group-level numbers only.
+* Table `forecast_ledger` (one row per origin day x item x horizon x method; never rewritten except `actual` being filled in): made_day (the origin: latest day on which at least half as many items are complete as
+  on the best-covered day), item_id, horizon (1, 3 or 7 days), method, guess (gold), lo50 / hi50 / lo80 / hi80 (gold), origin (price on the origin day), jump_bin (1 calmest to 5 jumpiest at the time), target_day,
+  actual (gold, empty until the target day has 18+ usable hours), made_at (UTC), engine_version.
+* Methods side by side: naive (stays put), ema25 (exponential average, weight 0.25), kinked (the bake-off's pooled regression with separate slopes for small moves and spikes, fitted on the Undermine history before its last
+  180 days and applied to OUR series: the test of whether retail-trained coefficients transfer). Eligibility: observed days in the last 14: naive 5, ema25 7, kinked 12 (and 4 day-to-day changes for the jumpiness level).
+* Ranges: for each (method, horizon) the q10 / q25 / q75 / q90 of that method's misses over the last 180 days of the Undermine history, kept apart for five jumpiness levels (edges from the same window). A PRIOR: Undermine's
+  price is not exactly our price (ours is a median of hourly floors and was about 1.1x calmer), so the scoreboard's hit50 / hit80 on our own series are the check. Recalibrating from our own graded misses is the next step once
+  a few weeks of grades exist.
+* Honesty rules (all tested): only days up to the origin are used (later days are cut off before any model sees them); a row is not written when the item's target day is already complete; a graded row is never changed;
+  a second run on the same origin day writes nothing; the target day must be complete (18+ usable hours) to grade.
+* Output: a status line, the prior 80% range widths for naive, rows written, a SCOREBOARD per horizon and method (cases, items, miss_pct, avg_pct, vs_naive on exactly the same cases, bias_pct, hit50, hit80, width80_pct), the
+  same by price level (under 1g / 1g-10g / 10g-100g / 100g and up, from the origin price), and what is still waiting for its day.
+* Timeline on retail: first guesses today (naive for items with 5+ observed days), ema25 from about Nov 3, kinked from about Nov 7; +1 day grades the next day, +3 after three, +7 after a week. On Forever the same table starts
+  at launch: items younger than 24 days belong to the launch forecaster (engine/launch.py), and this ledger takes over per item once it has the days.
+
 First real `api_probe` log (Nov 1, 2026, 21:4x ET), and what v0.7.20 adds to the mode:
 * Known namespaces behaved as expected (retail, classic, classic1x, classicann all 200); the made-up namespace answered 403 on both paths. Of 30 guesses exactly one differed: `forever`
   (`static-forever-us` item classes 403, `dynamic-forever-us` connected-realm index 404). `camelot` and every other guess matched the made-up one.

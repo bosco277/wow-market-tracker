@@ -1254,6 +1254,11 @@ def run_forecast_test(store, args, read_table=None):
     return out
 
 
+def _width_pct(x):
+    """A log10 width as a percent of the price."""
+    return (10.0 ** float(x) - 1.0) * 100.0
+
+
 def run_forecast_hourly(store, args, reader=None, read_table=None):
     """The forecast bake-off on OUR OWN hourly snapshots: the last reading in each US Eastern clock hour, for the items in engine/items (plus --ids), guessed 1, 4, 12 and 24 hours ahead
     with the same candidates as the daily test, the weekday pattern replaced by an hour-of-day pattern. Also says whether the items share a daily cycle at all. Only a week or two of
@@ -1344,6 +1349,79 @@ def run_forecast_hourly(store, args, reader=None, read_table=None):
     if not out:
         print("The hourly readings are too thin for a forecast test.")
     return out
+
+
+def run_forecast_ledger(store, args, read_table=None):
+    """The live forecast record. Reads our daily table (engine/item_daily, from mode daily) and the Undermine history (engine/market_history), grades every earlier guess whose day has now arrived,
+    then writes new guesses for 1, 3 and 7 days ahead from the latest well-covered complete day: stays put, a 25% exponential average, and the retail-trained spike-pullback regression, each with
+    50% and 80% ranges. Prints a group-level scoreboard (nothing item-level). Tick upload to keep the ledger (engine/forecast_ledger in the private dataset). Run it after mode daily, once a day."""
+    from engine import ledger as LG
+    read_table = read_table or _read_engine_table
+    daily, hist, old = read_table("item_daily"), read_table("market_history"), read_table("forecast_ledger")
+    if daily is None or daily.empty:
+        print("engine/item_daily.parquet is missing: run mode daily (upload ticked) first.")
+        return {}
+    old = old if old is not None and len(old) else LG._empty()
+    own = LG.own_grid(daily)
+    new, cal = LG._empty(), None
+    print("FORECAST LEDGER: every guess is written down with its range before the day happens, then graded against what really happened (our own daily price, mode daily).")
+    if own is None:
+        print("No complete days in item_daily yet (a day needs 18+ usable hours).")
+    elif hist is None or hist.empty:
+        print("engine/market_history.parquet is missing, so there is nothing to calibrate the ranges on: run mode undermine (upload ticked). Grading still runs; no new guesses today.")
+    else:
+        cal = LG.calibrate(hist)
+        if cal is None:
+            print("The Undermine history is too thin to calibrate ranges, so no new guesses today. Grading still runs.")
+        else:
+            t0 = LG.origin_index(own[2])
+            print(f"Origin day: {own[1][t0]:%Y-%m-%d} (the latest day with at least half of the best-covered day's items complete; {int(np.isfinite(own[2][:, t0]).sum())} items). Only days up to it are used.")
+            new = LG.make_forecasts(own, cal)
+    merged = LG.merge(old, new)
+    added = len(merged) - len(old)
+    merged, graded_now = LG.grade(merged, daily)
+    if cal is not None:
+        print(f"Ranges: the last {LG.CAL_DAYS} days of Undermine's history ({cal['first']:%Y-%m-%d} to {cal['last']:%Y-%m-%d}, {cal['items']} items) set the size of the misses, kept apart for five levels of recent jumpiness. "
+              "The kinked regression is fitted on the days before that window. These are priors: Undermine's price is not exactly ours, so hit50 / hit80 below say whether they hold on our series.")
+        wid = []
+        for h in LG.HORIZONS:
+            q = cal["q"].get(("naive", h))
+            if q is not None:
+                wid.append({"horizon": h, **{f"jump{b + 1}": round(_width_pct(q[b, 3] - q[b, 0]), 1) for b in range(len(q))}})
+        if wid:
+            print("\n-- PRIOR 80% RANGE WIDTH for 'stays put', percent of the price, by recent jumpiness (1 = calmest fifth, 5 = jumpiest) --")
+            print(pd.DataFrame(wid).to_string(index=False))
+    print(f"\nLedger: {len(old):,} rows before, {added:,} written now, {graded_now:,} graded now, {len(merged):,} after.")
+    if added:
+        w = new.groupby(["horizon", "method"]).agg(rows=("item_id", "size"), items=("item_id", "nunique")).reset_index()
+        print("\n-- WRITTEN NOW (stays put needs 5 observed days of the last 14, ema25 needs 7, kinked needs 12; the target day must not be complete yet) --")
+        print(w.to_string(index=False))
+    elif cal is not None:
+        print("Nothing new was written: this origin day is already in the ledger, or no item has enough days yet.")
+    sb = LG.scoreboard(merged)
+    if sb.get("graded"):
+        print(f"\n-- SCOREBOARD: {sb['graded']:,} graded guesses; origins {sb['origins'][0]} to {sb['origins'][1]}, last graded target day {sb['last_target']} --")
+        print("   miss_pct = typical miss as a percent of the price; avg_pct = average miss; vs_naive = average miss / naive's on exactly the same cases (below 1.00 beats 'it stays put');")
+        print("   bias_pct = typical signed miss (positive = the real price ran ABOVE the guess); hit50 / hit80 = how often the real price fell inside the 50% / 80% range (should be near 0.50 / 0.80). --")
+        print(sb["overall"].round(2).to_string(index=False))
+        lv = sb.get("levels")
+        if lv is not None and len(lv):
+            print("\n-- SCOREBOARD BY PRICE LEVEL (the item's price on the origin day) --")
+            print(lv.round(2).to_string(index=False))
+    else:
+        print("\nNothing graded yet: the first guesses are graded when their day is complete in item_daily (run mode daily, then this mode again).")
+    wt = sb.get("waiting")
+    if wt is not None and len(wt):
+        print("\n-- STILL WAITING FOR THEIR DAY --")
+        print(wt.to_string(index=False))
+    if getattr(args, "upload", False):
+        if added or graded_now:
+            _store_private({"forecast_ledger": merged}, "forecast ledger", True)
+        else:
+            print("Nothing changed, so nothing was uploaded.")
+    elif added or graded_now:
+        print("\nNot saved (tick upload to keep the ledger; without it these guesses are lost).")
+    return {"ledger": merged, "scoreboard": sb, "added": added, "graded": graded_now}
 
 
 def run_target_test(store, args, read_table=None):
@@ -1627,7 +1705,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now", "forecast_test", "target_test", "forecast_hourly"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now", "forecast_test", "target_test", "forecast_hourly", "forecast_ledger"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -1648,8 +1726,8 @@ def main(argv=None):
     ap.add_argument("--upload", action="store_true", help="derive: push the tables to engine/ in the HF repo")
     ap.add_argument("--batch", type=int, default=800, help="undermine: most items to fetch in one run (3 points each; the budget is 3,000 per hour)")
     args = ap.parse_args(argv)
-    store = None if args.command in ("ledger", "groups", "grouptest", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now", "forecast_test", "target_test") else make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily, "undermine": run_undermine, "undermine_check": run_undermine_check, "undermine_test": run_undermine_test, "api_probe": run_api_probe, "ahledger_check": run_ahledger_check, "launch_backtest": run_launch_backtest, "launch_now": run_launch_now, "forecast_test": run_forecast_test, "target_test": run_target_test, "forecast_hourly": run_forecast_hourly}[args.command](store, args)
+    store = None if args.command in ("ledger", "groups", "grouptest", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now", "forecast_test", "target_test", "forecast_ledger") else make_store(args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily, "undermine": run_undermine, "undermine_check": run_undermine_check, "undermine_test": run_undermine_test, "api_probe": run_api_probe, "ahledger_check": run_ahledger_check, "launch_backtest": run_launch_backtest, "launch_now": run_launch_now, "forecast_test": run_forecast_test, "target_test": run_target_test, "forecast_hourly": run_forecast_hourly, "forecast_ledger": run_forecast_ledger}[args.command](store, args)
 
 
 if __name__ == "__main__":
