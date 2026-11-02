@@ -1,0 +1,74 @@
+name: Daily chain
+
+# The two daily jobs, one after the other, so a scheduler only has to start ONE workflow:
+#   1. mode daily           adds the last few days to the permanent per-item history (engine/item_daily in the private dataset)
+#   2. mode forecast_ledger grades every earlier guess whose day has now arrived and writes new guesses (engine/forecast_ledger)
+# It has no schedule of its own: start it once a day from your scheduler (the Cloudflare Worker) at 06:17 UTC. The US Eastern day ended at 05:00 UTC
+# (04:00 UTC in summer time) and its last hourly file is on the Hugging Face mirror well before 06:17, so the day is complete when this runs.
+# You can also run it by hand from the Actions tab. Safe to run twice: days are merged (the row with more usable hours wins) and a ledger row is written once.
+# If step 1 fails the job stops and step 2 does not run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Days to re-read for the daily history (4 also repairs up to 3 missed runs)"
+        default: "4"
+      end_date:
+        description: "Last UTC date to read, YYYY-MM-DD (blank = today)"
+        default: ""
+
+# Never two chains at once: both steps write to the private dataset.
+concurrency:
+  group: daily-chain
+  cancel-in-progress: false
+
+jobs:
+  chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pandas numpy pyarrow requests tabulate huggingface_hub boto3 scipy
+
+      # Same download cache as the Market tools workflow, so files fetched there are not downloaded again here.
+      - name: Restore downloaded files
+        uses: actions/cache/restore@v4
+        with:
+          path: .lake_cache
+          key: lake-cache-${{ github.run_id }}
+          restore-keys: lake-cache-
+
+      - name: Daily history
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DAYS: ${{ inputs.days || '4' }}
+          END: ${{ inputs.end_date }}
+        run: |
+          set -o pipefail
+          mkdir -p out
+          EXTRA=""
+          if [ -n "$END" ]; then EXTRA="--end $END"; fi
+          python tools/lake.py daily --upload $EXTRA --store hf --days "$DAYS" | tee out_daily.txt
+          { echo '### daily'; echo '```'; cat out_daily.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Forecast ledger
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -o pipefail
+          python tools/lake.py forecast_ledger --upload --store hf | tee out_ledger.txt
+          { echo '### forecast_ledger'; echo '```'; cat out_ledger.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save downloaded files
+        if: ${{ always() }}
+        uses: actions/cache/save@v4
+        with:
+          path: .lake_cache
+          key: lake-cache-${{ github.run_id }}

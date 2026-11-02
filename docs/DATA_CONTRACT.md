@@ -649,6 +649,14 @@ after mode `daily`, once a day, with upload ticked. Reads item_daily, market_his
 * Timeline on retail: first guesses today (naive for items with 5+ observed days), ema25 from about Nov 3, kinked from about Nov 7; +1 day grades the next day, +3 after three, +7 after a week. On Forever the same table starts
   at launch: items younger than 24 days belong to the launch forecaster (engine/launch.py), and this ledger takes over per item once it has the days.
 
+### 2s. Daily schedule (v0.7.30)
+* `.github/workflows/daily_chain.yml` (identical copy in `tools/`) runs mode `daily` (default `--days 4`, so a run also repairs up to three missed ones) and then mode `forecast_ledger`, both with `--upload --store hf`.
+  Manual start only (`workflow_dispatch`, inputs `days` and `end_date`); concurrency group `daily-chain`, never two at once; step 2 does not run if step 1 fails. Needs only the `HF_TOKEN` secret.
+* Start time: 06:17 UTC every day. The US Eastern day ends at 05:00 UTC (04:00 UTC in summer time), its last snapshot is published about :31 past the hour and fetched about :01 after, so the day is on the
+  Hugging Face mirror by about 05:05 UTC; 06:17 leaves an hour of slack and avoids the top of the hour, when scheduled jobs queue up. 06:17 UTC is 1:17 AM Eastern now and 2:17 AM after the March change.
+* The trigger is a Cloudflare Worker (`cloudflare-worker/worker.js`, `wrangler.toml`), not in this repo: its cron string "17 6 * * *" is looked up in a JOBS table and the matching workflow is dispatched through the
+  GitHub API (`POST /repos/{repo}/actions/workflows/{file}/dispatches`, answer 204). Secret `GITHUB_TOKEN` (fine-grained token, one repo, Actions read and write) is set with `wrangler secret put` and is never in a file.
+
 First real `api_probe` log (Nov 1, 2026, 21:4x ET), and what v0.7.20 adds to the mode:
 * Known namespaces behaved as expected (retail, classic, classic1x, classicann all 200); the made-up namespace answered 403 on both paths. Of 30 guesses exactly one differed: `forever`
   (`static-forever-us` item classes 403, `dynamic-forever-us` connected-realm index 404). `camelot` and every other guess matched the made-up one.
