@@ -1169,6 +1169,69 @@ def run_launch_now(store, args, read_table=None):
     return rep
 
 
+def run_forecast_test(store, args, read_table=None):
+    """The forecast bake-off. From the Undermine history (mode undermine) and the item groups: for SETTLED items, guesses the price (and the units listed) 1, 3 and 7 days
+    ahead with a handful of simple methods, using only the days before each guess, and grades every method against what really happened: typical miss, miss against
+    'it stays put', bias, big-miss rate, direction hit rate, and whether the error bars hold. Group-level numbers only; nothing item-level is printed or saved."""
+    from engine import forecast as FO
+    read_table = read_table or _read_engine_table
+    hist, groups = read_table("market_history"), read_table("item_groups")
+    if hist is None or hist.empty:
+        print("engine/market_history.parquet is missing: run mode undermine (upload ticked) first.")
+        return {}
+    out, shown = {}, False
+    cols = ["model", "miss_pct", "avg_pct", "vs_naive", "wape", "wape_med", "bias_pct", "track", "rmse_pct", "p95_pct", "big_pct", "dir_hit", "dir_n", "hit50", "hit80", "width80_pct"]
+    for metric, title in (("price", "PRICE"), ("stock", "STOCK (units listed)")):
+        r = FO.bake_off(hist, groups, metric)
+        if not r:
+            print(f"\n({title} skipped: fewer than {FO.MIN_SPAN} dated days, or no item with {FO.MIN_ITEM_DAYS}+ days of history.)")
+            continue
+        out[metric] = r
+        if not shown:
+            shown = True
+            f0, f1 = r["folds"][0][0], r["folds"][-1][1]
+            print(f"FORECAST BAKE-OFF: {r['items']} items, {r['first']:%Y-%m-%d} to {r['last']:%Y-%m-%d} (daily). Price = the day's lowest price and stock = units listed at the day's busiest snapshot, NOT sales.")
+            print(f"Only SETTLED items are scored (an item counts from day {FO.WARMUP} of its life; the launch forecaster owns the first weeks). Survivorship: only items still traded today are here.")
+            print(f"How it is graded: the history is cut into {FO.FOLDS} test stretches ({f0:%Y-%m-%d} to {f1:%Y-%m-%d}). Every guess uses only the days before it, ranges are calibrated on days before the stretch,")
+            print("and the guess is compared with what happened. Every method is scored on exactly the same cases. Retail is the test bed; Forever has to earn its own track record.")
+            print("naive = tomorrow equals today. week_ago = same weekday last week. median7 = median of the last 7 days. ema50 / ema25 / ema10 = exponential averages (fast / medium / slow).")
+            print("weekday = an exponential average plus a learned weekday pattern. sarima = SARIMA(p,d,q)(P,D,Q)7 fitted per item on the days before each stretch, the best of four specs by AIC")
+            print("(conditional least squares, engine/sarima.py; a failed fit falls back to ema25). pooled = one regression across all items. pooled_grp = pooled plus how far the item's group peers sit from their own averages today.")
+            print("miss_pct = typical (median) miss as a percent of the price; avg_pct = average miss; vs_naive = average miss / naive's average miss (below 1.00 beats 'it stays put').")
+            print("wape = total miss / total real value, all items pooled (pricey items weigh most); wape_med = the same for the median item. bias_pct = typical signed miss (positive = the real price ran ABOVE the guess);")
+            print("track = average signed miss / average miss (+1 always too low, -1 always too high, near 0 = no lean). rmse_pct and p95_pct are the safety grades: rmse punishes big misses,")
+            print("p95 = one case in twenty misses by at least this much; big_pct = share of cases missed by more than 25%. dir_hit = when the guess said 3%+ up or down from today, how often the price")
+            print("moved the same way (dir_n cases; about 0.50 = a coin flip). hit50 / hit80 = how often the real value fell inside the middle-50% / middle-80% range (should be near 0.50 / 0.80);")
+            print("width80_pct = the typical width of the 80% range as a percent of the price. Ranges come from each method's own past misses, kept apart for five levels of recent jumpiness.")
+        if r.get("sarima_note"):
+            print(f"\n{r['sarima_note']}")
+        elif r.get("sarima_info"):
+            fits = sum(i["fitted"] for i in r["sarima_info"])
+            fails = sum(i["failed"] for i in r["sarima_info"])
+            mix = {}
+            for i in r["sarima_info"]:
+                for sp, c in i["specs"].items():
+                    mix[sp] = mix.get(sp, 0) + c
+            names = {(1, 0, 1, 1, 0, 1): "ARMA(1,1)x(1,1) around a fixed level", (0, 1, 1, 0, 0, 1): "local level + weekly MA", (0, 1, 1, 0, 1, 1): "airline model", (1, 1, 1, 1, 0, 1): "damped trend + weekly parts"}
+            print(f"\n{title}: SARIMA fitted {fits} item-fits ({fails} fell back to ema25). Specs picked by AIC: " + ", ".join(f"{names.get(sp, str(sp))} {c}" for sp, c in sorted(mix.items(), key=lambda kv: -kv[1])) + ".")
+        t = r["summary"]
+        for h in FO.HORIZONS:
+            th = t[t["horizon"] == h]
+            if th.empty:
+                continue
+            print(f"\n-- {title}: {h} day{'s' if h > 1 else ''} ahead ({int(th['rows'].iloc[0]):,} cases, {int(th['items'].max())} items) --")
+            print(th[cols].round(2).to_string(index=False))
+        print(f"\n-- {title}: BEST GUESS PER HORIZON (naive unless another method's average miss is {int(FO.BEAT * 100)}%+ smaller) --")
+        print("  " + ", ".join(f"{h} day{'s' if h > 1 else ''}: {r['best'][h]}" for h in FO.HORIZONS if h in r["best"]))
+        fam = r.get("family")
+        if fam is not None and len(fam):
+            print(f"\n-- {title}: BEST GUESS BY FAMILY (naive_pct = naive's average miss; best_pct = the best method's; vs_naive below 1.00 = it helps) --")
+            print(fam.round(2).to_string(index=False))
+    if not out:
+        print("The stored history is too thin for a forecast test.")
+    return out
+
+
 def run_undermine_test(store, args, read_table=None):
     """Part 4 of the group test, on the long Undermine history stored by mode undermine: weekday rhythm of price and stock, whether items in a group move together over
     years, and how fresh items settle after they first appear. Group-level numbers only; writes no files (Undermine data stays in the private dataset)."""
@@ -1394,7 +1457,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now", "forecast_test"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -1415,8 +1478,8 @@ def main(argv=None):
     ap.add_argument("--upload", action="store_true", help="derive: push the tables to engine/ in the HF repo")
     ap.add_argument("--batch", type=int, default=800, help="undermine: most items to fetch in one run (3 points each; the budget is 3,000 per hour)")
     args = ap.parse_args(argv)
-    store = None if args.command in ("ledger", "groups", "grouptest", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now") else make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily, "undermine": run_undermine, "undermine_check": run_undermine_check, "undermine_test": run_undermine_test, "api_probe": run_api_probe, "ahledger_check": run_ahledger_check, "launch_backtest": run_launch_backtest, "launch_now": run_launch_now}[args.command](store, args)
+    store = None if args.command in ("ledger", "groups", "grouptest", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now", "forecast_test") else make_store(args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily, "undermine": run_undermine, "undermine_check": run_undermine_check, "undermine_test": run_undermine_test, "api_probe": run_api_probe, "ahledger_check": run_ahledger_check, "launch_backtest": run_launch_backtest, "launch_now": run_launch_now, "forecast_test": run_forecast_test}[args.command](store, args)
 
 
 if __name__ == "__main__":

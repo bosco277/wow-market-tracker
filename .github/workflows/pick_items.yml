@@ -34,6 +34,9 @@ name: Market tools
 #              the stored Undermine history; tick upload to keep the prior table (engine/launch_prior) for launch_now and for Forever. Group-level numbers only.
 #   launch_now  applies that prior to items that are young in OUR daily table (engine/item_daily): settled-price range per family and for the most-listed young items.
 #              On Forever: run daily from launch day, then this. No files saved.
+#   forecast_test  the forecast bake-off on SETTLED items: guess price (and units listed) 1, 3 and 7 days ahead with simple methods (yesterday's value, averages, a weekday
+#              pattern, a pooled regression with and without group peers), grade each against what happened, and say whether the error bars hold. Reads the stored
+#              Undermine history; no points used; group-level numbers only; no files saved.
 #   groups  builds the item-groups table (class, subclass, vendor price) from Blizzard's item data; use item_ids to add items; tick upload to publish it
 #   ledger  reads your Journalator.lua from the PRIVATE dataset (log_path = hf:system/Journalator.lua): real profit per flip, deposits, every
 #           listing's outcome. Needs no snapshots. Names are never printed; tick upload to store the tables in engine/ of the private dataset
@@ -44,7 +47,7 @@ on:
       mode:
         description: "What to run"
         type: choice
-        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger, groups, grouptest, daily, undermine, undermine_check, undermine_test, api_probe, ahledger_check, launch_backtest, launch_now]
+        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger, groups, grouptest, daily, undermine, undermine_check, undermine_test, api_probe, ahledger_check, launch_backtest, launch_now, forecast_test]
         default: pick
       days:
         description: "How many days of data to load (pick looks back 72 h, so 4 or more)"
@@ -96,7 +99,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install
-        run: pip install pandas numpy pyarrow requests tabulate huggingface_hub boto3
+        run: pip install pandas numpy pyarrow requests tabulate huggingface_hub boto3 scipy
 
       # Downloaded snapshot files are kept between runs. They are saved even if the run fails or times out, so a retry
       # does not start the downloads from zero.
@@ -145,7 +148,7 @@ jobs:
 
       - name: Save results
         # the ledger is personal, and Undermine data is not ours to republish: both go only to the private dataset, never to a downloadable file
-        if: ${{ inputs.mode != 'ledger' && inputs.mode != 'undermine' && inputs.mode != 'undermine_check' && inputs.mode != 'undermine_test' && inputs.mode != 'api_probe' && inputs.mode != 'ahledger_check' && inputs.mode != 'launch_backtest' && inputs.mode != 'launch_now' }}
+        if: ${{ inputs.mode != 'ledger' && inputs.mode != 'undermine' && inputs.mode != 'undermine_check' && inputs.mode != 'undermine_test' && inputs.mode != 'api_probe' && inputs.mode != 'ahledger_check' && inputs.mode != 'launch_backtest' && inputs.mode != 'launch_now' && inputs.mode != 'forecast_test' }}
         uses: actions/upload-artifact@v4
         with:
           name: market-tools-results

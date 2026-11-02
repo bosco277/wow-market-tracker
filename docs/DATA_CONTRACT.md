@@ -538,6 +538,28 @@ Limits: retail launches add items to an economy that already has gold and stock;
 scored on Forever's own data. Tested on synthetic launches only (hit rates near 0.5 / 0.8 on hidden launches); the first real result is the `launch_backtest` log.
 
 
+### 2p. Forecast bake-off (engine/forecast.py, `tools/lake.py forecast_test`; v0.7.22)
+
+Question: for SETTLED items (56+ days past first appearing; the launch forecaster owns the weeks before), which simple method beats "tomorrow equals today", by how much, and are its
+error bars honest? Daily price (gold, lowest price) and units listed from `market_history`, in log10, items with 120+ observed days. Horizons 1, 3, 7 days. Walk-forward: the dated span
+after its first 56 days is cut so testing starts 40% of the way in and runs in 3 stretches; for each stretch the last 30% of the days before it calibrate the ranges and the days before
+that tune the pooled models; every origin is scored (every 3rd day) with only days up to the origin. All methods are scored on exactly the same cases.
+Methods: naive; week_ago (same weekday last week); median7; ema50 / ema25 / ema10 (alpha .5 / .25 / .1); weekday (level + learned weekday pattern, the plain-arithmetic cousin of SARIMA); sarima (engine/sarima.py: SARIMA(p,d,q)(P,D,Q)7 per item, parameters
+fitted on the days before the calibration stretch and then held fixed while it is filtered forward, best of four specs by AIC: (1,0,1)(1,0,1) around a fixed level, (0,1,1)(0,0,1) local level,
+(0,1,1)(0,1,1) airline, (1,1,1)(1,0,1) damped trend; short gaps interpolated, a failed fit falls back to ema25 and is counted; needs scipy, added to the workflow's `pip install` line, nothing in
+requirements.txt touched); pooled (one Huber regression across all items: deviation of today from the item's EMA25, EMA50-EMA10, median7-EMA25, weekday of
+the target); pooled_grp (pooled + how far the item's group peers sit from their own EMA25 today: the cheap ablation of whether neighbours help, standing in for a graph model).
+Ranges: the method's own signed misses from the calibration days, quantiles q10 / q25 / q75 / q90, kept apart for five levels of recent jumpiness (14-day spread of daily changes), so calm
+items get narrower ranges. Measures per method and horizon: miss_pct (median miss as % of price), avg_pct, vs_naive (mean |miss| / naive's, below 1 beats it; this is the "MASE" of the
+notes without the in-sample scaling), wape (pooled, pricey items weigh most) and wape_med, bias_pct and track (signed; positive = real price above the guess), rmse_pct, p95_pct, big_pct
+(share over 25%), dir_hit (only when the guess moves 3%+ from today) and dir_n, hit50 / hit80 / width80_pct. `best_models`: naive unless another is 3%+ better on average |miss|.
+Limits: retail survivors only (items still traded today), daily data not hourly, price is the lowest price (undercut noise), no sales; tested on synthetic worlds (finds a planted weekday
+rhythm, finds a planted shared shock, loses to naive on a random walk, ranges near 0.5 / 0.8 on stationary noise); the first real result is the `forecast_test` log. SARIMA is our own
+conditional-least-squares implementation, not statsmodels (the build sandbox cannot install it, so code calling it could not be tested): it recovers planted AR / seasonal / MA parameters,
+matches the textbook AR(1) and MA(1) forecasts, reproduces an exponential average with (0,1,1), and never reads days after the origin. If SARIMA wins on the real log, an exact-likelihood
+statsmodels fit can be added as one more candidate and compared on the same cases. AIC is used only to pick among the four SARIMA specs; Ljung-Box is not computed: the hidden-days test is the stricter check. Next (after reading the log): a daily forecast LEDGER that stores each day's forecasts with ranges and grades them when the
+actual day arrives (prices from our own scans, sales from Journalator), so ranges are re-calibrated on Forever's own misses.
+
 First real `api_probe` log (Nov 1, 2026, 21:4x ET), and what v0.7.20 adds to the mode:
 * Known namespaces behaved as expected (retail, classic, classic1x, classicann all 200); the made-up namespace answered 403 on both paths. Of 30 guesses exactly one differed: `forever`
   (`static-forever-us` item classes 403, `dynamic-forever-us` connected-realm index 404). `camelot` and every other guess matched the made-up one.
