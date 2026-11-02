@@ -163,6 +163,104 @@ class TestParts(unittest.TestCase):
         self.assertNotIn("cohorts", r["fresh"])
 
 
+def sticky_world(days=520, seed=5):
+    """Sticky: 12 items whose price sits EXACTLY at its normal level except on 40% of Saturdays (the same Saturdays for all of them), when it is 20-30% higher: a weekday
+    rhythm that a median-day test cannot see. Weekly: 12 items with loud day-to-day price noise and a small shock shared by the whole calendar week (invisible day by day,
+    visible in weekly averages). Bg0..Bg7: 8 items each with the loud noise only."""
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range(START, periods=days)
+    dow = dates.dayofweek.to_numpy()
+    sat = np.flatnonzero(dow == 5)
+    bump = np.zeros(days, bool)
+    bump[rng.choice(sat, size=int(0.4 * len(sat)), replace=False)] = True
+    week_id = ((dates - pd.to_timedelta(dow, unit="D")).normalize()).factorize()[0]
+    shock_w = rng.normal(0, 0.05, week_id.max() + 1)[week_id]
+    rows, groups = [], []
+    iid = 2000
+
+    def add(price, stock, group, family):
+        nonlocal iid
+        iid += 1
+        rows.append(pd.DataFrame({"item_id": iid, "day": dates.strftime("%Y-%m-%d"), "price": price * 10000.0, "quantity": stock}))
+        groups.append(dict(item_id=iid, group=group, family=family))
+
+    for _ in range(12):
+        add(20.0 * (1 + rng.uniform(0.2, 0.3) * bump), np.full(days, 5000.0), "Sticky", "FamS")
+    for _ in range(12):
+        add(10 ** (1.3 + shock_w + rng.normal(0, 0.2, days)), 5000 * 10 ** rng.normal(0, 0.05, days), "Weekly", "FamW")
+    for b in range(8):
+        for _ in range(8):
+            add(10 ** (1.3 + rng.normal(0, 0.2, days)), 5000 * 10 ** rng.normal(0, 0.05, days), f"Bg{b}", "FamB")
+    return pd.concat(rows, ignore_index=True), pd.DataFrame(groups)
+
+
+class TestPartFourFixes(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.hist, cls.groups = sticky_world()
+        cls.res = H.history_report(cls.groups, cls.hist)
+
+    def test_a_price_that_is_flat_most_days_hides_its_rhythm_from_the_median_day_but_not_from_the_average(self):
+        med = self.res["rhythm"]["price"]["groups"].set_index("group").loc["Sticky"]
+        self.assertLess(med["swing_pct"], 0.5)                                         # median day: exactly normal on every weekday, nothing to measure
+        self.assertNotIn("group-specific", med["verdict"])
+        avg = self.res["rhythm"]["price_mean"]["groups"].set_index("group").loc["Sticky"]
+        self.assertEqual((avg["peak"],), ("Sat",))
+        self.assertGreater(avg["swing_pct"], 5.0)
+        self.assertTrue(avg["verdict"].startswith("group-specific rhythm"), avg["verdict"])
+        self.assertGreater(avg["stable_r"], 0.9)
+        self.assertEqual(set(self.res["rhythm"]), {"price", "price_mean", "stock"})
+
+    def test_flat_day_share_says_how_sticky_each_family_is(self):
+        f = self.res["flat"]["price"].set_index("family")
+        self.assertEqual(f.index[0], "ALL ITEMS")
+        self.assertGreater(f.loc["FamS", "flat_median"], 0.9)
+        self.assertLess(f.loc["FamB", "flat_median"], 0.05)
+        self.assertLessEqual(f.loc["FamS", "flat_low"], f.loc["FamS", "flat_median"])
+        self.assertLessEqual(f.loc["FamS", "flat_median"], f.loc["FamS", "flat_high"])
+        self.assertIn("stock", self.res["flat"])
+
+    def test_weekly_averages_need_four_days_and_drop_empty_weeks(self):
+        d = pd.date_range("2024-01-01", periods=10)                                      # Mon Jan 1 .. Wed Jan 10: a full week and a 3-day week
+        L = pd.DataFrame([np.arange(10.0)], columns=d, index=[1])
+        W = H.weekly(L)
+        self.assertEqual(W.shape, (1, 1))
+        self.assertAlmostEqual(W.iloc[0, 0], 3.0)                                        # mean of 0..6
+        self.assertEqual(W.columns[0], pd.Timestamp("2024-01-01"))
+        L.iloc[0, 3] = np.nan                                                            # 6 days seen still counts; with only 3 seen it would not
+        self.assertEqual(H.weekly(L).shape, (1, 1))
+        L.iloc[0, [1, 2, 4]] = np.nan
+        self.assertEqual(H.weekly(L).shape[1], 0)
+
+    def test_a_move_that_lasts_a_week_shows_in_weekly_averages_but_not_day_by_day(self):
+        day = self.res["comove"]["groups"].set_index("group").loc["Weekly"]
+        wk = self.res["comove_weekly"]["groups"].set_index("group").loc["Weekly"]
+        self.assertLess(day["price_corr_group"], 0.25)
+        self.assertEqual(day["price_verdict"], "no shared movement")
+        self.assertGreater(wk["price_corr_group"], 0.3)
+        self.assertGreater(wk["price_corr_group"], 2 * day["price_corr_group"])
+        self.assertEqual(wk["price_verdict"], "moves together beyond the market")
+        self.assertLess(wk["price_corr_market"], 0.15)
+        self.assertNotIn("price_events", self.res["comove_weekly"]["groups"].columns)   # spikes are a day-level idea; the weekly test leaves them out
+
+    def test_fresh_curves_are_followed_to_112_days(self):
+        hist, groups = world()
+        t = H.history_report(groups, hist)["fresh"]["cohorts"]["launch burst"]["table"].set_index("age_days")
+        self.assertEqual(max(t.index), 112)
+        self.assertAlmostEqual(t.loc[112, "price_x"], 1.0, delta=0.05)
+        self.assertGreaterEqual(t.loc[84, "price_x"], 0.95)
+
+    def test_the_report_prints_the_new_sections_and_no_line_a_spreadsheet_would_break(self):
+        import lake
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(buf):
+            lake.run_undermine_test(None, lake.argparse.Namespace(out=d, ids=""), read_table=lambda n: {"market_history": self.hist, "item_groups": self.groups}.get(n, pd.DataFrame()))
+        text = buf.getvalue()
+        for needle in ("PRICE (median day)", "PRICE (average of all days)", "WITHIN 0.5% OF ITS OWN NORMAL LEVEL", "PART 4B-WEEKLY", "-- WEEKLY: BY GROUP --", "Sticky"):
+            self.assertIn(needle, text)
+        self.assertFalse(any(line.startswith("==") for line in text.splitlines()))
+
+
 class TestMarketControl(unittest.TestCase):
     def test_median_of_the_other_groups_ignores_a_loud_group_and_falls_back_with_few_groups(self):
         from engine import grouptest as GT

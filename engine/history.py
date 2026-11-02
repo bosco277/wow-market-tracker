@@ -26,8 +26,11 @@ MIN_OBS_DOW = 26            # and at least this many of each weekday (half a yea
 STABLE_R = 0.5              # a group's early-years and late-years weekday patterns must correlate at least this much
 MIN_SWING_PCT = 3.0         # a weekly pattern whose best and worst weekday differ by less than this is statistically visible but too small to use
 WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-AGES = (0, 1, 2, 3, 5, 7, 10, 14, 21, 28, 42, 56)
+AGES = (0, 1, 2, 3, 5, 7, 10, 14, 21, 28, 42, 56, 70, 84, 112)
 PLATEAU = (28, 56)          # a fresh item's settled level = its median over these days of age
+MAX_AGE = 112               # curves are followed this far, to see where the price finally lands after the settled-level window
+FLAT_TOL = 0.002            # a day within 0.5% (log10 0.002) of the item's normal level counts as "exactly normal"
+MIN_WEEK_DAYS = 4           # a week counts for the weekly co-movement test only with this many days seen
 NEW_AFTER = 30              # an item is "fresh" only if it first appears this many days after tracking began ...
 MIN_AFTER = 70              # ... and has this many days of history after that
 BURST_MIN = 6               # a week is a launch burst if at least this many sampled items first appear in it ...
@@ -72,13 +75,14 @@ def detrended(M: pd.DataFrame) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------ 4A weekday rhythm
-def weekday_profiles(L: pd.DataFrame, min_obs: int = MIN_OBS_DOW) -> pd.DataFrame:
-    """Per item the median lift on each weekday (columns 0 = Monday ... 6 = Sunday), re-centred to average 0 so it describes the SHAPE of the week."""
+def weekday_profiles(L: pd.DataFrame, min_obs: int = MIN_OBS_DOW, how: str = "median") -> pd.DataFrame:
+    """Per item the median (or, with how="mean", the average) lift on each weekday (columns 0 = Monday ... 6 = Sunday), re-centred to average 0 so it describes the SHAPE
+    of the week. The median ignores spike days; for a price that sits exactly at its normal level most days it is zero everywhere, so the mean is shown as well."""
     dow = np.asarray(L.columns.dayofweek)
     cols = []
     for d in range(7):
         sub = L.loc[:, dow == d]
-        med = sub.median(axis=1, skipna=True)
+        med = sub.median(axis=1, skipna=True) if how == "median" else sub.mean(axis=1, skipna=True)
         med[sub.notna().sum(axis=1) < min_obs] = np.nan
         cols.append(med)
     P = pd.concat(cols, axis=1)
@@ -145,19 +149,49 @@ def weekday_by(groups: pd.DataFrame, P: pd.DataFrame, by: str = "group", early: 
 
 
 def rhythm_report(groups: pd.DataFrame, lifts: Dict[str, pd.DataFrame]) -> dict:
+    """Keys: the lift tags (price, stock) with the median-day profile, plus price_mean with the average-of-all-days profile."""
     out = {}
-    for tag, L in lifts.items():
-        P = weekday_profiles(L)
+    variants = [(tag, L, "median") for tag, L in lifts.items()] + [(f"{tag}_mean", L, "mean") for tag, L in lifts.items() if tag == "price"]
+    for tag, L, how in variants:
+        P = weekday_profiles(L, how=how)
         if P.empty:
             continue
         half = L.shape[1] // 2
-        early, late = weekday_profiles(L.iloc[:, :half], MIN_OBS_DOW // 2), weekday_profiles(L.iloc[:, half:], MIN_OBS_DOW // 2)
+        early, late = weekday_profiles(L.iloc[:, :half], MIN_OBS_DOW // 2, how), weekday_profiles(L.iloc[:, half:], MIN_OBS_DOW // 2, how)
         out[tag] = {level: weekday_by(groups, P, by, early, late) for level, by in (("overall", "_all"), ("families", "family"), ("groups", "group"))}
     return out
 
 
+def flat_report(groups: pd.DataFrame, lifts: Dict[str, pd.DataFrame], tol: float = FLAT_TOL) -> dict:
+    """How often is an item exactly at its normal level (within 0.5%)? Per family: the middle half of items. A price that is 'flat' most days hides weekday rhythm
+    from a median-based test, and says the price is sticky (it moves in steps, not every day)."""
+    key = groups.drop_duplicates("item_id").set_index("item_id")
+    out = {}
+    for tag, L in lifts.items():
+        valid = L.notna().sum(axis=1).replace(0, np.nan)
+        share = (((L.abs() <= tol) & L.notna()).sum(axis=1) / valid).dropna()
+        if share.empty:
+            continue
+        fam = key["family"].reindex(share.index).fillna("") if "family" in key.columns else pd.Series("", index=share.index)
+        rows = [{"family": "ALL ITEMS", "items": int(len(share)), "flat_median": share.median(), "flat_low": share.quantile(0.25), "flat_high": share.quantile(0.75)}]
+        for f, s_ in share.groupby(fam):
+            if f and len(s_) >= 8:
+                rows.append({"family": f, "items": int(len(s_)), "flat_median": s_.median(), "flat_low": s_.quantile(0.25), "flat_high": s_.quantile(0.75)})
+        out[tag] = pd.DataFrame(rows)
+    return out
+
+
+def weekly(L: pd.DataFrame, min_days: int = MIN_WEEK_DAYS) -> pd.DataFrame:
+    """Daily lifts averaged over calendar weeks (Monday-Sunday); a week needs min_days days seen. Day-to-day noise averages out, shared moves stay."""
+    wk = (L.columns - pd.to_timedelta(L.columns.dayofweek, unit="D")).normalize()
+    g = L.T.groupby(np.asarray(wk))
+    mean, cnt = g.mean().T, g.count().T
+    mean[cnt < min_days] = np.nan
+    return mean.dropna(axis=1, how="all")
+
+
 # ------------------------------------------------------------------ 4B moving together over years
-def comove_report(groups: pd.DataFrame, lifts: Dict[str, pd.DataFrame]) -> dict:
+def comove_report(groups: pd.DataFrame, lifts: Dict[str, pd.DataFrame], spikes: bool = True) -> dict:
     """For price and stock lifts: correlation with the group's other items (corr_group) against the rest of the market (corr_market); and, for the days an item's
     price / stock is at least double its normal, how many times more likely its peers are to be up too (spike_group, spike_market)."""
     out = {}
@@ -167,7 +201,7 @@ def comove_report(groups: pd.DataFrame, lifts: Dict[str, pd.DataFrame]) -> dict:
             t = comove_by(groups, L, by=by)
             if len(t):
                 parts.append(t.add_prefix(f"{tag}_"))
-            s = comove_by(groups, L, by=by, spikes=True)
+            s = comove_by(groups, L, by=by, spikes=True) if spikes else pd.DataFrame()
             if len(s):
                 parts.append(s.add_prefix(f"{tag}_"))
         if not parts:
@@ -232,9 +266,10 @@ def _age_table(Cp: pd.DataFrame, Cs: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def fresh_curves(h: pd.DataFrame, groups: pd.DataFrame = None) -> dict:
-    """Age-aligned price and stock of items that first appear after tracking began: multiples of the item's own settled level (median over days 28-56 of age).
-    Items that first appear in a launch burst are kept apart from the trickle of single new items."""
+def fresh_matrices(h: pd.DataFrame) -> dict:
+    """The age-aligned grids behind the fresh-item curves. Items that first appear after tracking began (30+ days in, 70+ days of history left); for each, price
+    and stock as log10 of (value / the item's settled level = its median over days 28-56 of age), for ages 0..MAX_AGE. Returns {} without data; with fewer than 10
+    new items only the counts. Keys: new_items, start, end, ids, first (first day per item), Cp, Cs, wk (week each item first appeared), burst_weeks, in_burst."""
     if h is None or h.empty:
         return {}
     start, end = h["day"].min(), h["day"].max()
@@ -245,8 +280,8 @@ def fresh_curves(h: pd.DataFrame, groups: pd.DataFrame = None) -> dict:
         return out
     hn = h[h["item_id"].isin(new.index)].copy()
     hn["age"] = (hn["day"] - hn["item_id"].map(first)).dt.days
-    hn = hn[hn["age"] <= PLATEAU[1]]
-    ages = list(range(PLATEAU[1] + 1))
+    hn = hn[hn["age"] <= MAX_AGE]
+    ages = list(range(MAX_AGE + 1))
     Cp = _curve(hn.pivot(index="item_id", columns="age", values="price").reindex(columns=ages))
     Cs = _curve(hn.pivot(index="item_id", columns="age", values="quantity").reindex(columns=ages))
     ids = Cp.index.intersection(Cs.index)
@@ -256,8 +291,19 @@ def fresh_curves(h: pd.DataFrame, groups: pd.DataFrame = None) -> dict:
     counts = wk.value_counts()
     thr = max(BURST_MIN, BURST_FACTOR * float(counts.median()))
     burst_weeks = sorted(counts[counts >= thr].index)
-    out["burst_weeks"] = [(pd.Timestamp(w), int(counts[w])) for w in burst_weeks]
-    in_burst = wk.isin(burst_weeks)
+    out.update({"ids": ids, "first": first.loc[ids], "Cp": Cp, "Cs": Cs, "wk": wk, "burst_weeks": [(pd.Timestamp(w), int(counts[w])) for w in burst_weeks],
+                "in_burst": wk.isin(burst_weeks)})
+    return out
+
+
+def fresh_curves(h: pd.DataFrame, groups: pd.DataFrame = None) -> dict:
+    """Age-aligned price and stock of items that first appear after tracking began: multiples of the item's own settled level (median over days 28-56 of age).
+    Items that first appear in a launch burst are kept apart from the trickle of single new items."""
+    fm = fresh_matrices(h)
+    if "Cp" not in fm:
+        return {k: fm[k] for k in ("new_items", "start", "end") if k in fm}
+    ids, Cp, Cs, in_burst = fm["ids"], fm["Cp"], fm["Cs"], fm["in_burst"]
+    out = {"new_items": fm["new_items"], "start": fm["start"], "end": fm["end"], "burst_weeks": fm["burst_weeks"]}
     fam = groups.drop_duplicates("item_id").set_index("item_id")["family"] if groups is not None and "family" in groups.columns else pd.Series(dtype=str)
     cohorts = {}
     for name, sel in (("launch burst", in_burst), ("trickle (single new items)", ~in_burst), ("all new items", pd.Series(True, index=ids))):
@@ -267,7 +313,7 @@ def fresh_curves(h: pd.DataFrame, groups: pd.DataFrame = None) -> dict:
         cohorts[name] = {"items": int(len(idx)), "table": _age_table(Cp.loc[idx], Cs.loc[idx]),
                          "settle_price": _settle_day(Cp.loc[idx].median()), "settle_stock": _settle_day(Cs.loc[idx].median())}
     out["cohorts"] = cohorts
-    if len(burst_weeks):
+    if len(fm["burst_weeks"]):
         fb = []
         bi = ids[in_burst.reindex(ids).to_numpy()]
         for f, idx in pd.Series(bi, index=bi).groupby(fam.reindex(bi).fillna("")).groups.items():
@@ -292,6 +338,8 @@ def history_report(groups: pd.DataFrame, hist: pd.DataFrame) -> dict:
         res.update({k: mats[k] for k in ("items", "days", "first", "last")})
         lifts = {"price": detrended(mats["price"]), "stock": detrended(mats["stock"])}
         res["rhythm"] = rhythm_report(groups, lifts)
+        res["flat"] = flat_report(groups, lifts)
         res["comove"] = comove_report(groups, lifts)
+        res["comove_weekly"] = comove_report(groups, {t: weekly(L) for t, L in lifts.items()}, spikes=False)
     res["fresh"] = fresh_curves(h, groups)
     return res

@@ -305,6 +305,24 @@ When Forever data exists:
    modifiers, pet fields), `bid`, `buyout`, `quantity`, `time_left`, `snapshot_ts` and `scan_timestamp`; compaction keeps all of it (`item` becomes `item_json`).
    On launch day confirm for Forever: the realm/connected-realm ids and namespace to fetch, that each of those fields exists, and the size of one hourly realm
    file (check it against the B2 cap and the compaction memory before adding realms). Missing fields cannot be recovered later.
+8. Forever has NO realms (per AHledger's explainer, citing Blizzard): 18 markets = 3 rulesets (Normal, PvP, RP) x 2 factions x 3 regions (US, EU, CN), plus neutral
+   auctioneers (Gadgetzan, Booty Bay, Everlook; 15% cut, faction houses 5%); listings run 12 / 24 / 48 hours. `source` should be the market id (for example
+   `forever.normal.alliance.us`). Unverified: whether Forever has commodity-style stacks at all.
+9. NO-API FALLBACK. As of Oct 26-28 independent probes found no Forever namespace on the Battle.net API (403 for every guess), and the Classic Era / Anniversary auction
+   endpoints return 404 (index only, no listings), so Forever may never expose listings. Backup sources, in order: (a) the free AHledger API (api.ahledger.com, no key,
+   300 requests/min, aggregates per market: lowest price, median, quantity, auction count; per-scan points for 24 h, hourly buckets for 7 d, daily for 30 / 90 d; terms:
+   credit AHledger with a link wherever its data is shown, do not present it as our own scan or resell it as a feed); (b) our own scans through an addon + SavedVariables
+   reader (the game allows one full scan per 15 minutes, only with the auction window open; the file is written at logout / reload, so a few updates a day per player);
+   (c) pooling scans from friends or guildmates. Sales cannot be inferred from totals alone (see the Undermine check), so listing-level scans matter most for calibration.
+10. LAUNCH-DAY PROBES (Market tools, no files saved): `api_probe` asks Battle.net whether a Forever namespace exists (guesses include camelot, forever, classicplus; add
+   more as words in item_ids) and, if one answers, which of the realm / auction / commodity paths work and what fields they return; `ahledger_check` lists AHledger's
+   endpoints and the shape of their answers. Run `api_probe` before launch and again on Nov 4 and on the days after; run `ahledger_check` once now. Details in 2m.
+11. FOREVER LAUNCH PLAYBOOK (what the engine does with the first days, details in 2o). (a) Get ANY data source running from hour 0 (API if `api_probe` finds a namespace;
+   otherwise AHledger and/or our own addon scans) and run `daily` every day from launch, so item ages count from launch. (b) From day 1 run `launch_now`: a settled-price and
+   settled-stock RANGE per young item from the retail launch prior (`launch_backtest`, stored in engine/launch_prior). (c) Around day 60, when Forever items have their own
+   settled level (median over days 28-56), score the retail prior against Forever's own items exactly as `launch_backtest` scores held-out launches; the hit rates say how far
+   the ranges can be trusted and whether to widen them. (d) Until then the ranges are a retail prior on an economy that starts empty: treat the SHAPE (steep first week, flat
+   by week 5-6) as likely and the LEVELS as unproven.
 
 ## 9. Next steps (in order)
 
@@ -466,3 +484,55 @@ in the history, so read shapes, not levels.
   sampled items (and 2.5x a typical week) first appear is a launch burst; its items are kept apart from the trickle of single new items; the burst weeks are listed so they
   can be checked against real patch / expansion dates, and families with 8+ burst items get their own row. This is the closest retail analogue to Forever's launch.
 * Verdicts are screens, not proof: with many small groups a few will look "group-specific" by chance; trust the large groups and the ones that are stable across years.
+
+### 2m. Launch-readiness probes (engine/probe.py, `tools/lake.py api_probe` and `ahledger_check`; v0.7.18)
+
+Neither mode stores anything or writes a file; both print status codes and the SHAPE of answers (field names, types, list lengths, never values), so a job log holds nothing
+identifying. They are meant to be run now and again around the Forever launch (Nov 4, 2026).
+* `api_probe` (needs the Blizzard credentials the workflow already passes). Builds namespaces as `<static|dynamic>-<name>-us` and asks two cheap paths of each:
+  `/data/wow/item-class/index` (static) and `/data/wow/connected-realm/index` (dynamic). Controls: retail, `classic`, `classic1x`, `classicann` must answer 200 (if retail does
+  not, the credentials or network are at fault and the report says so). A made-up namespace is the baseline for "Blizzard does not know this" (403 on Oct 26-28). A guess is
+  FLAGGED when either status differs from that baseline (a 404 on realms but a 200 on item classes, for example, would mean the namespace exists but has no realms, which is
+  what a realmless game might look like). Flagged names, and the known ones for comparison, then get: auctions/commodities, auctions/index, realm/index, market/index, a static
+  realm index and item 2589, plus the first connected realm's `auctions` and `auctions/index` when a realm list exists. About 80 requests in all. Candidates are in
+  `probe.CANDIDATES` (camelot is in because it is the datamined internal codename; there is no sign of it in any API address so far, so it is a long shot). Typing words into
+  item_ids adds guesses; digits are ignored. This only tests the namespace pattern Blizzard has used for Classic; a Forever API could also arrive as new paths. If a flagged
+  namespace answers on auctions, the printed shape is the first look at Forever's listing format and should be checked against checklist items 1, 5 and 8.
+* `ahledger_check` asks api.ahledger.com for its own description (`/openapi.json`, `/swagger.json`, `/docs`, `/`, `/v1`, `/api`, `/api/v1`, `/health`), lists every endpoint with its
+  parameters and allowed values, then fetches up to 10 GET endpoints that need no parameters and prints their shape. At most 30 requests, one per second, with an honest
+  User-Agent. The endpoint paths were NOT known when this was written (the docs could not be opened from the build sandbox), so the mode discovers them; the real puller (markets,
+  hourly and daily rows, estimated units sold) is written after its first log is read. Their terms: credit AHledger with a link, do not present their data as our own scan or
+  resell it as a feed. Archiving history is not addressed, so ask them before keeping any.
+
+
+### 2n. First real Part 4 run (Nov 1, 2026; 1,153 sampled items, 1,258,485 item-days, 2022-09-04 to 2026-11-01) and the v0.7.19 changes
+
+What the run said (price and units listed, not sales; survivors only):
+* 4C fresh items is the strong result. For the 510 items of the launch-burst weeks, the multiple of the item's own settled price (middle half in brackets): day 0 14.9x (4.0-41.6),
+  day 1 6.9x, day 2 5.2x, day 7 2.5x (1.3-4.4), day 14 1.7x (1.1-2.9), day 28 1.5x (1.2-1.8), day 42 0.95x, day 56 0.81x (still drifting down). Units listed, as a share of the
+  settled amount: day 0 2%, day 1 9%, day 7 41%, day 14 63%, day 28 91%, day 42 107%. Price settles by about day 38, stock by about day 24. Families differ: gear and gems keep
+  a premium longer (day-7 price 3.9x and 3.5x) than materials (1.9x) and consumables (1.7x). The 47 single new items spike less (day 0 5.7x) and settle sooner.
+  The burst weeks were Dragonflight launch (2022-11-28), The War Within early access (week of 2024-08-19; early access Aug 22, launch Aug 26) and Midnight early access
+  (week of 2026-02-23; early access Feb 26, launch Mar 2), plus smaller patch weeks (2023-05-01 is Patch 10.1). The first day an item exists is its early-access day.
+* 4A weekday rhythm: stock peaks Tuesday and is lowest Thursday or Sunday in almost every group, stable across years (stable_r 0.92 overall) but only about 1% overall; gear
+  slots show 5-11% (Cloak 5.0%, Feet 10.9%, error cut by about 30%). The PRICE rows were unmeasurable (swing 0.00, vs_flat NaN): for most items the median day's price sits exactly
+  at the item's normal level, so a median-based weekday profile is zero everywhere. Not evidence of "no rhythm".
+* 4B moving together (day by day): price correlation inside a group is about 0.06, no higher than against the market. Shared moves exist in a few small groups (class glyphs, gear
+  Neck, Miscellaneous Reagent: stock correlation 0.46 vs 0.09) and glyph / gear groups spike together (2-3x as likely as normal); with ~40 groups tested, expect some by chance.
+
+Changes in v0.7.19 (`engine/history.py`, `undermine_test`): (1) PRICE is shown twice, median day and average of all days (`price_mean` in `rhythm`), plus `flat` = how often each
+family's price is within 0.5% of its normal level; (2) `comove_weekly` repeats the moving-together test on weekly averages (a week needs 4 days; no spikes); (3) fresh-item curves run
+to 112 days (ages 70, 84, 112 added) to see where the price finally lands; (4) headings no longer start with "==" (a spreadsheet turns such a line into #ERROR!).
+
+### 2o. Launch forecaster (engine/launch.py, `tools/lake.py launch_backtest` and `launch_now`; v0.7.19)
+
+Turns 4C into a forecast. For an item seen on day k at price P (and P0 on its first day), the settled price (median over days 28-56 of age) is P / m, where m is the multiple items
+had on day k. Ranges come from the spread of m among other items. Four guesses are scored on launches that were HIDDEN from the fit (leave one launch out; a launch = burst weeks
+within 14 days of each other, 15+ items to test on, 30+ in the others): naive (settled = today's price), age (all other launches' items), family (same family, 15+ items) and path
+(age plus the item's own fall since day 0: a + b * log10(P_k / P_0)). Reported per day 1, 2, 3, 5, 7, 10, 14, 21: the typical miss as a multiple, how often the middle-50% and
+middle-80% ranges held the truth (should be near 0.5 and 0.8), and the width of the 80% range. `best_model` per metric and day is the smallest miss (the plain age guess unless another
+is 3% better). `launch_backtest` with upload stores `engine/launch_prior` (scope all + families with 15+ items; metric price / stock; model age / path; log10 quantiles l10..l90, line a, b).
+`settled_estimate()` turns a prior row and an observed price into mid, 50% and 80% ranges (None past 24 days). `launch_now` applies the prior to items young in `engine/item_daily`
+(from `daily`; ages count from each item's first day in that table, so the table must start at the launch).
+Limits: retail launches add items to an economy that already has gold and stock; Forever starts empty, so levels may differ. The ranges are a prior; checklist item 11 says how they are
+scored on Forever's own data. Tested on synthetic launches only (hit rates near 0.5 / 0.8 on hidden launches); the first real result is the `launch_backtest` log.

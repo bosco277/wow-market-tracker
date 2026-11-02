@@ -700,12 +700,12 @@ def _read_engine_table(name):
         return pd.DataFrame()
 
 
-def _blizzard_get():
-    """(get, token_ok): get(url) -> (status, json). Uses the same Blizzard credentials as the extract job."""
+def _blizzard_get(who="groups"):
+    """get(url) -> (status, json). Uses the same Blizzard credentials as the extract job."""
     import requests
     cid, sec = os.environ.get("BLIZZARD_CLIENT_ID"), os.environ.get("BLIZZARD_CLIENT_SECRET")
     if not cid or not sec:
-        raise SystemExit("groups needs BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET (the Market tools workflow passes them).")
+        raise SystemExit(f"{who} needs BLIZZARD_CLIENT_ID and BLIZZARD_CLIENT_SECRET (the Market tools workflow passes them).")
     r = requests.post("https://oauth.battle.net/token", auth=(cid, sec), data={"grant_type": "client_credentials"}, timeout=30)
     r.raise_for_status()
     headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
@@ -1036,6 +1036,139 @@ def run_undermine_check(store, args, client=None, read_table=None):
     return m
 
 
+def run_api_probe(store, args, get=None, sleep=None):
+    """Is there a Blizzard Game Data API namespace for WoW Forever yet? Tries a list of guesses (camelot, forever, classicplus, ...) next to
+    the known namespaces and a made-up one, and digs into any that answer differently. Extra guesses can be typed into item_ids as words
+    (e.g. camelot2,fvus). About 80 requests; prints status codes and field names only, no credentials, names or values; writes no files."""
+    import time
+    from engine import probe as P
+    extra = [t.strip() for t in str(args.ids or "").replace(";", ",").split(",") if t.strip() and not t.strip().isdigit()]
+    get = get or _blizzard_get("api_probe")
+    res = P.blizzard_probe(get, region="us", extra=extra, sleep=sleep or time.sleep)
+    print(P.format_blizzard(res))
+    return res
+
+
+def run_ahledger_check(store, args, fetch=None, sleep=None):
+    """What does AHLedger's open API offer? Finds the API's own description (OpenAPI file or docs page), lists its endpoints and parameters, and
+    fetches a few that need no parameters, printing only the shape of the answers. At most 30 requests, one per second; writes no files."""
+    import time
+    from engine import probe as P
+    if fetch is None:
+        import requests
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": P.USER_AGENT, "Accept": "application/json, text/html;q=0.5"})
+
+        def fetch(url):
+            try:
+                r = sess.get(url, timeout=20)
+            except requests.RequestException:
+                return 0, "", "", {}
+            return r.status_code, r.headers.get("content-type", ""), r.text[:2_000_000], dict(r.headers)
+    res = P.ahledger_probe(fetch, sleep=sleep or time.sleep)
+    print(P.format_ahledger(res))
+    return res
+
+
+def _fmt_x(df, cols):
+    """Round multiples for printing."""
+    out = df.copy()
+    for c in cols:
+        if c in out.columns:
+            out[c] = out[c].round(2)
+    return out
+
+
+def run_launch_backtest(store, args, read_table=None):
+    """The launch forecaster, tested on launches it has not seen. From the Undermine history (mode undermine) and the item groups: finds the launches (weeks when many items
+    first appeared), and for each one in turn hides it, learns from the others, and guesses every hidden item's settled price and stock from its first days. Prints how big
+    the misses are against the naive guess (settled = today's price) and how often the real value fell inside each range, so the error bars are measured. Tick upload to store
+    the prior table (engine/launch_prior) that mode launch_now and the Forever launch use. Group-level numbers only; writes no downloadable files."""
+    from engine import history as HI, launch as LA
+    read_table = read_table or _read_engine_table
+    hist, groups = read_table("market_history"), read_table("item_groups")
+    if hist is None or hist.empty:
+        print("engine/market_history.parquet is missing: run mode undermine (upload ticked) first.")
+        return {}
+    h = HI.clean(hist)
+    fm = HI.fresh_matrices(h)
+    if "Cp" not in fm:
+        print(f"Only {fm.get('new_items', 0)} items first appeared with enough history after tracking began; the forecaster needs launches. Nothing to test.")
+        return {}
+    lab = LA.launch_labels(fm)
+    if lab.empty:
+        print("No launch weeks found (a launch week = 6+ sampled items first appearing, 2.5x a typical week). Nothing to test.")
+        return {}
+    sizes = lab.value_counts().sort_index()
+    print(f"LAUNCH FORECASTER BACKTEST: {len(lab)} items in {len(sizes)} launches: " + ", ".join(f"week of {w:%Y-%m-%d}: {n}" for w, n in sizes.items()))
+    print("Question: seen on day k at some price, what will an item's SETTLED price (its median over days 28-56) be? Each launch is hidden in turn, the others teach the guess.")
+    print("naive = settled equals today's price. age = today's price / the usual day-k multiple of the other launches' items. family = the same using the item's family when 15+ are known.")
+    print("path = age plus how far the item's own price has already fallen since day 0. miss = typical error as a multiple (1.00 exact, 2.00 off by a factor of two, median over items).")
+    print("hit50 / hit80 = how often the real value fell inside the middle-50% / middle-80% range (should be near 0.50 / 0.80; much lower = ranges too narrow). width80 = the 80% range as a multiple.")
+    details = LA.backtest(fm, groups)
+    if details.empty:
+        print("\nNo launch has enough items (15+ to test on, 30+ in the others) for a backtest.")
+        return {"launches": sizes}
+    summ = LA.summarize(details)
+    for metric, title in (("price", "SETTLED PRICE"), ("stock", "SETTLED STOCK (units listed)")):
+        t = summ[summ["metric"] == metric]
+        if t.empty:
+            continue
+        print(f"\n-- {title}: typical miss by day of the guess --")
+        print(_fmt_x(t[["age", "items", "launches", "miss_naive", "miss_age", "miss_family", "miss_path"]], ["miss_naive", "miss_age", "miss_family", "miss_path"]).to_string(index=False))
+        print(f"\n-- {title}: do the ranges hold? --")
+        print(_fmt_x(t[["age", "hit50_age", "hit80_age", "width80_age", "hit50_family", "hit80_family", "width80_family", "hit50_path", "hit80_path", "width80_path"]],
+                     ["hit50_age", "hit80_age", "width80_age", "hit50_family", "hit80_family", "width80_family", "hit50_path", "hit80_path", "width80_path"]).to_string(index=False))
+    byl = LA.summarize(details[(details["metric"] == "price") & (details["age"] == 7)].assign(age=lambda d: d["launch"].dt.strftime("%Y-%m-%d")), by=("metric", "age"))
+    if len(byl):
+        print("\n-- DOES IT TRANSFER BETWEEN LAUNCHES? settled price guessed on day 7, one row per hidden launch (age = launch week) --")
+        print(_fmt_x(byl[["age", "items", "miss_naive", "miss_age", "miss_family", "miss_path", "hit50_age", "hit80_age"]], ["miss_naive", "miss_age", "miss_family", "miss_path", "hit50_age", "hit80_age"]).to_string(index=False))
+    best = LA.best_models(summ)
+    print("\n-- BEST GUESS PER DAY (smallest typical miss; plain 'age' unless another is 3%+ better) --")
+    for metric in ("price", "stock"):
+        picks = [f"day {k}: {best[(metric, k)]}" for k in LA.AGES_USED if (metric, k) in best]
+        if picks:
+            print(f"  {metric}: " + ", ".join(picks))
+    prior = LA.build_prior(fm, groups, best)
+    print(f"\nPrior table: {len(prior)} rows ({prior['scope'].nunique()} scopes: {', '.join(sorted(prior['scope'].unique()))}).")
+    if _store_private({"launch_prior": prior}, "launch prior", getattr(args, "upload", False)):
+        print("Saved engine/launch_prior.parquet to the private dataset.")
+    else:
+        print("Not saved: tick upload to keep the prior table for launch_now and for Forever.")
+    return {"summary": summ, "prior": prior, "launches": sizes}
+
+
+def run_launch_now(store, args, read_table=None):
+    """Apply the launch prior to items that are young in OUR OWN daily table (engine/item_daily, from mode daily): for each, a settled-price range from its first days.
+    On Forever: run daily from launch day on, then this. An item is young for its first 21 days of the table, and ages count from the first day the table sees the item,
+    so the table must start at the launch. Prints a family summary and the most-listed young items; writes no files."""
+    from engine import launch as LA
+    read_table = read_table or _read_engine_table
+    prior, daily, groups = read_table("launch_prior"), read_table("item_daily"), read_table("item_groups")
+    if prior is None or prior.empty:
+        print("engine/launch_prior.parquet is missing: run mode launch_backtest (upload ticked) first.")
+        return pd.DataFrame()
+    if daily is None or daily.empty or any(c not in daily.columns for c in ("item_id", "day", "price_day", "units_day")):
+        print("engine/item_daily.parquet is missing or has no price_day / units_day: run mode daily (upload ticked) first.")
+        return pd.DataFrame()
+    d = daily.rename(columns={"price_day": "price", "units_day": "quantity"})[["item_id", "day", "price", "quantity"]]
+    rep = LA.launch_report(d, prior, groups if groups is not None and len(groups) else None)
+    last = pd.to_datetime(d["day"]).max()
+    if rep.empty:
+        print(f"No item in item_daily is within its first {LA.MAX_FORECAST_AGE} days on the latest day ({last:%Y-%m-%d}), or none has a usable first day.")
+        return rep
+    print(f"LAUNCH NOW: {len(rep)} young items on {last:%Y-%m-%d} (ages count from each item's first day in item_daily; settled = the item's median price over days 28-56 of age).")
+    print("Ranges come from retail launches: the middle 50% and middle 80% of what happened to other items. Treat them as a prior, not a promise.")
+    fam = rep.groupby(rep["family"].replace("", "(unknown)")).agg(items=("item_id", "size"), median_age=("age", "median"), now_vs_settled=("price_now_vs_settled", "median")).reset_index()
+    print("\n-- BY FAMILY: how far above its eventual price the typical young item is today (1.0 = already settled) --")
+    print(fam.round(2).to_string(index=False))
+    top = rep.sort_values("units_now", ascending=False).head(15)
+    print("\n-- THE 15 MOST-LISTED YOUNG ITEMS: price now and the settled-price range (gold) --")
+    cols = ["item_id", "family", "age", "price_now", "units_now", "settled_mid", "settled_lo50", "settled_hi50", "settled_lo80", "settled_hi80", "price_model"]
+    print(top[cols].round(2).to_string(index=False))
+    return rep
+
+
 def run_undermine_test(store, args, read_table=None):
     """Part 4 of the group test, on the long Undermine history stored by mode undermine: weekday rhythm of price and stock, whether items in a group move together over
     years, and how fresh items settle after they first appear. Group-level numbers only; writes no files (Undermine data stays in the private dataset)."""
@@ -1060,13 +1193,20 @@ def run_undermine_test(store, args, read_table=None):
 
     rh = res.get("rhythm")
     if rh:
-        print("\n== 4A - WEEKDAY RHYTHM: does a group have its own weekly pattern of price and stock? ==")
+        print("\nPART 4A - WEEKDAY RHYTHM: does a group have its own weekly pattern of price and stock?")
         print(f"  Each item's pattern is guessed from the median pattern of the OTHER items in its group. swing_pct = best weekday against worst in the group's median pattern (percent);")
         print(f"  peak / low = those weekdays; vs_flat = miss of 'no weekly pattern' / miss of the group guess; vs_all = miss of the all-other-items guess / miss of the group guess")
         print(f"  (1.0 = no help; verdict needs {HI.MIN_SCORED}+ items and {int((HI.HELPS - 1) * 100)}%+). stable_r = how well the group's pattern in the first half of the history matches the second half")
         print(f"  (needs {HI.STABLE_R:g}+ or the verdict says so): a pattern that holds for years is one worth carrying to a new game.")
+        print("  NEW in v0.7.19: price is shown twice. 'median day' ignores spike days, so it reads zero for a price that sits exactly at its normal level most days (NaN = nothing to measure);")
+        print("  'average of all days' sees spikes that always land on the same weekday. The flat-day table below says how sticky each family's price is.")
+        fl = (res.get("flat") or {})
+        for tag, title in (("price", "PRICE"), ("stock", "STOCK")):
+            if tag in fl and len(fl[tag]):
+                print(f"\n-- HOW OFTEN IS {title} WITHIN 0.5% OF ITS OWN NORMAL LEVEL? (share of days; middle half of items) --")
+                print(fl[tag].round(2).to_string(index=False))
         cols = ["items", "swing_pct", "peak", "low", "vs_flat", "vs_all", "stable_r", "verdict"]
-        for tag, title in (("price", "PRICE"), ("stock", "STOCK (units listed)")):
+        for tag, title in (("price", "PRICE (median day)"), ("price_mean", "PRICE (average of all days)"), ("stock", "STOCK (units listed)")):
             t = rh.get(tag)
             if not t:
                 continue
@@ -1080,7 +1220,7 @@ def run_undermine_test(store, args, read_table=None):
 
     cm = res.get("comove")
     if cm:
-        print("\n== 4B - MOVING TOGETHER OVER YEARS: do items in a group have high and low price / stock days together? ==")
+        print("\nPART 4B - MOVING TOGETHER OVER YEARS: do items in a group have high and low price / stock days together? (day by day)")
         print("  corr_group = how closely an item's day-by-day lifts follow the average of the OTHER items in its group; corr_market = the same against every item OUTSIDE the group;")
         print("  extra = corr_group - corr_market (the group moving together beyond the whole market moving at once). spike_events = item-days at least double the item's normal;")
         print("  spike_group / spike_market = how many times more likely its peers (in the group / outside it) are to be up on those same days than on a random day (1.0 = no link).")
@@ -1091,11 +1231,20 @@ def run_undermine_test(store, args, read_table=None):
             if df is not None and len(df):
                 print(f"\n-- {sub} --")
                 print(df[[key] + [c for c in keep if c in df.columns]].round(2).to_string(index=False))
+        cw = res.get("comove_weekly")
+        if cw:
+            print("\nPART 4B-WEEKLY - the same test on weekly averages (day-to-day noise averages out; a shared move that lasts a week or more shows up here)")
+            wkeep = ["price_items", "price_corr_group", "price_corr_market", "price_extra", "stock_corr_group", "stock_corr_market", "stock_extra", "price_verdict", "stock_verdict"]
+            for level, key, sub in (("overall", "_all", "ALL ITEMS"), ("families", "family", "BY FAMILY"), ("groups", "group", "BY GROUP")):
+                df = cw.get(level)
+                if df is not None and len(df):
+                    print(f"\n-- WEEKLY: {sub} --")
+                    print(df[[key] + [c for c in wkeep if c in df.columns]].round(2).to_string(index=False))
     else:
         print("\n(4B skipped: no item has a year of days.)")
 
     fr = res.get("fresh") or {}
-    print(f"\n== 4C - FRESH ITEMS: after an item first appears, how do its price and stock settle? ({fr.get('new_items', 0)} items first seen after tracking began) ==")
+    print(f"\nPART 4C - FRESH ITEMS: after an item first appears, how do its price and stock settle? ({fr.get('new_items', 0)} items first seen after tracking began)")
     if not fr.get("cohorts"):
         print("  (skipped: fewer than 10 items first appeared with 70+ days of history after that.)")
     else:
@@ -1245,7 +1394,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily", "undermine", "undermine_check", "undermine_test"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -1266,8 +1415,8 @@ def main(argv=None):
     ap.add_argument("--upload", action="store_true", help="derive: push the tables to engine/ in the HF repo")
     ap.add_argument("--batch", type=int, default=800, help="undermine: most items to fetch in one run (3 points each; the budget is 3,000 per hour)")
     args = ap.parse_args(argv)
-    store = None if args.command in ("ledger", "groups", "grouptest", "undermine", "undermine_check", "undermine_test") else make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily, "undermine": run_undermine, "undermine_check": run_undermine_check, "undermine_test": run_undermine_test}[args.command](store, args)
+    store = None if args.command in ("ledger", "groups", "grouptest", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now") else make_store(args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily, "undermine": run_undermine, "undermine_check": run_undermine_check, "undermine_test": run_undermine_test, "api_probe": run_api_probe, "ahledger_check": run_ahledger_check, "launch_backtest": run_launch_backtest, "launch_now": run_launch_now}[args.command](store, args)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,14 @@ name: Market tools
 #              sales estimate). Needs derive's tables in the private dataset. About 120 points. Prints summary numbers only.
 #   undermine_test  part 4 of the group test on the stored Undermine history: weekday rhythm of price and stock, whether groups move together over years,
 #              and how fresh items settle after they first appear. Group-level numbers only; no points used; no files saved.
+#   api_probe  asks Blizzard's Game Data API whether a WoW Forever namespace exists yet (camelot, forever, classicplus ... next to the known ones and a
+#              made-up one). Prints status codes and field names only. Add your own guesses as words in item_ids (e.g. camelot2,fvus). No files saved.
+#   ahledger_check  finds out what AHLedger's open API offers: its own description, the endpoints and their parameters, and the shape of a few answers.
+#              At most 30 requests, one per second. Prints shapes only. No files saved.
+#   launch_backtest  the launch forecaster, tested on launches it has not seen: from an item's first days, guess its settled price and stock with a measured range. Reads
+#              the stored Undermine history; tick upload to keep the prior table (engine/launch_prior) for launch_now and for Forever. Group-level numbers only.
+#   launch_now  applies that prior to items that are young in OUR daily table (engine/item_daily): settled-price range per family and for the most-listed young items.
+#              On Forever: run daily from launch day, then this. No files saved.
 #   groups  builds the item-groups table (class, subclass, vendor price) from Blizzard's item data; use item_ids to add items; tick upload to publish it
 #   ledger  reads your Journalator.lua from the PRIVATE dataset (log_path = hf:system/Journalator.lua): real profit per flip, deposits, every
 #           listing's outcome. Needs no snapshots. Names are never printed; tick upload to store the tables in engine/ of the private dataset
@@ -36,13 +44,13 @@ on:
       mode:
         description: "What to run"
         type: choice
-        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger, groups, grouptest, daily, undermine, undermine_check, undermine_test]
+        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger, groups, grouptest, daily, undermine, undermine_check, undermine_test, api_probe, ahledger_check, launch_backtest, launch_now]
         default: pick
       days:
         description: "How many days of data to load (pick looks back 72 h, so 4 or more)"
         default: "4"
       item_ids:
-        description: "For mode=item: item ids separated by commas (e.g. 192841,42253)"
+        description: "For mode=item: item ids separated by commas (e.g. 192841,42253). For api_probe: extra namespace guesses as words (e.g. camelot2,fvus)"
         default: ""
       max_position_gold:
         description: "pick: most gold in play for any one item"
@@ -137,7 +145,7 @@ jobs:
 
       - name: Save results
         # the ledger is personal, and Undermine data is not ours to republish: both go only to the private dataset, never to a downloadable file
-        if: ${{ inputs.mode != 'ledger' && inputs.mode != 'undermine' && inputs.mode != 'undermine_check' && inputs.mode != 'undermine_test' }}
+        if: ${{ inputs.mode != 'ledger' && inputs.mode != 'undermine' && inputs.mode != 'undermine_check' && inputs.mode != 'undermine_test' && inputs.mode != 'api_probe' && inputs.mode != 'ahledger_check' && inputs.mode != 'launch_backtest' && inputs.mode != 'launch_now' }}
         uses: actions/upload-artifact@v4
         with:
           name: market-tools-results
