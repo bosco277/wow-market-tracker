@@ -436,6 +436,7 @@ class TestWorkflowWiring(unittest.TestCase):
         inputs = wf[True]["workflow_dispatch"]["inputs"]
         self.assertIn("undermine", inputs["mode"]["options"])
         self.assertIn("undermine_check", inputs["mode"]["options"])
+        self.assertIn("undermine_test", inputs["mode"]["options"])
         self.assertEqual(inputs["batch"]["default"], "800")
         steps = wf["jobs"]["run"]["steps"]
         run = next(s for s in steps if s.get("name") == "Run")
@@ -443,7 +444,7 @@ class TestWorkflowWiring(unittest.TestCase):
         self.assertIn('--batch "$BATCH"', run["run"])
         self.assertNotIn("UNDERMINE_API_KEY", run["run"])                                 # the key is only ever an env var
         save = next(s for s in steps if s.get("name") == "Save results")
-        for mode in ("ledger", "undermine", "undermine_check"):
+        for mode in ("ledger", "undermine", "undermine_check", "undermine_test"):
             self.assertIn(f"inputs.mode != '{mode}'", save["if"])
         self.assertLessEqual(len(inputs), 25)
 
@@ -453,6 +454,8 @@ class TestWorkflowWiring(unittest.TestCase):
                 mock.patch.object(lake, "make_store", side_effect=AssertionError("no store needed")):
             self.assertEqual(lake.main(["undermine", "--batch", "50"]), 1)
             self.assertEqual(lake.main(["undermine_check"]), 2)
+            with mock.patch.object(lake, "run_undermine_test", return_value=3):
+                self.assertEqual(lake.main(["undermine_test"]), 3)
         self.assertEqual(a.call_args[0][1].batch, 50)
 
 

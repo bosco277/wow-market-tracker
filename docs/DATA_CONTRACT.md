@@ -300,6 +300,11 @@ When Forever data exists:
 4. Realmless: decide what `source` is. One market per source.
 5. If listings are per-auction rather than per-unit, implement `kind="auction"` in the classifier first.
 6. Re-run the buy/list experiment to recalibrate `cancel_share` and the blind-spot correction. Do not carry retail values over.
+7. Non-commodity (gear, weapons, transmog) is a deferred analysis, but the RECORD must be complete from the first Forever hour. Today `fetch.py` stores, per
+   realm auction per hour: Blizzard's auction `id` (the key for following one listing across hours), the whole `item` struct untouched (id, context, bonus_lists,
+   modifiers, pet fields), `bid`, `buyout`, `quantity`, `time_left`, `snapshot_ts` and `scan_timestamp`; compaction keeps all of it (`item` becomes `item_json`).
+   On launch day confirm for Forever: the realm/connected-realm ids and namespace to fetch, that each of those fields exists, and the size of one hourly realm
+   file (check it against the B2 cap and the compaction memory before adding realms). Missing fields cannot be recovered later.
 
 ## 9. Next steps (in order)
 
@@ -441,3 +446,23 @@ real launches limit what it can say.
 * Privacy: both modes are excluded from the "Save results" artifact in the workflow; uploads go through a temporary folder, never `out/`.
 * Nothing here feeds a forecast yet. Next: a Part 4 of the group test on this long history (weekday rhythm, long-run co-movement, age-aligned
   fresh-item curves).
+
+### 2l. Part 4 of the group test (engine/history.py, `tools/lake.py undermine_test`; v0.7.17)
+
+Reads `engine/market_history` (2k) and `engine/item_groups`; uses no API points; writes no files and prints group-level numbers only (Undermine data stays in the
+private dataset). Price and stock are not sales: price = lowest price and stock = units listed at the day's busiest snapshot. Each day is compared with the item's
+OWN typical level (the centred 29-day median, lift = log10(value / typical), clipped to +-1), so quantities and slow trends drop out. Only items still traded today are
+in the history, so read shapes, not levels.
+* 4A weekday rhythm (items with a year of days, 26+ of each weekday): each item's median lift per weekday, re-centred to average 0. An item's pattern is guessed from the
+  median pattern of the OTHER items in its group (never itself); vs_flat / vs_all as in part 2; verdict needs 6+ items and a 15% smaller miss, and a swing (best vs worst
+  weekday) of at least 3% or it reads "too small to use". stable_r compares the group's pattern in the first and second half of the history; under 0.5 the verdict says
+  "(but not stable across years)". Days are as Undermine dates them (probably UTC, so the realm reset may sit a day off).
+* 4B moving together: the part 3 test (`comove_by`) on price and stock lifts over years, plus same-day doubling ("spikes"). CONTROL CHANGE (also applies to part 3): the
+  "rest of the market" for corr_market is now the MEDIAN over the other groups of each group's mean lift that day (groups with 3+ items, at least 3 other groups), not the
+  plain average of every outside item. A few groups with loud shocks of their own used to drag the plain average and make quiet groups look like they "move on their
+  own". With fewer than 3 other groups it falls back to the plain outside average.
+* 4C fresh items: items that first appear 30+ days after tracking began and have 70+ days of history after that. Price and stock as multiples of the item's own settled
+  level (median over days 28-56 of age), median and middle half per age; settle = first age from which the median stays within 15% for 7 days. A week in which 6+
+  sampled items (and 2.5x a typical week) first appear is a launch burst; its items are kept apart from the trickle of single new items; the burst weeks are listed so they
+  can be checked against real patch / expansion dates, and families with 8+ burst items get their own row. This is the closest retail analogue to Forever's launch.
+* Verdicts are screens, not proof: with many small groups a few will look "group-specific" by chance; trust the large groups and the ones that are stable across years.

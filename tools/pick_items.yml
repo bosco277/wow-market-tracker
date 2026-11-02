@@ -24,6 +24,8 @@ name: Market tools
 #              Stored only in the private dataset; nothing from it goes into a downloadable file.
 #   undermine_check  fetches Undermine's HOURLY rows for ~40 items and compares them with our own (units, feed, does their stock change track our
 #              sales estimate). Needs derive's tables in the private dataset. About 120 points. Prints summary numbers only.
+#   undermine_test  part 4 of the group test on the stored Undermine history: weekday rhythm of price and stock, whether groups move together over years,
+#              and how fresh items settle after they first appear. Group-level numbers only; no points used; no files saved.
 #   groups  builds the item-groups table (class, subclass, vendor price) from Blizzard's item data; use item_ids to add items; tick upload to publish it
 #   ledger  reads your Journalator.lua from the PRIVATE dataset (log_path = hf:system/Journalator.lua): real profit per flip, deposits, every
 #           listing's outcome. Needs no snapshots. Names are never printed; tick upload to store the tables in engine/ of the private dataset
@@ -34,7 +36,7 @@ on:
       mode:
         description: "What to run"
         type: choice
-        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger, groups, grouptest, daily, undermine, undermine_check]
+        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger, groups, grouptest, daily, undermine, undermine_check, undermine_test]
         default: pick
       days:
         description: "How many days of data to load (pick looks back 72 h, so 4 or more)"
@@ -135,7 +137,7 @@ jobs:
 
       - name: Save results
         # the ledger is personal, and Undermine data is not ours to republish: both go only to the private dataset, never to a downloadable file
-        if: ${{ inputs.mode != 'ledger' && inputs.mode != 'undermine' && inputs.mode != 'undermine_check' }}
+        if: ${{ inputs.mode != 'ledger' && inputs.mode != 'undermine' && inputs.mode != 'undermine_check' && inputs.mode != 'undermine_test' }}
         uses: actions/upload-artifact@v4
         with:
           name: market-tools-results

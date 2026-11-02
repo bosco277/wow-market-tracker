@@ -7,6 +7,8 @@ made in log space, so a miss is a multiple: "x2.0" means the typical item is abo
 Nothing here feeds a forecast. It only tells us which groups are safe to lean on, which are too coarse, and what would split them."""
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -398,6 +400,31 @@ def _outside_mean(A: np.ndarray, V: np.ndarray, frame: pd.DataFrame, keys: list)
     return out
 
 
+def _group_median_control(A: np.ndarray, V: np.ndarray, frame: pd.DataFrame, by: str, min_items: int = MIN_PEERS, min_groups: int = 3) -> np.ndarray:
+    """Per item and day: the MEDIAN over the OTHER groups of each group's mean lift that day (NaN on days where fewer than min_groups other groups qualify).
+    A few groups with strong shocks of their own cannot drag it the way they drag a plain average of every outside item, so it follows what the whole market is doing."""
+    lab = frame[by].to_numpy()
+    uniq = list(pd.unique(lab))
+    G = np.full((len(uniq), A.shape[1]), np.nan)
+    for i, g in enumerate(uniq):
+        sel = lab == g
+        cnt = V[sel].sum(axis=0).astype(float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mu = np.where(V[sel], A[sel], 0.0).sum(axis=0) / cnt
+        mu[cnt < min_items] = np.nan
+        G[i] = mu
+    out = np.full(A.shape, np.nan)
+    for i, g in enumerate(uniq):
+        other = np.delete(G, i, axis=0)
+        n_ok = (~np.isnan(other)).sum(axis=0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            med = np.nanmedian(other, axis=0) if other.shape[0] else np.full(A.shape[1], np.nan)
+        med[n_ok < min_groups] = np.nan
+        out[lab == g] = med
+    return out
+
+
 def _rowcorr(X: np.ndarray, Y: np.ndarray, min_n: int = 10) -> np.ndarray:
     ok = ~np.isnan(X) & ~np.isnan(Y)
     n = ok.sum(axis=1)
@@ -429,7 +456,12 @@ def comove_by(groups: pd.DataFrame, mat: pd.DataFrame, by: str = "group", spikes
     V = ~np.isnan(A)
     if not spikes:
         rg = _rowcorr(A, _peer_mean(A, V, m, [by]))
-        ra = rg if by == "_all" else _rowcorr(A, _outside_mean(A, V, m, [by]))      # nothing lies outside "all items"
+        if by == "_all":
+            ra = rg                                                                    # nothing lies outside "all items"
+        else:
+            ctrl = _group_median_control(A, V, m, by)                                  # what the whole market does: the median of the other groups
+            ctrl = np.where(np.isnan(ctrl), _outside_mean(A, V, m, [by]), ctrl)       # with fewer than 3 other groups, the plain outside average
+            ra = _rowcorr(A, ctrl)
         r = pd.DataFrame({by: m[by].to_numpy(), "corr_group": rg, "corr_market": ra}).dropna()
         if r.empty:
             return pd.DataFrame()

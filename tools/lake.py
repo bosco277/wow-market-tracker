@@ -1036,6 +1036,87 @@ def run_undermine_check(store, args, client=None, read_table=None):
     return m
 
 
+def run_undermine_test(store, args, read_table=None):
+    """Part 4 of the group test, on the long Undermine history stored by mode undermine: weekday rhythm of price and stock, whether items in a group move together over
+    years, and how fresh items settle after they first appear. Group-level numbers only; writes no files (Undermine data stays in the private dataset)."""
+    from engine import history as HI
+    read_table = read_table or _read_engine_table
+    hist, groups = read_table("market_history"), read_table("item_groups")
+    if hist is None or hist.empty:
+        print("engine/market_history.parquet is missing: run mode undermine (upload ticked) first.")
+        return {}
+    if groups is None or groups.empty:
+        print("engine/item_groups.parquet is missing: run mode groups (upload ticked) first.")
+        return {}
+    res = HI.history_report(groups, hist)
+    if not res:
+        print("The stored history has no usable rows.")
+        return {}
+    first, last = (res["first"].strftime("%Y-%m-%d"), res["last"].strftime("%Y-%m-%d")) if "first" in res else ("-", "-")
+    print(f"UNDERMINE HISTORY TEST (part 4): {res['all_items']} items, {res['rows']:,} item-days; {res.get('items', 0)} items with a year or more of days ({first} to {last}).")
+    print("This is price and units listed, NOT sales. Price = lowest price and stock = units listed at the day's busiest snapshot; days are as Undermine dates them (probably UTC).")
+    print("Every day is compared with the item's OWN typical level (its 29-day median), so quantities and slow trends drop out. Only items still traded today are here")
+    print("(survivorship), so read shapes, not levels. Group-level numbers only; nothing item-level is printed or saved.")
+
+    rh = res.get("rhythm")
+    if rh:
+        print("\n== 4A - WEEKDAY RHYTHM: does a group have its own weekly pattern of price and stock? ==")
+        print(f"  Each item's pattern is guessed from the median pattern of the OTHER items in its group. swing_pct = best weekday against worst in the group's median pattern (percent);")
+        print(f"  peak / low = those weekdays; vs_flat = miss of 'no weekly pattern' / miss of the group guess; vs_all = miss of the all-other-items guess / miss of the group guess")
+        print(f"  (1.0 = no help; verdict needs {HI.MIN_SCORED}+ items and {int((HI.HELPS - 1) * 100)}%+). stable_r = how well the group's pattern in the first half of the history matches the second half")
+        print(f"  (needs {HI.STABLE_R:g}+ or the verdict says so): a pattern that holds for years is one worth carrying to a new game.")
+        cols = ["items", "swing_pct", "peak", "low", "vs_flat", "vs_all", "stable_r", "verdict"]
+        for tag, title in (("price", "PRICE"), ("stock", "STOCK (units listed)")):
+            t = rh.get(tag)
+            if not t:
+                continue
+            for level, key, sub in (("overall", "_all", "ALL ITEMS"), ("families", "family", "BY FAMILY"), ("groups", "group", "BY GROUP")):
+                df = t.get(level)
+                if df is not None and len(df):
+                    print(f"\n-- {title}: {sub} --")
+                    print(df[[key] + [c for c in cols if c in df.columns]].round(2).to_string(index=False))
+    else:
+        print("\n(4A skipped: no item has a year of days with every weekday seen often enough.)")
+
+    cm = res.get("comove")
+    if cm:
+        print("\n== 4B - MOVING TOGETHER OVER YEARS: do items in a group have high and low price / stock days together? ==")
+        print("  corr_group = how closely an item's day-by-day lifts follow the average of the OTHER items in its group; corr_market = the same against every item OUTSIDE the group;")
+        print("  extra = corr_group - corr_market (the group moving together beyond the whole market moving at once). spike_events = item-days at least double the item's normal;")
+        print("  spike_group / spike_market = how many times more likely its peers (in the group / outside it) are to be up on those same days than on a random day (1.0 = no link).")
+        keep = ["price_items", "price_corr_group", "price_corr_market", "price_extra", "stock_corr_group", "stock_corr_market", "stock_extra", "price_events", "price_spike_group",
+                "price_spike_market", "price_verdict", "stock_verdict", "price_spike_verdict"]
+        for level, key, sub in (("overall", "_all", "ALL ITEMS"), ("families", "family", "BY FAMILY"), ("groups", "group", "BY GROUP")):
+            df = cm.get(level)
+            if df is not None and len(df):
+                print(f"\n-- {sub} --")
+                print(df[[key] + [c for c in keep if c in df.columns]].round(2).to_string(index=False))
+    else:
+        print("\n(4B skipped: no item has a year of days.)")
+
+    fr = res.get("fresh") or {}
+    print(f"\n== 4C - FRESH ITEMS: after an item first appears, how do its price and stock settle? ({fr.get('new_items', 0)} items first seen after tracking began) ==")
+    if not fr.get("cohorts"):
+        print("  (skipped: fewer than 10 items first appeared with 70+ days of history after that.)")
+    else:
+        print("  Multiples of the item's own settled level (its median over days 28-56 of age): price_x 3.0 = three times its settled price. low-high is the middle half of items.")
+        print(f"  Launch burst = a week in which {HI.BURST_MIN}+ sampled items (and {HI.BURST_FACTOR:g}x a typical week) first appeared. settle = first age from which the median stays within 15% for {HI.SETTLE_RUN} days.")
+        bw = fr.get("burst_weeks") or []
+        print("  Burst weeks found (week starting Monday: items first seen): " + (", ".join(f"{w:%Y-%m-%d}: {n}" for w, n in bw) if bw else "none") + ". Do these look like patch or expansion weeks?")
+        for name, c in fr["cohorts"].items():
+            sp, ss = c["settle_price"], c["settle_stock"]
+            print(f"\n-- {name}: {c['items']} items; price settles by day {sp if sp is not None else 'not within 56'}, stock by day {ss if ss is not None else 'not within 56'} --")
+            t = c["table"]
+            t = pd.DataFrame({"age_days": t["age_days"], "price_x": t["price_x"], "price_low": t["price_low"], "price_high": t["price_high"],
+                              "stock_x": t["stock_x"], "stock_low": t["stock_low"], "stock_high": t["stock_high"]})
+            print(t.round(2).to_string(index=False))
+        bf = fr.get("by_family")
+        if bf is not None and len(bf):
+            print("\n-- launch burst by family (8+ items) --")
+            print(bf.round(2).to_string(index=False))
+    return res
+
+
 def _et_any(ts):
     if ts is None or pd.isna(ts):
         return ""
@@ -1164,7 +1245,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily", "undermine", "undermine_check"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily", "undermine", "undermine_check", "undermine_test"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -1185,8 +1266,8 @@ def main(argv=None):
     ap.add_argument("--upload", action="store_true", help="derive: push the tables to engine/ in the HF repo")
     ap.add_argument("--batch", type=int, default=800, help="undermine: most items to fetch in one run (3 points each; the budget is 3,000 per hour)")
     args = ap.parse_args(argv)
-    store = None if args.command in ("ledger", "groups", "grouptest", "undermine", "undermine_check") else make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily, "undermine": run_undermine, "undermine_check": run_undermine_check}[args.command](store, args)
+    store = None if args.command in ("ledger", "groups", "grouptest", "undermine", "undermine_check", "undermine_test") else make_store(args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily, "undermine": run_undermine, "undermine_check": run_undermine_check, "undermine_test": run_undermine_test}[args.command](store, args)
 
 
 if __name__ == "__main__":
