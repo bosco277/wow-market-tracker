@@ -80,6 +80,40 @@ class TestCompareTargets(unittest.TestCase):
         self.assertEqual(TG.compare_targets(pd.DataFrame(), hist), {"pairs": 0})
 
 
+def own_with_depth(n=40, days=30, seed=3, calm=True):
+    """item_daily with a floor that jumps (one cheap listing) and depth prices that do not."""
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range("2026-10-01", periods=days)
+    base = rng.uniform(0.5, 3.0, n)[:, None]
+    level = base + np.cumsum(rng.normal(0, 0.005, (n, days)), axis=1)
+    floor = level - (rng.random((n, days)) < 0.2) * 0.3 + rng.normal(0, 0.005, (n, days))
+    p15 = level + 0.05 + (rng.normal(0, 0.005, (n, days)) if calm else rng.normal(0, 0.3, (n, days)))
+    p30 = level + 0.08 + rng.normal(0, 0.004, (n, days))
+    ids = np.repeat(np.arange(n) + 7001, days)
+    return pd.DataFrame({"item_id": ids, "day": np.tile(dates.strftime("%Y-%m-%d"), n), "hours": 24, "price_day": (10 ** floor).ravel(), "units_day": 100.0,
+                         "price_p15": (10 ** p15).ravel(), "price_p30": (10 ** p30).ravel()})
+
+
+class TestOwnMeasures(unittest.TestCase):
+    def test_depth_prices_are_calmer_than_a_floor_set_by_single_listings(self):
+        m = TG.own_measures(own_with_depth()).set_index("measure")
+        self.assertEqual(set(m.index), {"price_day", "price_p15", "price_p30"})
+        self.assertEqual(m["changes"].nunique(), 1)                                   # every definition scored on the same item-days
+        self.assertGreater(m.loc["price_p15", "calmer_x"], 3.0)
+        self.assertAlmostEqual(m.loc["price_day", "calmer_x"], 1.0)
+        self.assertAlmostEqual(m.loc["price_p15", "vs_floor"], 12.0, delta=6.0)       # depth prices sit above the floor (about +0.05 log10 here, more when the floor dips)
+        self.assertLess(m.loc["price_p15", "big"], m.loc["price_day", "big"])
+
+    def test_needs_the_depth_columns_and_enough_days(self):
+        own = own_with_depth()
+        self.assertTrue(TG.own_measures(own.drop(columns=["price_p15", "price_p30"])).empty)
+        self.assertTrue(TG.own_measures(own.assign(price_p15=np.nan, price_p30=np.nan)).empty)
+        self.assertTrue(TG.own_measures(pd.DataFrame()).empty)
+        thin = own.copy()
+        thin.loc[pd.to_datetime(thin["day"]).dt.day % 2 == 0, "hours"] = 3                # every other day incomplete: no consecutive pairs
+        self.assertTrue(TG.own_measures(thin).empty)
+
+
 class TestRunner(unittest.TestCase):
     def test_runner_prints_the_comparison_and_a_readout(self):
         import lake
@@ -93,6 +127,28 @@ class TestRunner(unittest.TestCase):
         for s in ("PRICE TARGET TEST", "ALL SHARED ITEMS", "BY FAMILY", "calmer_x", "Read-out:", "barely register"):
             self.assertIn(s, out)
         self.assertFalse(any(line.startswith("==") for line in out.splitlines()))
+
+    def test_runner_prints_our_own_definitions_even_without_undermine(self):
+        import lake
+        tables = {"item_daily": own_with_depth()}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            res = lake.run_target_test(None, type("A", (), {})(), read_table=lambda n: tables.get(n, pd.DataFrame()))
+        out = buf.getvalue()
+        self.assertIn("own", res)
+        for s in ("OUR PRICE DEFINITIONS", "cheapest 15% of units", "Read-out: the cheapest", "mode undermine"):
+            self.assertIn(s, out)
+
+    def test_runner_tells_you_to_rerun_daily_when_depth_prices_are_missing(self):
+        import lake
+        own, hist, _ = shared_world()
+        tables = {"item_daily": own, "market_history": hist}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            lake.run_target_test(None, type("A", (), {})(), read_table=lambda n: tables.get(n, pd.DataFrame()))
+        out = buf.getvalue()
+        self.assertIn("Run mode daily (upload ticked) with this version", out)
+        self.assertIn("PRICE TARGET TEST vs UNDERMINE", out)
 
     def test_runner_says_what_to_run_when_a_table_is_missing_or_overlap_is_thin(self):
         import lake

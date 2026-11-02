@@ -582,6 +582,17 @@ Second `forecast_test` log (v0.7.24, Nov 2, 2026) and v0.7.25:
   (lowest price at the busiest snapshot) on shared items and consecutive days: size of daily moves, share over 25%, correlation, and how many of Undermine's 25%+ moves ours also makes
   (confirmed) versus barely registers (blip). Day labels are matched as written (ours US Eastern, theirs probably UTC). Needs item_daily (mode daily, upload ticked) and market_history.
 
+First real `target_test` log (v0.7.25, Nov 2, 2026; only 3 shared days, 2,867 paired changes, 1,042 items) and v0.7.26:
+* Our `item_daily.price_day` (median of 18+ hourly lowest prices, spike hours dropped) is NOT much calmer than Undermine's single-snapshot lowest price: average daily move 21.8% vs 24.2%
+  (1.1x), share of moves over 25% 21% vs 25%, corr of daily changes 0.49, 77% of item-days within 10% on level (median gap 0.0), of Undermine's 25%+ moves 48% confirmed by ours and 25%
+  barely registered. So the day-to-day volatility of the lowest price is mostly real (thin books, undercut cycles), and the forecast limits found in `forecast_test` apply to our own table
+  too unless the price definition changes. Caveats: 3 days (about 2 changes per item), different hours (a busiest snapshot vs the whole day) and day labels (ours US Eastern, theirs probably UTC).
+* v0.7.26: `item_daily` gains `price_p15` / `price_p30` = the median over the day's usable hours of the price at which the cheapest 15% / 30% of the UNITS listed have been reached (walk up the
+  book; engine/daily.py `depth_prices`; vectorised, no per-item loop). One cheap listing sets the floor but cannot set these. Rows stored before v0.7.26 have them empty; rerunning `daily` over
+  a day fills them (a tie on usable hours goes to the new row). `target_test` now first compares our own definitions on the same item-days (changes, avg / typ move, share over 25%, jump,
+  calmer_x against the floor, how far above the floor each sits), then the Undermine comparison. If a depth price is clearly calmer it becomes the forecast target (TSM's AuctionDB market value is
+  the same idea; the addon export's MarketPrice column is the Forever-side equivalent when only scans are available).
+
 First real `api_probe` log (Nov 1, 2026, 21:4x ET), and what v0.7.20 adds to the mode:
 * Known namespaces behaved as expected (retail, classic, classic1x, classicann all 200); the made-up namespace answered 403 on both paths. Of 30 guesses exactly one differed: `forever`
   (`static-forever-us` item classes 403, `dynamic-forever-us` connected-realm index 404). `camelot` and every other guess matched the made-up one.

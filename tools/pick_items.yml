@@ -18,6 +18,7 @@ name: Market tools
 #   reconcile  checks your experiment log (a CSV in the repo, see log_path) against the snapshots (use days=8)
 #   daily  adds days to the permanent per-item daily history (engine/item_daily): days = how many days to read (7), end_date = last day (blank = today); tick upload.
 #          Run it again with an earlier end_date to backfill. The group test's lifting-together part needs 14+ days of it.
+#          From v0.7.26 each day also stores two depth-based prices (price_p15 / price_p30); rerun the days you want them for.
 #   grouptest  leave-one-out test of the groups: which ones predict an item better than its family or all items, and what splits the coarse ones
 #   undermine  pulls years of DAILY price and units-listed history from Undermine Exchange for a balanced sample of items (needs the UNDERMINE_API_KEY
 #              secret; 3 points per item, 3,000 per hour). Tick upload. Run again about an hour later until it says all sampled items are done.
@@ -38,7 +39,9 @@ name: Market tools
 #              pattern, a pooled regression with and without group peers), grade each against what happened, and say whether the error bars hold. Reads the stored
 #              Undermine history; no points used; group-level numbers only; no files saved. SARIMA is left out unless the word sarima is in item_ids.
 #   target_test  compares Undermine's daily price (lowest price at one snapshot) with ours (median of the day's hourly lowest prices) on the days they share: how big the
-#              daily moves are, and how many of Undermine's big moves ours also makes. Needs item_daily (mode daily, upload ticked) and the Undermine history. No files saved.
+#              daily moves are, and how many of Undermine's big moves ours also makes. Also compares our floor with depth-based prices (the price of the cheapest 15% / 30%
+#              of the units listed) once mode daily has stored them (v0.7.26 on). Needs item_daily (mode daily, upload ticked); the Undermine part also needs the Undermine
+#              history. No files saved.
 #   groups  builds the item-groups table (class, subclass, vendor price) from Blizzard's item data; use item_ids to add items; tick upload to publish it
 #   ledger  reads your Journalator.lua from the PRIVATE dataset (log_path = hf:system/Journalator.lua): real profit per flip, deposits, every
 #           listing's outcome. Needs no snapshots. Names are never printed; tick upload to store the tables in engine/ of the private dataset

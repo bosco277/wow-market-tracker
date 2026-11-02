@@ -1251,23 +1251,43 @@ def run_forecast_test(store, args, read_table=None):
 
 
 def run_target_test(store, args, read_table=None):
-    """Which daily price is calmer: Undermine's (lowest price at the busiest snapshot) or ours (median of the day's usable hourly lowest prices, spike hours dropped)? Compares the two on
-    the items and consecutive days they share: size of day-to-day moves, how often they exceed 25%, how closely the two move together, and how many of Undermine's big moves ours also made.
-    Needs item_daily (mode daily, upload ticked) and market_history (mode undermine). Group-level numbers only; no files saved."""
+    """Which daily price is calmer? (1) OUR price definitions side by side on the same item-days: the floor (median of the day's hourly lowest prices) against the price of the cheapest 15%
+    and 30% of the units listed (needs days stored by mode daily since v0.7.26). (2) Undermine's daily price (lowest price at the busiest snapshot) against ours on the items and
+    consecutive days they share: size of day-to-day moves, how often they exceed 25%, how closely the two move together, and how many of Undermine's big moves ours also made.
+    Group-level numbers only; no files saved."""
     from engine import target as TG
     read_table = read_table or _read_engine_table
     own, hist, groups = read_table("item_daily"), read_table("market_history"), read_table("item_groups")
     if own is None or own.empty:
         print("engine/item_daily.parquet is missing: run mode daily (upload ticked) first.")
         return {}
+    out = {}
+    om = TG.own_measures(own)
+    print("OUR PRICE DEFINITIONS, side by side on the same item-days (complete days, consecutive days only).")
+    if om.empty:
+        have = int(own["price_p15"].notna().sum()) if "price_p15" in own.columns else 0
+        print(f"Not enough days with the depth-based prices yet ({have:,} item-days have them; need {TG.MIN_PAIRS}+). Run mode daily (upload ticked) with this version: it recomputes the days it reads and fills them in;")
+        print("run it again with an earlier end_date to backfill more days, then run this again.")
+    else:
+        out["own"] = om
+        print("floor = the median of the day's hourly lowest prices (price_day). cheapest 15% / 30% of units = the median over the day's hours of the price at which that share of the units listed has been reached,")
+        print("so one cheap listing cannot set it. avg / typ = average / median size of a day-to-day move in percent; big = share of moves over 25%; jump = the median item's spread of daily moves;")
+        print("calmer_x = the floor's average move / this one's (above 1 = calmer than the floor); vs_floor = how far above the floor this price sits (median, percent).")
+        print(om.round(2).to_string(index=False))
+        f, best = om.iloc[0], om.sort_values("avg").iloc[0]
+        if best["measure"] != "price_day":
+            print(f"\nRead-out: the {best['what']} moves {best['avg']:.1f}% a day on average against {f['avg']:.1f}% for the floor ({best['calmer_x']:.1f}x calmer) and sits {best['vs_floor']:.0f}% above it. Forecast accuracy follows the target: this is the price to forecast.")
+        else:
+            print(f"\nRead-out: no depth-based price is calmer than the floor ({f['avg']:.1f}% a day). The target itself is not the lever; look at the items instead.")
     if hist is None or hist.empty:
-        print("engine/market_history.parquet is missing: run mode undermine (upload ticked) first.")
-        return {}
+        print("\n(Undermine comparison skipped: engine/market_history.parquet is missing; run mode undermine (upload ticked) first.)")
+        return out
     res = TG.compare_targets(own, hist, groups)
     if "overall" not in res:
-        print(f"Only {res.get('pairs', 0)} paired day-to-day changes (need {TG.MIN_PAIRS}+): our item_daily and Undermine's history share too few consecutive days. Run mode daily for more days, then again.")
-        return res
-    print(f"PRICE TARGET TEST: {res['pairs']:,} paired day-to-day changes over {res['days']} days ({res['first']:%Y-%m-%d} to {res['last']:%Y-%m-%d}).")
+        print(f"\nUndermine comparison: only {res.get('pairs', 0)} paired day-to-day changes (need {TG.MIN_PAIRS}+): our item_daily and Undermine's history share too few consecutive days. Run mode daily for more days, then again.")
+        return out
+    out.update(res)
+    print(f"\nPRICE TARGET TEST vs UNDERMINE: {res['pairs']:,} paired day-to-day changes over {res['days']} days ({res['first']:%Y-%m-%d} to {res['last']:%Y-%m-%d}).")
     print("theirs = Undermine's daily price (the lowest price at the day's busiest snapshot). own = ours (the median of the day's usable hourly lowest prices, spike hours dropped, days with 18+ usable hours).")
     print("Only items and consecutive days present in BOTH are used. Days are matched by calendar label (ours US Eastern, theirs probably UTC). avg / typ = average / median size of a day-to-day move in percent;")
     print("big = share of moves over 25%; jump = the median item's spread of daily moves; calmer_x = theirs_avg / own_avg (above 1 = ours is calmer); level_gap = median of own / theirs - 1 and within10 = share of item-days")
@@ -1283,7 +1303,7 @@ def run_target_test(store, args, read_table=None):
     o = res["overall"].iloc[0]
     print(f"\nRead-out: our daily price moves {o['own_avg']:.1f}% a day on average against Undermine's {o['theirs_avg']:.1f}% ({o['calmer_x']:.1f}x calmer). "
           f"Of Undermine's 25%+ moves, {o['confirmed']:.0f}% show up in ours and {o['blip']:.0f}% barely register. {o['within10']:.0f}% of item-days agree on the level within 10%.")
-    return res
+    return out
 
 
 def run_undermine_test(store, args, read_table=None):

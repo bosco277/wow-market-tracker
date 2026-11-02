@@ -1,9 +1,12 @@
-"""Which daily price is calmer: Undermine's, or ours?
+"""Which daily price is calmer: Undermine's, or ours? And which of OUR price definitions is calmest?
 
 Undermine's daily price is the lowest price at the day's busiest snapshot, so one cheap listing can set it. Our own `item_daily.price_day` is the MEDIAN of at least 18 hourly
 lowest prices with spike hours already dropped. The forecast bake-off on Undermine's series found that about 40% of cases come from items whose price swings 60% or more in a day,
 which says the target is noisy, not that models are weak. This module puts the two measures side by side on the days and items they share (consecutive days only) and says how
 much of the day-to-day movement in Undermine's series is real, meaning our own measure moves with it, and how much is a one-snapshot blip that our measure smooths away.
+
+`own_measures` needs no Undermine overlap: it puts our floor (price_day), the price of the cheapest 15% of units (price_p15) and of the cheapest 30% (price_p30) side by side on the same
+item-days, so the size of the daily moves can be compared directly.
 
 Group-level numbers only. Days are matched by calendar label: ours are US Eastern, Undermine's are probably UTC, so a few hours of offset is possible; each series' own swings are
 compared, which that offset hardly touches."""
@@ -41,6 +44,45 @@ def paired_changes(own: pd.DataFrame, hist: pd.DataFrame) -> pd.DataFrame:
     m["d_own"] = np.log10(m["own"]) - np.log10(g["own"].shift(1))
     m["d_theirs"] = np.log10(m["theirs"]) - np.log10(g["theirs"].shift(1))
     return m[consecutive & m["d_own"].notna() & m["d_theirs"].notna()].reset_index(drop=True)
+
+
+MEASURES = (("price_day", "floor (median of hourly lowest prices)"), ("price_p15", "cheapest 15% of units"), ("price_p30", "cheapest 30% of units"))
+
+
+def own_measures(own: pd.DataFrame) -> pd.DataFrame:
+    """One row per price definition we store, scored on the SAME item-days (complete days where every definition exists, consecutive days only): changes, items, avg / typ = average /
+    median size of a day-to-day move in percent, big = share of moves over 25%, jump = the median item's spread of daily moves (needs 7+ changes), calmer_x = the floor's average move /
+    this one's (above 1 = calmer than the floor), vs_floor = median of this price / the floor - 1 in percent (how far above the floor it sits)."""
+    if own is None or own.empty:
+        return pd.DataFrame()
+    cols = [c for c, _ in MEASURES if c in own.columns and own[c].notna().sum() >= MIN_PAIRS]
+    if "price_day" not in cols or len(cols) < 2:
+        return pd.DataFrame()
+    o = own[own["hours"] >= MIN_HOURS][["item_id", "day"] + cols].dropna().copy()
+    o = o[(o[cols] > 0).all(axis=1)]
+    o["day"] = pd.to_datetime(o["day"]).dt.normalize()
+    o["item_id"] = o["item_id"].astype(int)
+    o = o.sort_values(["item_id", "day"]).reset_index(drop=True)
+    g = o.groupby("item_id")
+    consecutive = ((o["day"] - g["day"].shift(1)) == pd.Timedelta(days=1)).to_numpy()
+    rows, floor_avg = [], None
+    for c, label in MEASURES:
+        if c not in cols:
+            continue
+        d = np.log10(o[c]) - np.log10(g[c].shift(1))
+        ok = consecutive & d.notna().to_numpy()
+        if ok.sum() < MIN_PAIRS:
+            continue
+        a = np.abs(d[ok].to_numpy())
+        per = pd.DataFrame({"i": o["item_id"][ok].to_numpy(), "d": d[ok].to_numpy()}).groupby("i")["d"].agg(["size", "std"])
+        per = per[per["size"] >= MIN_ITEM_CHANGES]
+        if c == "price_day":
+            floor_avg = float(a.mean())
+        rows.append({"measure": c, "what": label, "changes": int(ok.sum()), "items": int(o["item_id"][ok].nunique()), "avg": _pct(float(a.mean())), "typ": _pct(float(np.median(a))),
+                     "big": 100.0 * float((a > BIG).mean()), "jump": _pct(float(per["std"].median())) if len(per) else np.nan,
+                     "calmer_x": (floor_avg / float(a.mean())) if (floor_avg and a.mean() > 0) else np.nan,
+                     "vs_floor": _pct(float(np.median(np.log10(o[c] / o["price_day"])))) if c != "price_day" else 0.0})
+    return pd.DataFrame(rows)
 
 
 def _pct(x: float) -> float:

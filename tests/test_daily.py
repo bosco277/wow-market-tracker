@@ -14,6 +14,7 @@ sys.path.insert(0, _root)
 sys.path.insert(0, os.path.join(_root, "tools"))
 from engine import daily as D  # noqa: E402
 from engine.simulator import MarketSimulator, default_profiles  # noqa: E402
+from tests.helpers import mk  # noqa: E402
 
 
 def hourly(days=3, item=7, start="2026-10-05", sold=2.0, spike_hours=()):
@@ -23,6 +24,32 @@ def hourly(days=3, item=7, start="2026-10-05", sold=2.0, spike_hours=()):
     for k in spike_hours:
         h.loc[k, "spike"] = True
     return h
+
+
+class TestDepthPrices(unittest.TestCase):
+    def test_one_cheap_listing_sets_the_floor_but_not_the_depth_price(self):
+        # item 1: a single 1-unit listing at 1g, then 49 units at 10g and 50 at 12g. item 2: 90 units at 5g, 10 at 100g.
+        snap = mk([(1, 1, 1, 10000, "SHORT"), (2, 1, 49, 100000, "SHORT"), (3, 1, 50, 120000, "SHORT"), (4, 2, 90, 50000, "SHORT"), (5, 2, 10, 1000000, "SHORT")])
+        dp = D.depth_prices([snap], [1, 2]).set_index("item_id")
+        self.assertAlmostEqual(dp.loc[1, "p15"], 10.0)      # the 1g listing is only 1% of the units, so the cheapest 15% is reached at 10g
+        self.assertAlmostEqual(dp.loc[1, "p30"], 10.0)
+        self.assertAlmostEqual(dp.loc[2, "p15"], 5.0)       # a big cheap block IS the market
+        self.assertAlmostEqual(dp.loc[2, "p30"], 5.0)
+        self.assertTrue(D.depth_prices([snap], [99]).empty)
+
+    def test_depth_prices_flow_into_the_daily_table_and_old_rows_without_them_still_merge(self):
+        h = hourly(days=2)
+        h["p15"], h["p30"] = 9.0, 9.5
+        d = D.daily_table(h)
+        self.assertTrue(np.allclose(d["price_p15"], 9.0) and np.allclose(d["price_p30"], 9.5))
+        self.assertEqual(list(d.columns), D.COLUMNS)
+        self.assertTrue(D.daily_table(hourly(days=1))["price_p15"].isna().all())         # no depth data: empty, not an error
+        old = d.drop(columns=["price_p15", "price_p30"])                                  # a table stored before v0.7.26
+        merged = D.merge_daily(old, D.daily_table(hourly(days=1, start="2026-10-20")))
+        self.assertEqual(list(merged.columns), D.COLUMNS)
+        self.assertEqual(len(merged), 3)
+        refilled = D.merge_daily(old, d)                                                  # recomputing the same days fills the new columns (tie on hours: the new row wins)
+        self.assertTrue(refilled["price_p15"].notna().all())
 
 
 class TestDailyTable(unittest.TestCase):
