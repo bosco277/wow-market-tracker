@@ -1179,10 +1179,11 @@ def run_forecast_test(store, args, read_table=None):
     if hist is None or hist.empty:
         print("engine/market_history.parquet is missing: run mode undermine (upload ticked) first.")
         return {}
+    use_sarima = "sarima" in str(getattr(args, "ids", "") or "").lower()
     out, shown = {}, False
     cols = ["model", "miss_pct", "avg_pct", "vs_naive", "wape", "wape_med", "bias_pct", "track", "rmse_pct", "p95_pct", "big_pct", "dir_hit", "dir_n", "hit50", "hit80", "width80_pct"]
     for metric, title in (("price", "PRICE"), ("stock", "STOCK (units listed)")):
-        r = FO.bake_off(hist, groups, metric)
+        r = FO.bake_off(hist, groups, metric, sarima=use_sarima)
         if not r:
             print(f"\n({title} skipped: fewer than {FO.MIN_SPAN} dated days, or no item with {FO.MIN_ITEM_DAYS}+ days of history.)")
             continue
@@ -1195,9 +1196,12 @@ def run_forecast_test(store, args, read_table=None):
             print(f"How it is graded: the history is cut into {FO.FOLDS} test stretches ({f0:%Y-%m-%d} to {f1:%Y-%m-%d}). Every guess uses only the days before it, ranges are calibrated on days before the stretch,")
             print("and the guess is compared with what happened. Every method is scored on exactly the same cases. Retail is the test bed; Forever has to earn its own track record.")
             print("naive = tomorrow equals today. week_ago = same weekday last week. median7 = median of the last 7 days. ema50 / ema25 / ema10 = exponential averages (fast / medium / slow).")
-            print("weekday = an exponential average plus a learned weekday pattern. sarima = SARIMA(p,d,q)(P,D,Q)7 fitted per item on the days before each stretch, the best of four specs by AIC")
-            print("(conditional least squares, engine/sarima.py; a failed fit falls back to ema25). pooled = one regression across all items. kinked = pooled with separate slopes for ordinary moves and spikes")
+            print("weekday = an exponential average plus a learned weekday pattern. pooled = one regression across all items. kinked = pooled with separate slopes for ordinary moves and spikes")
             print("(it can stay put for small moves yet pull back after a spike). pooled_grp = pooled plus how far the item's group peers sit from their own averages today.")
+            if use_sarima:
+                print("sarima = SARIMA(p,d,q)(P,D,Q)7 fitted per item on the days before each stretch, the best of four specs by AIC (conditional least squares, engine/sarima.py; a failed fit falls back to ema25).")
+            else:
+                print("SARIMA is left out (it lost clearly in the first two logs and takes most of the run time); put the word sarima in item_ids to include it.")
             print("miss_pct = typical (median) miss as a percent of the price; avg_pct = average miss; vs_naive = average miss / naive's average miss (below 1.00 beats 'it stays put').")
             print("wape = total miss / total real value, all items pooled (pricey items weigh most); wape_med = the same for the median item. bias_pct = typical signed miss (positive = the real price ran ABOVE the guess);")
             print("track = average signed miss / average miss (+1 always too low, -1 always too high, near 0 = no lean). rmse_pct and p95_pct are the safety grades: rmse punishes big misses,")
@@ -1244,6 +1248,42 @@ def run_forecast_test(store, args, read_table=None):
     if not out:
         print("The stored history is too thin for a forecast test.")
     return out
+
+
+def run_target_test(store, args, read_table=None):
+    """Which daily price is calmer: Undermine's (lowest price at the busiest snapshot) or ours (median of the day's usable hourly lowest prices, spike hours dropped)? Compares the two on
+    the items and consecutive days they share: size of day-to-day moves, how often they exceed 25%, how closely the two move together, and how many of Undermine's big moves ours also made.
+    Needs item_daily (mode daily, upload ticked) and market_history (mode undermine). Group-level numbers only; no files saved."""
+    from engine import target as TG
+    read_table = read_table or _read_engine_table
+    own, hist, groups = read_table("item_daily"), read_table("market_history"), read_table("item_groups")
+    if own is None or own.empty:
+        print("engine/item_daily.parquet is missing: run mode daily (upload ticked) first.")
+        return {}
+    if hist is None or hist.empty:
+        print("engine/market_history.parquet is missing: run mode undermine (upload ticked) first.")
+        return {}
+    res = TG.compare_targets(own, hist, groups)
+    if "overall" not in res:
+        print(f"Only {res.get('pairs', 0)} paired day-to-day changes (need {TG.MIN_PAIRS}+): our item_daily and Undermine's history share too few consecutive days. Run mode daily for more days, then again.")
+        return res
+    print(f"PRICE TARGET TEST: {res['pairs']:,} paired day-to-day changes over {res['days']} days ({res['first']:%Y-%m-%d} to {res['last']:%Y-%m-%d}).")
+    print("theirs = Undermine's daily price (the lowest price at the day's busiest snapshot). own = ours (the median of the day's usable hourly lowest prices, spike hours dropped, days with 18+ usable hours).")
+    print("Only items and consecutive days present in BOTH are used. Days are matched by calendar label (ours US Eastern, theirs probably UTC). avg / typ = average / median size of a day-to-day move in percent;")
+    print("big = share of moves over 25%; jump = the median item's spread of daily moves; calmer_x = theirs_avg / own_avg (above 1 = ours is calmer); level_gap = median of own / theirs - 1 and within10 = share of item-days")
+    print("within 10% of each other; corr = how closely the two daily changes move together; confirmed = of Undermine's 25%+ moves, the share ours also made (same direction, at least half as big);")
+    print("blip = of those moves, the share ours barely noticed (under 5%): one-snapshot noise that a median smooths away.")
+    cols = ["changes", "items", "own_avg", "theirs_avg", "own_typ", "theirs_typ", "own_big", "theirs_big", "own_jump", "theirs_jump", "calmer_x", "level_gap", "within10", "corr", "confirmed", "blip"]
+    print("\n-- ALL SHARED ITEMS --")
+    print(res["overall"][cols].round(2).to_string(index=False))
+    fam = res.get("family")
+    if fam is not None and len(fam):
+        print("\n-- BY FAMILY --")
+        print(fam[["family"] + cols].round(2).to_string(index=False))
+    o = res["overall"].iloc[0]
+    print(f"\nRead-out: our daily price moves {o['own_avg']:.1f}% a day on average against Undermine's {o['theirs_avg']:.1f}% ({o['calmer_x']:.1f}x calmer). "
+          f"Of Undermine's 25%+ moves, {o['confirmed']:.0f}% show up in ours and {o['blip']:.0f}% barely register. {o['within10']:.0f}% of item-days agree on the level within 10%.")
+    return res
 
 
 def run_undermine_test(store, args, read_table=None):
@@ -1471,7 +1511,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now", "forecast_test"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now", "forecast_test", "target_test"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -1492,8 +1532,8 @@ def main(argv=None):
     ap.add_argument("--upload", action="store_true", help="derive: push the tables to engine/ in the HF repo")
     ap.add_argument("--batch", type=int, default=800, help="undermine: most items to fetch in one run (3 points each; the budget is 3,000 per hour)")
     args = ap.parse_args(argv)
-    store = None if args.command in ("ledger", "groups", "grouptest", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now", "forecast_test") else make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily, "undermine": run_undermine, "undermine_check": run_undermine_check, "undermine_test": run_undermine_test, "api_probe": run_api_probe, "ahledger_check": run_ahledger_check, "launch_backtest": run_launch_backtest, "launch_now": run_launch_now, "forecast_test": run_forecast_test}[args.command](store, args)
+    store = None if args.command in ("ledger", "groups", "grouptest", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now", "forecast_test", "target_test") else make_store(args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily, "undermine": run_undermine, "undermine_check": run_undermine_check, "undermine_test": run_undermine_test, "api_probe": run_api_probe, "ahledger_check": run_ahledger_check, "launch_backtest": run_launch_backtest, "launch_now": run_launch_now, "forecast_test": run_forecast_test, "target_test": run_target_test}[args.command](store, args)
 
 
 if __name__ == "__main__":

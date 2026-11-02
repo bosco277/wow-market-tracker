@@ -571,6 +571,17 @@ First real `forecast_test` log (Nov 2, 2026; 1,137 items, tests 2024-06-07 to 20
 * Open: robust price target (the lowest price is dominated by single cheap listings; our own hourly data can define a depth-based price), pooled models work from day 56 while per-item
   models cannot (a Forever point for the first weeks), and v0.7.24 adds the kinked model and the by-jumpiness / SARIMA-fitted-only tables to see where forecasts are tight enough to trade on.
 
+Second `forecast_test` log (v0.7.24, Nov 2, 2026) and v0.7.25:
+* SARIMA is out as a default: on the clean subset where it actually fitted (216,749 one-day cases) it scored 1.15 / 1.01 / 0.97 against naive at 1 / 3 / 7 days, plain EMAs 0.88-0.89 at 7 days,
+  and its 80% ranges ran narrow (0.75-0.78). `forecast_test` now leaves it out unless the word `sarima` is in item_ids (it was 2.5 of about 3 minutes of run time).
+* kinked is only marginally better than pooled (0.91 / 0.87 at 3 / 7 days vs 0.92 / 0.88) and does not recover naive's 1-day typical miss (9.2% vs 6.0%). pooled_grp == pooled again.
+* By jumpiness (price): calmest fifth (typical daily swing 7%): naive best at 1, 3, 7 days; average miss 8.6% / 16% / 24%, 80% range 21% / 57% / 93% wide. Jumpiest fifth (daily swing 137%):
+  average miss 60% / 104% / 135% for naive, 80% range 375% / 532% / 674% wide; models reach 0.85 / 0.80 of naive at 3 / 7 days. Models help only the jumpier three fifths at 3-7 days. hit80 is
+  0.78-0.81 at every level. About 40% of cases are in levels 4-5 (daily swings of 60%+): the lowest-price target itself is the main limit. Stock improves at every level (0.84-0.93 at 3-7 days).
+* v0.7.25 adds `target_test` (engine/target.py): our `item_daily.price_day` (median of the day's usable hourly lowest prices, spike hours dropped, 18+ usable hours) against Undermine's
+  (lowest price at the busiest snapshot) on shared items and consecutive days: size of daily moves, share over 25%, correlation, and how many of Undermine's 25%+ moves ours also makes
+  (confirmed) versus barely registers (blip). Day labels are matched as written (ours US Eastern, theirs probably UTC). Needs item_daily (mode daily, upload ticked) and market_history.
+
 First real `api_probe` log (Nov 1, 2026, 21:4x ET), and what v0.7.20 adds to the mode:
 * Known namespaces behaved as expected (retail, classic, classic1x, classicann all 200); the made-up namespace answered 403 on both paths. Of 30 guesses exactly one differed: `forever`
   (`static-forever-us` item classes 403, `dynamic-forever-us` connected-realm index 404). `camelot` and every other guess matched the made-up one.

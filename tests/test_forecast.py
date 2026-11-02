@@ -231,13 +231,25 @@ class TestSarimaInTheBakeOff(unittest.TestCase):
 
 
 class TestRunner(unittest.TestCase):
+    def test_sarima_is_left_out_unless_asked_for(self):
+        import lake
+        hist, groups, _ = world("weekly", n=48, days=420)
+        tables = {"market_history": hist, "item_groups": groups}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            res = lake.run_forecast_test(None, type("A", (), {"ids": ""})(), read_table=lambda name: tables.get(name, pd.DataFrame()))
+        out = buf.getvalue()
+        self.assertNotIn("sarima", set(res["price"]["summary"]["model"]))
+        self.assertNotIn("SARIMA CHECK", out)
+        self.assertIn("put the word sarima in item_ids", out)
+
     def test_forecast_test_mode_prints_every_model_and_a_verdict(self):
         import lake
         hist, groups, _ = world("weekly", n=48, days=420)
         tables = {"market_history": hist, "item_groups": groups}
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            lake.run_forecast_test(None, type("A", (), {})(), read_table=lambda name: tables.get(name, pd.DataFrame()))
+            lake.run_forecast_test(None, type("A", (), {"ids": "sarima"})(), read_table=lambda name: tables.get(name, pd.DataFrame()))
         out = buf.getvalue()
         for s in ("FORECAST BAKE-OFF", "naive", "ema25", "weekday", "sarima", "kinked", "pooled_grp", "BEST GUESS", "hit80", "BY HOW JUMPY", "SARIMA CHECK"):
             self.assertIn(s, out)
@@ -247,7 +259,7 @@ class TestRunner(unittest.TestCase):
         for rel in (".github/workflows/pick_items.yml", "tools/pick_items.yml"):
             with open(os.path.join(_root, rel)) as f:
                 text = f.read()
-            self.assertIn("forecast_test]", text)
+            self.assertIn("forecast_test, target_test]", text)
             self.assertIn("inputs.mode != 'forecast_test'", text)
             self.assertIn("boto3 scipy", text)      # SARIMA needs scipy on the runner
 
