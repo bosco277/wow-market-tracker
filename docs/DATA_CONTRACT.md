@@ -593,6 +593,24 @@ First real `target_test` log (v0.7.25, Nov 2, 2026; only 3 shared days, 2,867 pa
   calmer_x against the floor, how far above the floor each sits), then the Undermine comparison. If a depth price is clearly calmer it becomes the forecast target (TSM's AuctionDB market value is
   the same idea; the addon export's MarketPrice column is the Forever-side equivalent when only scans are available).
 
+### 2q. Hourly forecast bake-off (engine/forecast.py `Cfg` / `HOURLY`, `tools/lake.py forecast_hourly`; v0.7.27)
+Same test as 2p, run on OUR OWN hourly snapshots instead of Undermine's daily history. Reads the cached snapshots like mode `daily` (items = engine/items plus item_ids; set `days` to about 14),
+writes nothing, prints group-level numbers only. Why: the daily test could not see a 24-hour cycle, and trades happen on an hours horizon.
+* Data: `hourly_frame` takes the LAST snapshot in each US Eastern clock hour (the same clock the daily table uses; the repeated hour when clocks go back is merged into one slot, so the cycle
+  position stays continuous). Price = lowest unit price (gold), stock = units listed. A snapshot with under half the median number of listings is a partial capture (Oct 26 had 13K-31K against
+  262K) and counts as missing; they are listed in the output. An hour with no snapshot is a NaN gap; items with under 72 readings are left out (so the sample leans to items that are almost always listed).
+* Settings (`Cfg`, defaults = the daily test, so daily results are unchanged): season 24, horizons 1 / 4 / 12 / 24 hours, 48 hours of burn-in before an item is scored, rolling median of 6,
+  jumpiness = spread of hourly changes over 24 hours, every hour is an origin (step 1), 3 folds starting 40% in. Thresholds: a big miss is over 10% and a direction call counts at 1%+.
+  Candidates: naive, day_ago (same clock hour yesterday), median6, ema50 / ema25 / ema10 / ema04 (ema04 remembers about a day), hour_of_day (level plus a learned 24-slot pattern, the Holt-Winters
+  analogue), pooled / kinked / pooled_grp (as before, with 23 target-hour dummies and one extra feature: the fast average against the ema04 level, so the fit can learn a pull back to the daily level).
+  Display names replace the weekly ones (week_ago -> day_ago, median7 -> median6, weekday -> hour_of_day); the engine keeps the internal keys. At 24 hours day_ago equals naive exactly.
+  SARIMA is not run: it needs several cycles per item and only days of hours exist (the 24-hour version can be added when weeks have accumulated).
+* New guard (also protects the daily test): if a pooled model has too few rows (under 2,000) to fit in a stretch, that stretch is skipped for EVERY method, so all methods stay scored on identical cases.
+* "IS THERE A DAILY CYCLE?" (`hour_profile`): per clock hour, how far the typical item sits from its own centred 24-hour average (median over items and days) and the share of items leaning the same
+  way (about 0.50 at every hour = no shared cycle, near 1.00 = items move together). Independent of any model.
+* Honest limits: about a week of usable hourly history (first snapshots Oct 25 19:31 ET, Oct 26 missing), so the pooled fit's first stretch is thin at 24 hours and every figure is PRELIMINARY;
+  retail is the test bed, and Forever's own hourly track record has to be earned the same way.
+
 First real `api_probe` log (Nov 1, 2026, 21:4x ET), and what v0.7.20 adds to the mode:
 * Known namespaces behaved as expected (retail, classic, classic1x, classicann all 200); the made-up namespace answered 403 on both paths. Of 30 guesses exactly one differed: `forever`
   (`static-forever-us` item classes 403, `dynamic-forever-us` connected-realm index 404). `camelot` and every other guess matched the made-up one.

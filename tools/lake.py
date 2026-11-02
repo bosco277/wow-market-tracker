@@ -1250,6 +1250,91 @@ def run_forecast_test(store, args, read_table=None):
     return out
 
 
+def run_forecast_hourly(store, args, reader=None, read_table=None):
+    """The forecast bake-off on OUR OWN hourly snapshots: the last reading in each US Eastern clock hour, for the items in engine/items (plus --ids), guessed 1, 4, 12 and 24 hours ahead
+    with the same candidates as the daily test, the weekday pattern replaced by an hour-of-day pattern. Also says whether the items share a daily cycle at all. Only a week or two of
+    hourly snapshots exists, so the results are PRELIMINARY. Group-level numbers only; nothing item-level is printed or saved. Partial snapshots (under half the usual size) count as missing."""
+    from engine import forecast as FO
+    read_table = read_table or _read_engine_table
+    items, groups = read_table("items"), read_table("item_groups")
+    ids = set(items["item_id"].astype(int)) if items is not None and len(items) else set()
+    for tok in str(getattr(args, "ids", "") or "").replace(";", ",").split(","):
+        if tok.strip().isdigit():
+            ids.add(int(tok))
+    if not ids:
+        print("No items to cover: engine/items.parquet is empty or missing (run derive with upload first), and no --ids were given.")
+        return {}
+    snaps = [s for s in _load_all(store, args, reader) if s.kind == "commodity"]
+    if len(snaps) < 24:
+        print("Need at least 24 commodity snapshots in the window (about a day of hourly readings).")
+        return {}
+    frame, info = FO.hourly_frame(snaps, ids)
+    if info["dropped"]:
+        print(f"\n{len(info['dropped'])} partial snapshots left out (under {int(FO.MIN_SNAPSHOT_SHARE * 100)}% of the usual {info['median_listings']:,} listings; their prices are fake): "
+              + ", ".join(f"{_et_any(t)} ({n:,})" for t, n in info["dropped"][:6]) + (" ..." if len(info["dropped"]) > 6 else ""))
+    if frame.empty:
+        print("No usable hourly readings for these items in this window.")
+        return {}
+    out, shown, grids = {}, False, {}
+    cols = ["model", "miss_pct", "avg_pct", "vs_naive", "wape", "wape_med", "bias_pct", "track", "rmse_pct", "p95_pct", "big_pct", "dir_hit", "dir_n", "hit50", "hit80", "width80_pct"]
+    for metric, title in (("price", "PRICE"), ("stock", "STOCK (units listed)")):
+        g = FO.hourly_grid(frame, metric)
+        if g is None:
+            print(f"\n({title} skipped: no item has {FO.HOURLY.min_item}+ hourly readings.)")
+            continue
+        ids_m, idx, Y = g
+        grids[metric] = (ids_m, idx, Y)
+        r = FO.bake_off_grid(ids_m, idx, Y, groups, FO.HOURLY_HORIZONS, False, FO.HOURLY)
+        if not r:
+            print(f"\n({title} skipped: fewer than {FO.HOURLY.min_span} clock hours in the window.)")
+            continue
+        out[metric] = r
+        if not shown:
+            shown = True
+            f0, f1 = r["folds"][0][0], r["folds"][-1][1]
+            days = int(round(len(idx) / 24.0))
+            print(f"\nHOURLY FORECAST BAKE-OFF (PRELIMINARY): {r['items']} items, {r['first']:%Y-%m-%d %H:%M} to {r['last']:%Y-%m-%d %H:%M} US Eastern ({len(idx)} clock hours, about {days} days; an hour with no snapshot is a gap).")
+            print(f"Price = the lowest price in the last snapshot of each clock hour; stock = units listed then. Only about {days} days of hourly readings exist, so this is a first look, not a verdict: it gets better as days accumulate.")
+            print(f"How it is graded: after {FO.HOURLY.warmup} hours of burn-in the readings are cut into {FO.HOURLY.folds} test stretches ({f0:%a %m-%d %H:%M} to {f1:%a %m-%d %H:%M}). Every guess uses only the hours before it, ranges are calibrated on hours before the")
+            print("stretch, and every method is scored on exactly the same cases. SARIMA is not included: it needs several full cycles per item to fit a 24-hour season and a week of hours is too short.")
+            print("naive = next hour equals this hour. day_ago = the same clock hour yesterday. median6 = median of the last 6 hours. ema50 / ema25 / ema10 / ema04 = exponential averages (fast to very slow, ema04 remembers about a day).")
+            print("hour_of_day = an exponential average plus a learned hour-of-day pattern. pooled = one regression across all items (it also sees where the fast average sits against the daily one, and the target clock hour).")
+            print("kinked = pooled with separate slopes for ordinary moves and spikes. pooled_grp = pooled plus how far the item's group peers sit from their own averages now.")
+            print("miss_pct = typical (median) miss as a percent of the price; avg_pct = average miss; vs_naive = average miss / naive's average miss (below 1.00 beats 'it stays put'). wape / wape_med = total miss / total value (all items pooled / median item).")
+            print("bias_pct and track show any lean (positive = the real value ran ABOVE the guess). rmse_pct and p95_pct are the safety grades. big_pct = share of cases missed by more than 10%. dir_hit = when the guess said")
+            print("1%+ up or down from now, how often it moved that way (dir_n cases; about 0.50 = a coin flip). hit50 / hit80 = how often the real value fell inside the middle-50% / middle-80% range (should be near 0.50 / 0.80).")
+        t = r["summary"]
+        for h in FO.HOURLY_HORIZONS:
+            th = t[t["horizon"] == h]
+            if th.empty:
+                continue
+            print(f"\n-- {title}: {h} hour{'s' if h > 1 else ''} ahead ({int(th['rows'].iloc[0]):,} cases, {int(th['items'].max())} items){'; day_ago is the same as naive here' if h == 24 else ''} --")
+            print(th[cols].round(2).to_string(index=False))
+        print(f"\n-- {title}: BEST GUESS PER HORIZON (naive unless another method's average miss is {int(FO.BEAT * 100)}%+ smaller) --")
+        print("  " + ", ".join(f"{h} hour{'s' if h > 1 else ''}: {r['best'][h]}" for h in FO.HOURLY_HORIZONS if h in r["best"]))
+        fam = r.get("family")
+        if fam is not None and len(fam):
+            print(f"\n-- {title}: BEST GUESS BY FAMILY (naive_pct = naive's average miss; best_pct = the best method's; vs_naive below 1.00 = it helps) --")
+            print(fam.round(2).to_string(index=False))
+        bt = r.get("bins")
+        if bt is not None and len(bt):
+            print(f"\n-- {title}: BY HOW JUMPY THE ITEM HAS BEEN (1 = calmest fifth of cases, 5 = jumpiest; jump_pct = typical hourly swing; naive_typ = naive's typical miss; naive_pct / best_pct = average misses) --")
+            print(bt.round(2).to_string(index=False))
+    prof = None
+    for metric, label in (("price", "price"), ("stock", "stock")):
+        if metric not in grids:
+            continue
+        p = FO.hour_profile(grids[metric][2], grids[metric][1]).rename(columns={"vs_day_pct": f"{label}_vs_day_pct", "items_agree": f"{label}_agree"}).drop(columns="readings")
+        prof = p if prof is None else prof.merge(p, on="hour", how="outer")
+    if prof is not None and len(prof):
+        print("\n-- IS THERE A DAILY CYCLE? For each US Eastern clock hour: how far the typical item sits from its own 24-hour average (vs_day_pct, percent) and the share of items that lean the same way (agree;")
+        print("   about 0.50 at every hour = no shared cycle, near 1.00 = nearly every item moves together). Needs a few full days to mean anything. --")
+        print(prof.round(2).to_string(index=False))
+    if not out:
+        print("The hourly readings are too thin for a forecast test.")
+    return out
+
+
 def run_target_test(store, args, read_table=None):
     """Which daily price is calmer? (1) OUR price definitions side by side on the same item-days: the floor (median of the day's hourly lowest prices) against the price of the cheapest 15%
     and 30% of the units listed (needs days stored by mode daily since v0.7.26). (2) Undermine's daily price (lowest price at the busiest snapshot) against ours on the items and
@@ -1531,7 +1616,7 @@ def _has_tabulate():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now", "forecast_test", "target_test"])
+    ap.add_argument("command", choices=["plan", "files", "inspect", "rates", "market", "profile", "pick", "order", "item", "flips", "reconcile", "derive", "backtest", "ledger", "groups", "grouptest", "daily", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now", "forecast_test", "target_test", "forecast_hourly"])
     ap.add_argument("--store", choices=["hf", "b2", "local"], default="hf")
     ap.add_argument("--root", default="lake", help="folder for --store local")
     ap.add_argument("--days", type=int, default=3, help="how many days back from --end")
@@ -1553,7 +1638,7 @@ def main(argv=None):
     ap.add_argument("--batch", type=int, default=800, help="undermine: most items to fetch in one run (3 points each; the budget is 3,000 per hour)")
     args = ap.parse_args(argv)
     store = None if args.command in ("ledger", "groups", "grouptest", "undermine", "undermine_check", "undermine_test", "api_probe", "ahledger_check", "launch_backtest", "launch_now", "forecast_test", "target_test") else make_store(args)
-    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily, "undermine": run_undermine, "undermine_check": run_undermine_check, "undermine_test": run_undermine_test, "api_probe": run_api_probe, "ahledger_check": run_ahledger_check, "launch_backtest": run_launch_backtest, "launch_now": run_launch_now, "forecast_test": run_forecast_test, "target_test": run_target_test}[args.command](store, args)
+    return {"plan": run_plan, "files": run_files, "inspect": run_inspect, "rates": run_rates, "market": run_market, "profile": run_profile, "pick": run_pick, "order": run_order, "item": run_item, "flips": run_flips, "reconcile": run_reconcile, "derive": run_derive, "backtest": run_backtest, "ledger": run_ledger, "groups": run_groups, "grouptest": run_grouptest, "daily": run_daily, "undermine": run_undermine, "undermine_check": run_undermine_check, "undermine_test": run_undermine_test, "api_probe": run_api_probe, "ahledger_check": run_ahledger_check, "launch_backtest": run_launch_backtest, "launch_now": run_launch_now, "forecast_test": run_forecast_test, "target_test": run_target_test, "forecast_hourly": run_forecast_hourly}[args.command](store, args)
 
 
 if __name__ == "__main__":

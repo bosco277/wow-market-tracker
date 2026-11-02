@@ -42,6 +42,10 @@ name: Market tools
 #              daily moves are, and how many of Undermine's big moves ours also makes. Also compares our floor with depth-based prices (the price of the cheapest 15% / 30%
 #              of the units listed) once mode daily has stored them (v0.7.26 on). Needs item_daily (mode daily, upload ticked); the Undermine part also needs the Undermine
 #              history. No files saved.
+#   forecast_hourly  the same bake-off on OUR OWN hourly snapshots (the last reading in each US Eastern clock hour, for the items in engine/items): guess price and units
+#              listed 1, 4, 12 and 24 hours ahead, with an hour-of-day pattern as a candidate, and say whether the items share a daily cycle. Only the days of hourly snapshots
+#              you have exist (set days to about 14), so the first results are PRELIMINARY. Reads the snapshots like mode daily; no points used; group-level numbers only;
+#              no files saved.
 #   groups  builds the item-groups table (class, subclass, vendor price) from Blizzard's item data; use item_ids to add items; tick upload to publish it
 #   ledger  reads your Journalator.lua from the PRIVATE dataset (log_path = hf:system/Journalator.lua): real profit per flip, deposits, every
 #           listing's outcome. Needs no snapshots. Names are never printed; tick upload to store the tables in engine/ of the private dataset
@@ -52,7 +56,7 @@ on:
       mode:
         description: "What to run"
         type: choice
-        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger, groups, grouptest, daily, undermine, undermine_check, undermine_test, api_probe, ahledger_check, launch_backtest, launch_now, forecast_test, target_test]
+        options: [pick, market, profile, rates, files, inspect, plan, order, item, flips, reconcile, derive, backtest, ledger, groups, grouptest, daily, undermine, undermine_check, undermine_test, api_probe, ahledger_check, launch_backtest, launch_now, forecast_test, target_test, forecast_hourly]
         default: pick
       days:
         description: "How many days of data to load (pick looks back 72 h, so 4 or more)"
@@ -153,7 +157,7 @@ jobs:
 
       - name: Save results
         # the ledger is personal, and Undermine data is not ours to republish: both go only to the private dataset, never to a downloadable file
-        if: ${{ inputs.mode != 'ledger' && inputs.mode != 'undermine' && inputs.mode != 'undermine_check' && inputs.mode != 'undermine_test' && inputs.mode != 'api_probe' && inputs.mode != 'ahledger_check' && inputs.mode != 'launch_backtest' && inputs.mode != 'launch_now' && inputs.mode != 'forecast_test' && inputs.mode != 'target_test' }}
+        if: ${{ inputs.mode != 'ledger' && inputs.mode != 'undermine' && inputs.mode != 'undermine_check' && inputs.mode != 'undermine_test' && inputs.mode != 'api_probe' && inputs.mode != 'ahledger_check' && inputs.mode != 'launch_backtest' && inputs.mode != 'launch_now' && inputs.mode != 'forecast_test' && inputs.mode != 'target_test' && inputs.mode != 'forecast_hourly' }}
         uses: actions/upload-artifact@v4
         with:
           name: market-tools-results

@@ -259,7 +259,7 @@ class TestRunner(unittest.TestCase):
         for rel in (".github/workflows/pick_items.yml", "tools/pick_items.yml"):
             with open(os.path.join(_root, rel)) as f:
                 text = f.read()
-            self.assertIn("forecast_test, target_test]", text)
+            self.assertIn("forecast_test, target_test, forecast_hourly]", text)
             self.assertIn("inputs.mode != 'forecast_test'", text)
             self.assertIn("boto3 scipy", text)      # SARIMA needs scipy on the runner
 
@@ -270,6 +270,291 @@ class TestRunner(unittest.TestCase):
             res = lake.run_forecast_test(None, type("A", (), {})(), read_table=lambda name: pd.DataFrame())
         self.assertEqual(res, {})
         self.assertIn("mode undermine", buf.getvalue())
+
+
+# ---------------------------------------------------------------- hourly
+
+
+def hworld(kind, n=100, hours=216, seed=3, hole=True):
+    """Synthetic hourly history (US Eastern wall clock). cycle = a fixed level plus a 24-hour sine; walk = a random walk; noise = a fixed level plus noise. A hole of 25 hours near the start
+    (like the partial day in the real data). Returns (ids, hourly index, log10 grid)."""
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2026-10-25 20:00", periods=hours, freq="h")
+    hr = idx.hour.to_numpy()
+    base = rng.uniform(0.5, 3.0, n)[:, None]
+    if kind == "cycle":
+        Y = base + (0.04 * np.sin(2 * np.pi * (hr - 3) / 24))[None, :] + rng.normal(0, 0.01, (n, hours))
+    elif kind == "walk":
+        Y = base + np.cumsum(rng.normal(0, 0.01, (n, hours)), axis=1)
+    elif kind == "noise":
+        Y = base + rng.normal(0, 0.03, (n, hours))
+    else:
+        raise ValueError(kind)
+    if hole:
+        Y[:, 5:30] = np.nan
+    return list(range(1, n + 1)), idx, Y
+
+
+def hrun(kind, **kw):
+    ids, idx, Y = hworld(kind, **kw)
+    groups = pd.DataFrame({"item_id": ids, "group": [f"Fam: g{i // 10}" for i in range(len(ids))], "family": "Fam"})
+    return FO.bake_off_grid(ids, idx, Y, groups, FO.HOURLY_HORIZONS, False, FO.HOURLY)
+
+
+class TestHourlyConfig(unittest.TestCase):
+    def test_the_daily_settings_are_still_the_original_constants(self):
+        d = FO.DAILY
+        self.assertEqual((d.season, d.ma, d.vol_window, d.warmup, d.min_item, d.min_span), (7, 7, 14, FO.WARMUP, FO.MIN_ITEM_DAYS, FO.MIN_SPAN))
+        self.assertEqual(d.static, FO.STATIC)
+        self.assertIsNone(d.slow)
+        self.assertEqual(dict(d.alphas), FO.EMA_ALPHAS)
+
+    def test_hourly_phase_is_the_clock_hour_and_daily_phase_is_the_weekday(self):
+        idx = pd.date_range("2026-10-26 00:00", periods=30, freq="h")           # a Monday
+        np.testing.assert_array_equal(FO.HOURLY.phase_of(idx), idx.hour.to_numpy())
+        np.testing.assert_array_equal(FO.DAILY.phase_of(idx), np.zeros(30, int) + np.where(idx.day == 26, 0, 1))
+
+    def test_hourly_models_ignore_the_future(self):
+        ids, idx, Y = hworld("cycle", n=20, hours=300, hole=False)
+        wk = FO.HOURLY.phase_of(idx)
+        a, base_a = FO.static_forecasts(Y, wk, FO.HOURLY_HORIZONS, FO.HOURLY)
+        Y2 = Y.copy()
+        Y2[:, 200:] += 5.0
+        b, _ = FO.static_forecasts(Y2, wk, FO.HOURLY_HORIZONS, FO.HOURLY)
+        for m in FO.HOURLY.static:
+            for h in FO.HOURLY_HORIZONS:
+                np.testing.assert_allclose(a[m][h][:, :200], b[m][h][:, :200], err_msg=f"{m} h={h} used hours after the origin")
+        self.assertIn("Lslow", base_a)
+
+    def test_day_ago_is_the_same_clock_hour_yesterday(self):
+        ids, idx, Y = hworld("cycle", n=10, hours=120, hole=False)
+        a, _ = FO.static_forecasts(Y, FO.HOURLY.phase_of(idx), FO.HOURLY_HORIZONS, FO.HOURLY)
+        # a guess made at hour t for hour t+4 is the value at the same clock hour a day before the target: t+4-24 = t-20
+        np.testing.assert_allclose(a["week_ago"][4][:, 20:], Y[:, :-20])
+        np.testing.assert_allclose(a["week_ago"][24], Y)                      # a 24-hour horizon: the same clock hour yesterday is today's reading
+        self.assertTrue(np.isnan(a["week_ago"][4][:, :20]).all())
+
+    def test_the_slow_anchor_feature_exists_only_for_hourly(self):
+        ids, idx, Y = hworld("noise", n=12, hours=120, hole=False)
+        _, base = FO.static_forecasts(Y, FO.HOURLY.phase_of(idx), (1,), FO.HOURLY)
+        self.assertIn("d3", FO._features(Y, base, None))
+        w = pd.date_range("2022-01-03", periods=120)
+        _, base_d = FO.static_forecasts(Y, w.dayofweek.to_numpy(), (1,))
+        self.assertNotIn("d3", FO._features(Y, base_d, None))
+
+
+class TestHourlyBakeOff(unittest.TestCase):
+    def test_a_daily_cycle_is_found_and_the_methods_that_can_learn_it_win(self):
+        r = hrun("cycle")
+        t = r["summary"]
+        row_ = lambda m, h: t[(t["model"] == m) & (t["horizon"] == h)].iloc[0]
+        self.assertLess(row_("pooled", 1)["vs_naive"], 0.8)
+        self.assertLess(row_("hour_of_day", 12)["vs_naive"], 0.85)
+        self.assertNotEqual(r["best"][1], "naive")
+        self.assertNotEqual(r["best"][12], "naive")
+
+    def test_on_a_random_walk_nothing_beats_naive_and_the_ranges_hold(self):
+        r = hrun("walk")
+        self.assertEqual(set(r["best"].values()), {"naive"})
+        t = r["summary"]
+        nv = t[t["model"] == "naive"]
+        self.assertTrue(nv["hit80"].between(0.72, 0.88).all(), nv["hit80"].tolist())
+        self.assertTrue(nv["hit50"].between(0.42, 0.58).all(), nv["hit50"].tolist())
+
+    def test_smoothing_helps_on_noise(self):
+        r = hrun("noise")
+        t = r["summary"]
+        self.assertLess(t[(t["model"] == "ema10") & (t["horizon"] == 1)]["vs_naive"].iloc[0], 0.85)
+
+    def test_display_names_replace_the_weekly_ones(self):
+        r = hrun("noise")
+        names = set(r["summary"]["model"])
+        for m in ("day_ago", "median6", "hour_of_day", "ema04", "naive", "pooled", "kinked", "pooled_grp"):
+            self.assertIn(m, names)
+        for m in ("week_ago", "median7", "weekday", "sarima"):
+            self.assertNotIn(m, names)
+        self.assertTrue(set(r["best"].values()) <= names)
+
+    def test_a_day_ago_guess_at_24_hours_is_exactly_naive(self):
+        r = hrun("cycle")
+        t = r["summary"]
+        a, b = t[(t["model"] == "day_ago") & (t["horizon"] == 24)].iloc[0], t[(t["model"] == "naive") & (t["horizon"] == 24)].iloc[0]
+        self.assertAlmostEqual(a["avg_pct"], b["avg_pct"])
+        self.assertAlmostEqual(a["vs_naive"], 1.0)
+
+    def test_every_method_is_scored_on_the_same_cases_even_when_a_fit_has_too_few_rows(self):
+        ids, idx, Y = hworld("cycle", n=40, hours=200)          # too thin for the pooled fit in the first stretch at 24 hours
+        r = FO.bake_off_grid(ids, idx, Y, None, FO.HOURLY_HORIZONS, False, FO.HOURLY)
+        t = r["summary"]
+        for h, th in t.groupby("horizon"):
+            self.assertEqual(th["rows"].nunique(), 1, f"h={h}: {th[['model', 'rows']].values.tolist()}")
+
+    def test_horizons_are_1_4_12_and_24_hours(self):
+        r = hrun("noise")
+        self.assertEqual(sorted(r["summary"]["horizon"].unique()), [1, 4, 12, 24])
+
+    def test_the_hole_does_not_leak_into_the_scored_cases(self):
+        ids, idx, Y = hworld("noise")
+        res = FO.walk_forward(Y, idx, None, FO.HOURLY_HORIZONS, cfg=FO.HOURLY)
+        a = res["acc"][("naive", 1)]
+        self.assertTrue(np.isfinite(a.cat("E")).all())
+        self.assertLessEqual(a.cnt.max(), len(idx) - FO.HOURLY.warmup)
+
+    def test_too_few_hours_returns_nothing(self):
+        ids, idx, Y = hworld("noise", hours=80, hole=False)
+        self.assertEqual(FO.bake_off_grid(ids, idx, Y, None, FO.HOURLY_HORIZONS, False, FO.HOURLY), {})
+
+    def test_sarima_is_never_run_on_hourly_data(self):
+        ids, idx, Y = hworld("noise", n=60)
+        r = FO.bake_off_grid(ids, idx, Y, None, FO.HOURLY_HORIZONS, True, FO.HOURLY)
+        self.assertNotIn("sarima", set(r["summary"]["model"]))
+        self.assertEqual(r["sarima_info"], [])
+
+
+def _snap(ts, items, price_scale=1.0, first_id=0):
+    """A small commodity book: three listings per item (floor, +10%, +30%); items = {item_id: floor in gold}."""
+    from tests.helpers import mk
+    rows, a = [], first_id
+    for it, gold in items.items():
+        for mult, q in ((1.0, 5), (1.1, 10), (1.3, 20)):
+            a += 1
+            rows.append((a, it, q, int(round(gold * mult * price_scale * 10000)), "LONG"))
+    return mk(rows, ts=pd.Timestamp(ts))
+
+
+class TestHourlyFrame(unittest.TestCase):
+    def test_hours_are_us_eastern_and_the_last_reading_in_an_hour_wins(self):
+        snaps = [_snap("2026-10-27 12:10", {7: 10.0}), _snap("2026-10-27 12:50", {7: 20.0}, first_id=100), _snap("2026-10-27 13:30", {7: 30.0}, first_id=200)]
+        f, info = FO.hourly_frame(snaps, [7])
+        self.assertEqual(f["hour"].tolist(), [pd.Timestamp("2026-10-27 08:00"), pd.Timestamp("2026-10-27 09:00")])          # EDT is UTC-4
+        self.assertEqual(f["floor_gold"].tolist(), [20.0, 30.0])
+        self.assertEqual(f["units_listed"].tolist(), [35, 35])
+        self.assertEqual(info["snapshots"], 3)
+
+    def test_the_clock_going_back_an_hour_merges_the_repeated_hour(self):
+        snaps = [_snap("2026-11-01 05:30", {7: 10.0}), _snap("2026-11-01 06:30", {7: 12.0}, first_id=100), _snap("2026-11-01 07:30", {7: 14.0}, first_id=200)]
+        f, _ = FO.hourly_frame(snaps, [7])
+        self.assertEqual(f["hour"].tolist(), [pd.Timestamp("2026-11-01 01:00"), pd.Timestamp("2026-11-01 02:00")])
+        self.assertEqual(f["floor_gold"].tolist(), [12.0, 14.0])
+
+    def test_partial_snapshots_are_dropped_and_reported(self):
+        snaps = [_snap(f"2026-10-27 {12 + k}:30", {i: 5.0 + i for i in range(1, 21)}, first_id=1000 * k) for k in range(5)]
+        snaps.append(_snap("2026-10-27 17:30", {1: 99.0, 2: 99.0}, first_id=9000))                       # 6 listings against a usual 60
+        f, info = FO.hourly_frame(snaps, range(1, 21))
+        self.assertEqual(len(info["dropped"]), 1)
+        self.assertEqual(info["dropped"][0][1], 6)
+        self.assertNotIn(99.0, f["floor_gold"].tolist())
+        self.assertEqual(info["median_listings"], 60)
+
+    def test_only_the_asked_for_items_and_nothing_when_empty(self):
+        snaps = [_snap("2026-10-27 12:30", {1: 5.0, 2: 6.0, 3: 7.0})]
+        f, _ = FO.hourly_frame(snaps, [2])
+        self.assertEqual(f["item_id"].tolist(), [2])
+        f0, info0 = FO.hourly_frame([], [2])
+        self.assertTrue(f0.empty)
+        self.assertEqual(info0["snapshots"], 0)
+
+    def test_grid_has_nan_for_hours_with_no_reading_and_drops_thin_items(self):
+        hours = pd.date_range("2026-10-27 08:00", periods=100, freq="h")
+        rows = []
+        for it, keep in ((1, [h for i, h in enumerate(hours) if i % 10 != 3]), (2, list(hours[:20]))):
+            rows += [(it, h, 10.0, 50) for h in keep]
+        frame = pd.DataFrame(rows, columns=["item_id", "hour", "floor_gold", "units_listed"])
+        ids, idx, Y = FO.hourly_grid(frame, "price", min_obs=72)
+        self.assertEqual(ids, [1])
+        self.assertEqual(len(idx), 100)
+        self.assertEqual(int(np.isnan(Y[0]).sum()), 10)
+        np.testing.assert_allclose(Y[0][np.isfinite(Y[0])], 1.0)
+        ids2, _, Y2 = FO.hourly_grid(frame, "stock", min_obs=72)
+        np.testing.assert_allclose(Y2[0][np.isfinite(Y2[0])], np.log10(50))
+        self.assertIsNone(FO.hourly_grid(frame, "price", min_obs=500))
+
+
+class TestHourProfile(unittest.TestCase):
+    def test_a_shared_cycle_shows_up_with_the_right_sign_and_everyone_agrees(self):
+        ids, idx, Y = hworld("cycle", hole=False, hours=216)
+        p = FO.hour_profile(Y, idx).set_index("hour")
+        self.assertEqual(len(p), 24)
+        self.assertGreater(p.loc[9, "vs_day_pct"], 5.0)
+        self.assertLess(p.loc[21, "vs_day_pct"], -5.0)
+        self.assertGreater(p.loc[9, "items_agree"], 0.9)
+
+    def test_without_a_cycle_items_do_not_agree(self):
+        ids, idx, Y = hworld("noise", hole=False, hours=216)
+        p = FO.hour_profile(Y, idx)
+        self.assertLess(float(p["items_agree"].mean()), 0.7)
+        self.assertLess(float(p["vs_day_pct"].abs().max()), 3.0)
+
+
+class TestHourlyRunner(unittest.TestCase):
+    def _world_snaps(self, hours=216, n=100, partial_at=40):
+        rng = np.random.default_rng(5)
+        start = pd.Timestamp("2026-10-25 23:31")                                               # UTC, like the real run: first reading in the evening
+        base = rng.uniform(0.5, 2.5, n)
+        snaps = []
+        for k in range(hours):
+            ts = start + pd.Timedelta(hours=k)
+            hr_et = (ts - pd.Timedelta(hours=4)).hour
+            lvl = base + 0.04 * np.sin(2 * np.pi * (hr_et - 3) / 24) + rng.normal(0, 0.01, n)
+            items = {i + 1: float(10 ** lvl[i]) for i in range(n)}
+            if k == partial_at:
+                items = {i + 1: 999.0 for i in range(3)}
+            snaps.append(_snap(ts, items, first_id=100000 * k))
+        return snaps, n
+
+    def _run(self, snaps, n, ids_arg=""):
+        import lake
+        groups = pd.DataFrame({"item_id": range(1, n + 1), "group": [f"Fam: g{i // 10}" for i in range(n)], "family": "Fam"})
+        tables = {"items": pd.DataFrame({"item_id": range(1, n + 1)}), "item_groups": groups}
+        old = lake._load_all
+        lake._load_all = lambda store, args, reader=None: snaps
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                res = lake.run_forecast_hourly(object(), type("A", (), {"ids": ids_arg})(), read_table=lambda name: tables.get(name, pd.DataFrame()))
+        finally:
+            lake._load_all = old
+        return res, buf.getvalue()
+
+    def test_prints_every_method_the_cycle_table_and_the_partial_snapshot_note(self):
+        snaps, n = self._world_snaps()
+        res, out = self._run(snaps, n)
+        for s in ("HOURLY FORECAST BAKE-OFF (PRELIMINARY)", "naive", "day_ago", "median6", "ema04", "hour_of_day", "kinked", "pooled_grp", "BEST GUESS", "hit80", "BY HOW JUMPY",
+                  "IS THERE A DAILY CYCLE", "partial snapshots left out", "1 hour ahead", "4 hours ahead", "12 hours ahead", "24 hours ahead", "PRICE", "STOCK"):
+            self.assertIn(s, out)
+        self.assertFalse(any(line.startswith("==") for line in out.splitlines()))
+        self.assertEqual(set(res), {"price", "stock"})
+        self.assertNotIn("sarima", out.lower().replace("sarima is not included", ""))
+
+    def test_the_cycle_is_visible_in_the_results(self):
+        snaps, n = self._world_snaps()
+        res, _ = self._run(snaps, n)
+        t = res["price"]["summary"]
+        self.assertLess(t[(t["model"] == "pooled") & (t["horizon"] == 1)]["vs_naive"].iloc[0], 0.85)
+
+    def test_no_items_and_too_few_snapshots_say_what_to_do(self):
+        import lake
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            res = lake.run_forecast_hourly(object(), type("A", (), {"ids": ""})(), read_table=lambda name: pd.DataFrame())
+        self.assertEqual(res, {})
+        self.assertIn("No items to cover", buf.getvalue())
+        snaps, n = self._world_snaps(hours=10, partial_at=99)
+        res, out = self._run(snaps, n)
+        self.assertEqual(res, {})
+        self.assertIn("at least 24", out)
+
+    def test_workflow_lists_the_mode_and_skips_saving_results(self):
+        for rel in (".github/workflows/pick_items.yml", "tools/pick_items.yml"):
+            with open(os.path.join(_root, rel)) as f:
+                text = f.read()
+            self.assertIn("forecast_hourly]", text)
+            self.assertIn("inputs.mode != 'forecast_hourly'", text)
+        with open(os.path.join(_root, "tools", "lake.py")) as f:
+            src = f.read()
+        # the mode reads snapshots, so it must be given a store (it is NOT in the list of modes that run without one)
+        line = [l for l in src.splitlines() if l.strip().startswith("store = None if args.command in")][0]
+        self.assertNotIn("forecast_hourly", line)
 
 
 if __name__ == "__main__":

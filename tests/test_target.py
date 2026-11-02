@@ -163,7 +163,7 @@ class TestRunner(unittest.TestCase):
         for rel in (".github/workflows/pick_items.yml", "tools/pick_items.yml"):
             with open(os.path.join(_root, rel)) as f:
                 text = f.read()
-            self.assertIn("target_test]", text)
+            self.assertIn("target_test", text.split("options:")[1].splitlines()[0])
             self.assertIn("inputs.mode != 'target_test'", text)
 
 
