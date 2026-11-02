@@ -139,10 +139,10 @@ def fill_gaps(y: np.ndarray) -> np.ndarray:
 
 def forecast_all(Y: np.ndarray, fit_end: int, lo: int, hi: int, hs: Sequence[int], specs=SPECS) -> Tuple[Dict[int, np.ndarray], dict]:
     """Fit each item on its days up to `fit_end`, keep the parameters fixed, and forecast from every origin in [lo, hi].
-    Returns ({h: items x days array, NaN outside [lo, hi] and for items that could not be fitted}, {"fitted": n, "failed": n, "specs": {spec: count}})."""
+    Returns ({h: items x days array, NaN outside [lo, hi] and for items that could not be fitted}, {"fitted": n, "failed": n, "specs": {spec: count}, "ok": per-item flags})."""
     n, T = Y.shape
     out = {h: np.full((n, T), np.nan) for h in hs}
-    info = {"fitted": 0, "failed": 0, "specs": {}}
+    info = {"fitted": 0, "failed": 0, "specs": {}, "ok": np.zeros(n, bool)}
     for i in range(n):
         row = Y[i, :hi + 1]
         obs = np.isfinite(row)
@@ -158,6 +158,7 @@ def forecast_all(Y: np.ndarray, fit_end: int, lo: int, hi: int, hs: Sequence[int
             continue
         spec, params = fit
         info["fitted"] += 1
+        info["ok"][i] = True
         info["specs"][spec] = info["specs"].get(spec, 0) + 1
         f = forecast_series(y, spec, params, hs)
         a, b = max(lo - first, 0), hi - first + 1

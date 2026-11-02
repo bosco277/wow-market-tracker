@@ -548,17 +548,28 @@ Methods: naive; week_ago (same weekday last week); median7; ema50 / ema25 / ema1
 fitted on the days before the calibration stretch and then held fixed while it is filtered forward, best of four specs by AIC: (1,0,1)(1,0,1) around a fixed level, (0,1,1)(0,0,1) local level,
 (0,1,1)(0,1,1) airline, (1,1,1)(1,0,1) damped trend; short gaps interpolated, a failed fit falls back to ema25 and is counted; needs scipy, added to the workflow's `pip install` line, nothing in
 requirements.txt touched); pooled (one Huber regression across all items: deviation of today from the item's EMA25, EMA50-EMA10, median7-EMA25, weekday of
-the target); pooled_grp (pooled + how far the item's group peers sit from their own EMA25 today: the cheap ablation of whether neighbours help, standing in for a graph model).
+the target); kinked (pooled with separate slopes for ordinary moves and for spikes beyond 26% from the EMA25, so it can stay put for small moves yet pull back after a spike); pooled_grp (pooled + how far the item's group peers sit from their own EMA25 today: the cheap ablation of whether neighbours help, standing in for a graph model).
 Ranges: the method's own signed misses from the calibration days, quantiles q10 / q25 / q75 / q90, kept apart for five levels of recent jumpiness (14-day spread of daily changes), so calm
 items get narrower ranges. Measures per method and horizon: miss_pct (median miss as % of price), avg_pct, vs_naive (mean |miss| / naive's, below 1 beats it; this is the "MASE" of the
 notes without the in-sample scaling), wape (pooled, pricey items weigh most) and wape_med, bias_pct and track (signed; positive = real price above the guess), rmse_pct, p95_pct, big_pct
-(share over 25%), dir_hit (only when the guess moves 3%+ from today) and dir_n, hit50 / hit80 / width80_pct. `best_models`: naive unless another is 3%+ better on average |miss|.
+(share over 25%), dir_hit (only when the guess moves 3%+ from today) and dir_n, hit50 / hit80 / width80_pct. `best_models`: naive unless another is 3%+ better on average |miss|. Also printed: best guess by family, results by item jumpiness (five levels set on each fold's
+calibration days: daily swing, naive's typical and average miss, best method, vs_naive, hit80, width80), and a SARIMA CHECK that rescored every method only on the item-fits where SARIMA
+really fitted (an item needs 120 days before the stretch; the rest fall back to ema25).
 Limits: retail survivors only (items still traded today), daily data not hourly, price is the lowest price (undercut noise), no sales; tested on synthetic worlds (finds a planted weekday
 rhythm, finds a planted shared shock, loses to naive on a random walk, ranges near 0.5 / 0.8 on stationary noise); the first real result is the `forecast_test` log. SARIMA is our own
 conditional-least-squares implementation, not statsmodels (the build sandbox cannot install it, so code calling it could not be tested): it recovers planted AR / seasonal / MA parameters,
 matches the textbook AR(1) and MA(1) forecasts, reproduces an exponential average with (0,1,1), and never reads days after the origin. If SARIMA wins on the real log, an exact-likelihood
 statsmodels fit can be added as one more candidate and compared on the same cases. AIC is used only to pick among the four SARIMA specs; Ljung-Box is not computed: the hidden-days test is the stricter check. Next (after reading the log): a daily forecast LEDGER that stores each day's forecasts with ranges and grades them when the
 actual day arrives (prices from our own scans, sales from Journalator), so ranges are re-calibrated on Forever's own misses.
+
+First real `forecast_test` log (Nov 2, 2026; 1,137 items, tests 2024-06-07 to 2026-11-01), read before v0.7.24:
+* The target is jumpy: naive's 1-day typical miss is 6% but its average is 28% and 28% of days miss by over 25% (prices sit, then jump). Average miss against naive (vs_naive): price 1 day
+  best 1.00 (naive's typical miss still wins), 3 days 0.92 (pooled), 7 days 0.88 (pooled; EMA / weekday 0.89); stock 0.97 / 0.87 / 0.87 (pooled). Crafting materials gain most (0.86-0.87 at 3-7 days).
+* SARIMA (our CSS fit) lost: 1.15 / 1.00 / 0.96 against a plain EMA's 1.20 / 0.94 / 0.89 (price). 1,108 of 3,411 item-folds (32%) fell back to ema25 (under 120 days of history before the
+  stretch). weekday == ema25 (0.95 vs 0.94 at 3 days; 0.89 vs 0.89 at 7), so the weekly rhythm SARIMA exists to catch is not in daily lowest-price series. pooled_grp == pooled to two decimals:
+  group peers add nothing at daily resolution (recipe edges not tested). Ranges honest: hit50 ~0.50, hit80 0.79-0.80 (SARIMA 0.77-0.78); wide: 7-day 80% width 180-240% of price.
+* Open: robust price target (the lowest price is dominated by single cheap listings; our own hourly data can define a depth-based price), pooled models work from day 56 while per-item
+  models cannot (a Forever point for the first weeks), and v0.7.24 adds the kinked model and the by-jumpiness / SARIMA-fitted-only tables to see where forecasts are tight enough to trade on.
 
 First real `api_probe` log (Nov 1, 2026, 21:4x ET), and what v0.7.20 adds to the mode:
 * Known namespaces behaved as expected (retail, classic, classic1x, classicann all 200); the made-up namespace answered 403 on both paths. Of 30 guesses exactly one differed: `forever`

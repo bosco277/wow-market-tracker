@@ -1196,7 +1196,8 @@ def run_forecast_test(store, args, read_table=None):
             print("and the guess is compared with what happened. Every method is scored on exactly the same cases. Retail is the test bed; Forever has to earn its own track record.")
             print("naive = tomorrow equals today. week_ago = same weekday last week. median7 = median of the last 7 days. ema50 / ema25 / ema10 = exponential averages (fast / medium / slow).")
             print("weekday = an exponential average plus a learned weekday pattern. sarima = SARIMA(p,d,q)(P,D,Q)7 fitted per item on the days before each stretch, the best of four specs by AIC")
-            print("(conditional least squares, engine/sarima.py; a failed fit falls back to ema25). pooled = one regression across all items. pooled_grp = pooled plus how far the item's group peers sit from their own averages today.")
+            print("(conditional least squares, engine/sarima.py; a failed fit falls back to ema25). pooled = one regression across all items. kinked = pooled with separate slopes for ordinary moves and spikes")
+            print("(it can stay put for small moves yet pull back after a spike). pooled_grp = pooled plus how far the item's group peers sit from their own averages today.")
             print("miss_pct = typical (median) miss as a percent of the price; avg_pct = average miss; vs_naive = average miss / naive's average miss (below 1.00 beats 'it stays put').")
             print("wape = total miss / total real value, all items pooled (pricey items weigh most); wape_med = the same for the median item. bias_pct = typical signed miss (positive = the real price ran ABOVE the guess);")
             print("track = average signed miss / average miss (+1 always too low, -1 always too high, near 0 = no lean). rmse_pct and p95_pct are the safety grades: rmse punishes big misses,")
@@ -1227,6 +1228,19 @@ def run_forecast_test(store, args, read_table=None):
         if fam is not None and len(fam):
             print(f"\n-- {title}: BEST GUESS BY FAMILY (naive_pct = naive's average miss; best_pct = the best method's; vs_naive below 1.00 = it helps) --")
             print(fam.round(2).to_string(index=False))
+        bt = r.get("bins")
+        if bt is not None and len(bt):
+            print(f"\n-- {title}: BY HOW JUMPY THE ITEM HAS BEEN (1 = calmest fifth of cases, 5 = jumpiest; jump_pct = typical daily swing; naive_typ = naive's typical miss; naive_pct / best_pct = average misses) --")
+            print(bt.round(2).to_string(index=False))
+        fit = r.get("summary_fit")
+        if fit is not None and len(fit):
+            print(f"\n-- {title}: SARIMA CHECK, only the item-fits where SARIMA really fitted (the rest fell back to ema25); every method scored on these same cases --")
+            for h in FO.HORIZONS:
+                tf = fit[fit["horizon"] == h]
+                if tf.empty:
+                    continue
+                print(f"  {h} day{'s' if h > 1 else ''} ahead ({int(tf['rows'].iloc[0]):,} cases)")
+                print(tf[["model", "miss_pct", "avg_pct", "vs_naive", "rmse_pct", "p95_pct", "hit50", "hit80", "width80_pct"]].round(2).to_string(index=False))
     if not out:
         print("The stored history is too thin for a forecast test.")
     return out

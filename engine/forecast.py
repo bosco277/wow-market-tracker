@@ -13,6 +13,7 @@ guesses are tuned or calibrated on earlier days only, then scored on the stretch
   weekday    an exponential average plus a learned weekday pattern  (the plain-arithmetic cousin of a seasonal model)
   sarima     SARIMA(p,d,q)(P,D,Q)7 fitted per item on the days before each test stretch, best of four specs by AIC (engine/sarima.py)
   pooled     one regression learned across ALL items: where today sits against the item's own averages, and the weekday of the target
+  kinked     pooled, but small moves and spikes get their own slopes: it can stay put for ordinary moves yet pull back after a spike
   pooled_grp the same plus how far the item's group peers are from THEIR averages today (the stand-in for a recipe/graph model; an ablation of whether peers help)
 
 Ranges: each guess gets a range from its own past misses, kept separately for five levels of recent jumpiness (an item that has been calm gets a narrower range than one that
@@ -47,7 +48,8 @@ EMA_ALPHAS = {"ema50": 0.5, "ema25": 0.25, "ema10": 0.1}
 HW_ALPHA, HW_GAMMA, HW_CLIP = 0.2, 0.15, 0.15
 STATIC = ("naive", "week_ago", "median7", "ema50", "ema25", "ema10", "weekday")
 SARIMA = "sarima"
-POOLED = ("pooled", "pooled_grp")
+POOLED = ("pooled", "kinked", "pooled_grp")
+KINK = 0.1                  # log10: a deviation from the item's average beyond about 26% counts as a spike for the kinked model
 
 
 # ---------------------------------------------------------------- data
@@ -159,15 +161,21 @@ def group_dev(D: np.ndarray, gi: np.ndarray, min_peers: int = 3) -> np.ndarray:
 
 def _features(Y: np.ndarray, base: dict, gi: Optional[np.ndarray]) -> dict:
     d0 = np.clip(Y - base["L25"], -CLIP, CLIP)
-    f = {"d0": d0, "d1": np.clip(base["L50"] - base["L10"], -CLIP, CLIP), "d2": np.clip(base["R7"] - base["L25"], -CLIP, CLIP)}
+    d0s = np.clip(d0, -KINK, KINK)
+    f = {"d0": d0, "d0s": d0s, "d0b": d0 - d0s, "d1": np.clip(base["L50"] - base["L10"], -CLIP, CLIP), "d2": np.clip(base["R7"] - base["L25"], -CLIP, CLIP)}
     if gi is not None:
         f["gd"] = np.clip(group_dev(Y - base["L25"], gi), -CLIP, CLIP)
     return f
 
 
-def _design(feat: dict, wk: np.ndarray, ii: np.ndarray, tt: np.ndarray, h: int, grp: bool) -> np.ndarray:
-    cols = [np.ones(len(ii)), feat["d0"][ii, tt], feat["d1"][ii, tt], feat["d2"][ii, tt]]
-    if grp:
+def _design(feat: dict, wk: np.ndarray, ii: np.ndarray, tt: np.ndarray, h: int, kind: str) -> np.ndarray:
+    cols = [np.ones(len(ii))]
+    if kind == "kinked":
+        cols.extend((feat["d0s"][ii, tt], feat["d0b"][ii, tt]))
+    else:
+        cols.append(feat["d0"][ii, tt])
+    cols.extend((feat["d1"][ii, tt], feat["d2"][ii, tt]))
+    if kind == "pooled_grp":
         cols.append(feat["gd"][ii, tt])
     target_wd = (wk[tt] + h) % 7
     cols.extend((target_wd == d).astype(float) for d in range(1, 7))
@@ -189,12 +197,12 @@ def _pairs(valid: np.ndarray, cols: np.ndarray) -> Tuple[np.ndarray, np.ndarray]
     return ii, cols[jj]
 
 
-def pooled_fit(Y, base, feat, wk, valid, h, fit_cols, grp: bool):
+def pooled_fit(Y, base, feat, wk, valid, h, fit_cols, kind: str = "pooled"):
     """Coefficients of: target (the value h days on, minus the item's moderate average today) ~ features. None when there are too few rows."""
     ii, tt = _pairs(valid, fit_cols)
     if len(ii) < 2000:
         return None
-    X = _design(feat, wk, ii, tt, h, grp)
+    X = _design(feat, wk, ii, tt, h, kind)
     y = np.clip(Y[ii, tt + h] - base["L25"][ii, tt], -2 * CLIP, 2 * CLIP)
     ok = np.isfinite(X).all(1) & np.isfinite(y)
     if ok.sum() < 2000:
@@ -202,10 +210,10 @@ def pooled_fit(Y, base, feat, wk, valid, h, fit_cols, grp: bool):
     return _huber_fit(X[ok], y[ok])
 
 
-def pooled_predict(beta, base, feat, wk, h, cols, grp: bool) -> np.ndarray:
+def pooled_predict(beta, base, feat, wk, h, cols, kind: str = "pooled") -> np.ndarray:
     n = base["L25"].shape[0]
     ii, tt = np.repeat(np.arange(n), len(cols)), np.tile(cols, n)
-    X = _design(feat, wk, ii, tt, h, grp)
+    X = _design(feat, wk, ii, tt, h, kind)
     return (base["L25"][ii, tt] + X @ beta).reshape(n, len(cols))
 
 
@@ -220,18 +228,22 @@ class _Acc:
         self.h80: List[np.ndarray] = []
         self.w80: List[np.ndarray] = []
         self.dr: List[np.ndarray] = []
+        self.bn: List[np.ndarray] = []
+        self.sg: List[np.ndarray] = []
         self.gold_err = np.zeros(n_items)
         self.gold_y = np.zeros(n_items)
         self.abs_sum = np.zeros(n_items)
         self.cnt = np.zeros(n_items)
 
-    def add(self, ii, Yv, Fv, X0v, lo50, hi50, lo80, hi80):
+    def add(self, ii, Yv, Fv, X0v, lo50, hi50, lo80, hi80, bn, sg):
         n_items = len(self.cnt)
         E = Yv - Fv
         self.E.append(E.astype(np.float32))
         self.h50.append(((Yv >= lo50) & (Yv <= hi50)).astype(np.int8))
         self.h80.append(((Yv >= lo80) & (Yv <= hi80)).astype(np.int8))
         self.w80.append((hi80 - lo80).astype(np.float32))
+        self.bn.append(np.asarray(bn).astype(np.int8))
+        self.sg.append(np.asarray(sg).astype(np.float32))
         moved, act = Fv - X0v, Yv - X0v
         hit = (np.sign(moved) == np.sign(act)) & (act != 0)
         self.dr.append(np.where(np.abs(moved) > MOVE, hit, -1).astype(np.int8))
@@ -272,8 +284,9 @@ def walk_forward(Y: np.ndarray, days: pd.DatetimeIndex, gi: Optional[np.ndarray]
     sig = volatility(Y)
     static, base = static_forecasts(Y, wk, hs)
     feat = _features(Y, base, gi)
-    models = list(STATIC) + ([SARIMA] if sarima else []) + [POOLED[0]] + ([POOLED[1]] if gi is not None else [])
+    models = list(STATIC) + ([SARIMA] if sarima else []) + ["pooled", "kinked"] + (["pooled_grp"] if gi is not None else [])
     acc = {(m, h): _Acc(n) for m in models for h in hs}
+    acc_fit = {(m, h): _Acc(n) for m in models for h in hs} if sarima else {}     # the same cases, but only items SARIMA really fitted
     T0 = WARMUP
     span = T - 1 - T0
     cuts = [T0 + int(span * (START_FRAC + k * (1 - START_FRAC) / FOLDS)) for k in range(FOLDS)] + [T - 1]
@@ -281,11 +294,12 @@ def walk_forward(Y: np.ndarray, days: pd.DatetimeIndex, gi: Optional[np.ndarray]
     for k in range(FOLDS):
         c, c_next = cuts[k], cuts[k + 1]
         c_fit = T0 + int((c - T0) * (1 - CAL_FRAC))
-        sar = None
+        sar, sar_ok = None, None
         if sarima:
             from . import sarima as SA
             sar, info = SA.forecast_all(Y, c_fit, max(c_fit - max(hs) + 1, 0), c_next, hs)
             sar_info.append(info)
+            sar_ok = info["ok"]
         for h in hs:
             valid = obs & age_ok
             valid = valid & np.concatenate([obs[:, h:], np.zeros((n, h), bool)], axis=1)
@@ -304,11 +318,11 @@ def walk_forward(Y: np.ndarray, days: pd.DatetimeIndex, gi: Optional[np.ndarray]
             for m in models:
                 if m not in POOLED:
                     continue
-                beta = pooled_fit(Y, base, feat, wk, valid, h, fit_cols, grp=(m == "pooled_grp"))
+                beta = pooled_fit(Y, base, feat, wk, valid, h, fit_cols, kind=m)
                 if beta is None:
                     continue
-                guess_c[m] = pooled_predict(beta, base, feat, wk, h, cal_cols, m == "pooled_grp")
-                guess_t[m] = pooled_predict(beta, base, feat, wk, h, test_cols, m == "pooled_grp")
+                guess_c[m] = pooled_predict(beta, base, feat, wk, h, cal_cols, m)
+                guess_t[m] = pooled_predict(beta, base, feat, wk, h, test_cols, m)
             use = [m for m in models if m in guess_t]
             if "naive" not in use:
                 continue
@@ -325,7 +339,10 @@ def walk_forward(Y: np.ndarray, days: pd.DatetimeIndex, gi: Optional[np.ndarray]
             ii, jj = np.nonzero(mt)
             if len(ii) == 0:
                 continue
-            bins_t = np.digitize(sig[:, test_cols][ii, jj], edges)
+            sg_t = sig[:, test_cols][ii, jj]
+            bins_t = np.digitize(sg_t, edges)
+            Yv, X0v = Yt[ii, jj], X0t[ii, jj]
+            okrow = sar_ok[ii] if sar_ok is not None else None
             for m in use:
                 Ec = Yc - guess_c[m]
                 mc = vc & np.isfinite(Ec)
@@ -333,17 +350,20 @@ def walk_forward(Y: np.ndarray, days: pd.DatetimeIndex, gi: Optional[np.ndarray]
                 Fv = guess_t[m][ii, jj]
                 lo80, hi80 = Fv + q[bins_t, 0], Fv + q[bins_t, 3]
                 lo50, hi50 = Fv + q[bins_t, 1], Fv + q[bins_t, 2]
-                acc[(m, h)].add(ii, Yt[ii, jj], Fv, X0t[ii, jj], lo50, hi50, lo80, hi80)
+                acc[(m, h)].add(ii, Yv, Fv, X0v, lo50, hi50, lo80, hi80, bins_t, sg_t)
+                if okrow is not None and okrow.any():
+                    r = okrow
+                    acc_fit[(m, h)].add(ii[r], Yv[r], Fv[r], X0v[r], lo50[r], hi50[r], lo80[r], hi80[r], bins_t[r], sg_t[r])
         done.append((days[min(c + 1, T - 1)], days[min(c_next, T - 1)]))
-    return {"acc": acc, "models": models, "folds": done, "horizons": tuple(hs), "sarima_info": sar_info}
+    return {"acc": acc, "acc_fit": acc_fit, "models": models, "folds": done, "horizons": tuple(hs), "sarima_info": sar_info}
 
 
-def summarize(res: dict) -> pd.DataFrame:
+def summarize(res: dict, key: str = "acc") -> pd.DataFrame:
     """One row per (horizon, model): typical miss (median, as a percent of the price), average miss, miss against naive (below 1.0 beats it), WAPE (all items pooled, so pricey
     items weigh most) and WAPE of the median item, bias and tracking signal (positive = the real price ran above the guess), RMSE and 95th-percentile miss (the safety grades),
-    the share of big misses (over 25%), direction hit rate, and whether the ranges hold."""
+    the share of big misses (over 25%), direction hit rate, and whether the ranges hold. key = "acc_fit" scores only the cases where SARIMA was really fitted."""
     rows = []
-    acc, models = res["acc"], res["models"]
+    acc, models = res[key], res["models"]
     for h in res["horizons"]:
         nv = acc.get(("naive", h))
         if nv is None or not nv.E:
@@ -370,6 +390,36 @@ def summarize(res: dict) -> pd.DataFrame:
                 "dir_hit": float(dv.mean()) if len(dv) else np.nan, "dir_n": int(len(dv)),
                 "hit50": float(a.cat("h50").mean()), "hit80": float(a.cat("h80").mean()), "width80_pct": _pct(float(np.median(a.cat("w80")))),
             })
+    return pd.DataFrame(rows)
+
+
+def bin_table(res: dict) -> pd.DataFrame:
+    """Per horizon and level of recent jumpiness (1 = the calmest fifth of cases, 5 = the jumpiest; levels are set on each fold's calibration days): how big the swings are, how
+    big naive's miss is, which method is best (naive unless 3%+ better) and how it does, and whether the ranges hold. This is where a forecast is tight enough to act on."""
+    acc, models = res["acc"], res["models"]
+    rows = []
+    for h in res["horizons"]:
+        nv = acc.get(("naive", h))
+        if nv is None or not nv.E:
+            continue
+        bn = nv.cat("bn")
+        sg = nv.cat("sg").astype(float)
+        En = np.abs(nv.cat("E").astype(float))
+        for b in range(VOL_BINS):
+            sel = bn == b
+            if sel.sum() < 50 or En[sel].mean() <= 0:
+                continue
+            mean_abs = {}
+            for m in models:
+                a = acc.get((m, h))
+                if a is not None and a.E:
+                    mean_abs[m] = float(np.abs(a.cat("E").astype(float))[sel].mean())
+            top = min(mean_abs, key=mean_abs.get)
+            best = top if top != "naive" and mean_abs[top] <= mean_abs["naive"] * (1 - BEAT) else "naive"
+            a = acc[(best, h)]
+            rows.append({"horizon": h, "jumpiness": b + 1, "jump_pct": _pct(float(np.median(sg[sel]))), "cases": int(sel.sum()),
+                         "naive_pct": _pct(mean_abs["naive"]), "naive_typ": _pct(float(np.median(En[sel]))), "best": best, "best_pct": _pct(mean_abs[best]),
+                         "vs_naive": mean_abs[best] / mean_abs["naive"], "hit80": float(a.cat("h80")[sel].mean()), "width80_pct": _pct(float(np.median(a.cat("w80")[sel])))})
     return pd.DataFrame(rows)
 
 
@@ -438,6 +488,7 @@ def bake_off(hist: pd.DataFrame, groups: Optional[pd.DataFrame] = None, metric: 
     summ = summarize(res)
     if summ.empty:
         return {}
-    return {"summary": summ, "best": best_models(summ), "family": family_table(res, fam), "items": len(ids), "days": len(days),
+    fit = summarize(res, "acc_fit") if sarima and res["acc_fit"] else pd.DataFrame()
+    return {"summary": summ, "summary_fit": fit, "bins": bin_table(res), "best": best_models(summ), "family": family_table(res, fam), "items": len(ids), "days": len(days),
             "first": days[0], "last": days[-1], "folds": res["folds"], "grouped": gi is not None,
             "sarima_info": res["sarima_info"], "sarima_note": note}

@@ -14,7 +14,7 @@ from engine import forecast as FO  # noqa: E402
 
 
 def world(kind, n=96, days=700, seed=1):
-    """Synthetic daily history. Returns (history frame in the stored layout, groups frame, true log10 matrix).
+    """Synthetic daily history. spiky = a slowly drifting level plus one-day spikes of +0.4 (log10) on 6% of days; mixed = half the items calm, half jumpy. Returns (history frame in the stored layout, groups frame, true log10 matrix).
     noisy  = a fixed level plus day-to-day noise; walk = a random walk; weekly = a fixed level plus a strong weekday rhythm;
     group  = a fixed level plus an AR(1) shock shared by the item's group of 12 plus noise of its own."""
     rng = np.random.default_rng(seed)
@@ -34,6 +34,10 @@ def world(kind, n=96, days=700, seed=1):
         for t in range(1, days):
             common[:, t] = 0.8 * common[:, t - 1] + rng.normal(0, 0.06, G)
         Y = base + np.repeat(common, 12, axis=0) + rng.normal(0, 0.05, (n, days))
+    elif kind == "spiky":
+        Y = base + np.cumsum(rng.normal(0, 0.01, (n, days)), axis=1) + (rng.random((n, days)) < 0.06) * 0.4
+    elif kind == "mixed":
+        Y = base + rng.normal(0, 1, (n, days)) * np.where(np.arange(n) < n // 2, 0.02, 0.15)[:, None]
     else:
         raise ValueError(kind)
     ids = np.arange(1, n + 1) + 1000
@@ -76,7 +80,7 @@ class TestModelsAreCausal(unittest.TestCase):
             obs = np.isfinite(M)
             valid = obs & np.concatenate([obs[:, h:], np.zeros((48, h), bool)], axis=1)
             valid[:, :FO.WARMUP] = False
-            out.append(FO.pooled_fit(M, base, feat, wk, valid, h, np.arange(0, last + 1, 2), grp=True))
+            out.append(FO.pooled_fit(M, base, feat, wk, valid, h, np.arange(0, last + 1, 2), kind="pooled_grp"))
         self.assertIsNotNone(out[0])
         np.testing.assert_allclose(out[0], out[1])
 
@@ -94,12 +98,28 @@ class TestScoring(unittest.TestCase):
         r = run("weekly")
         for h in (1, 3):
             self.assertLess(row(r, "weekday", h)["vs_naive"], 0.7)
-        self.assertIn(r["best"][1], ("weekday", "pooled", "pooled_grp"))
+        self.assertIn(r["best"][1], ("weekday", "pooled", "kinked", "pooled_grp"))
         self.assertNotEqual(r["best"][3], "naive")
 
     def test_peers_help_when_a_shared_shock_drives_the_group(self):
         r = run("group")
         self.assertLess(row(r, "pooled_grp", 1)["avg_pct"], row(r, "pooled", 1)["avg_pct"] * 0.97)
+
+    def test_kinked_stays_put_for_small_moves_and_pulls_back_after_spikes(self):
+        r = run("spiky")
+        for h in (1, 3):
+            k, p = row(r, "kinked", h), row(r, "pooled", h)
+            self.assertLess(k["vs_naive"], 0.75, f"h={h}")
+            self.assertLess(k["avg_pct"], p["avg_pct"], f"h={h}")
+            self.assertLessEqual(k["miss_pct"], p["miss_pct"], f"h={h}")
+
+    def test_results_by_jumpiness_split_calm_from_jumpy_items(self):
+        b = run("mixed")["bins"]
+        one = b[b["horizon"] == 1].sort_values("jumpiness")
+        self.assertEqual(len(one), FO.VOL_BINS)
+        self.assertGreater(one["naive_pct"].iloc[-1], 2 * one["naive_pct"].iloc[0])
+        self.assertTrue((one["jump_pct"].diff().dropna() >= 0).all())
+        self.assertTrue(set(one["best"]).issubset({"naive", "week_ago", "median7", "ema50", "ema25", "ema10", "weekday", "pooled", "kinked", "pooled_grp"}))
 
     def test_ranges_are_honest_on_stationary_noise(self):
         r = run("noisy")
@@ -177,6 +197,17 @@ class TestSarimaInTheBakeOff(unittest.TestCase):
             self.assertLess(row(r, "sarima", h)["vs_naive"], 0.75, f"h={h}")
         self.assertEqual(sum(sum(i["specs"].values()) for i in r["sarima_info"]) + sum(i["failed"] for i in r["sarima_info"]), 36 * FO.FOLDS)
 
+    def test_fitted_only_table_leaves_out_items_that_fell_back(self):
+        hist, groups, _ = world("weekly", n=36, days=520)
+        late = hist["item_id"].isin(range(1001, 1007)) & (pd.to_datetime(hist["day"]) < pd.Timestamp("2022-01-03") + pd.Timedelta(days=400))
+        r = FO.bake_off(hist[~late], groups, "price", sarima=True)
+        full, fit = r["summary"], r["summary_fit"]
+        a = full[(full["model"] == "sarima") & (full["horizon"] == 1)].iloc[0]
+        b = fit[(fit["model"] == "sarima") & (fit["horizon"] == 1)].iloc[0]
+        self.assertLess(b["rows"], a["rows"])
+        self.assertGreater(sum(i["failed"] for i in r["sarima_info"]), 0)
+        self.assertTrue((fit.groupby("horizon")["rows"].nunique() == 1).all())
+
     def test_sarima_does_not_beat_naive_on_a_random_walk(self):
         r = run("walk", sarima=True, n=36, days=520)
         self.assertGreater(row(r, "sarima", 7)["vs_naive"], 0.97)
@@ -208,7 +239,7 @@ class TestRunner(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             lake.run_forecast_test(None, type("A", (), {})(), read_table=lambda name: tables.get(name, pd.DataFrame()))
         out = buf.getvalue()
-        for s in ("FORECAST BAKE-OFF", "naive", "ema25", "weekday", "sarima", "pooled_grp", "BEST GUESS", "hit80"):
+        for s in ("FORECAST BAKE-OFF", "naive", "ema25", "weekday", "sarima", "kinked", "pooled_grp", "BEST GUESS", "hit80", "BY HOW JUMPY", "SARIMA CHECK"):
             self.assertIn(s, out)
         self.assertFalse(any(line.startswith("==") for line in out.splitlines()))
 
