@@ -112,6 +112,34 @@ class TestBeforeLaunch(unittest.TestCase):
         self.assertIn("424242", out)
 
 
+class TestRealmListChanged(unittest.TestCase):
+    def test_live_list_with_none_of_our_realms_alerts_and_shows_the_list(self):
+        new_list = {"realms": [{"id": 9001, "name": "Camelot PvP 1", "slug": "camelot-pvp-1"}, {"id": 9002, "name": "Camelot PvE 1", "slug": "camelot-pve-1"}]}
+        code, out, commits, notices, store, http = run_main(routes(index=Resp(200, new_list)))
+        self.assertEqual((code, commits), (0, []))
+        self.assertEqual(len(notices), 1)
+        for text in (out, notices[0]):
+            self.assertIn("9001 Camelot PvP 1", text)
+            self.assertIn("9002 Camelot PvE 1", text)
+            self.assertIn("FOREVER_REALM_IDS", text)
+        self.assertFalse([c for c in http.calls if "/auctions" in c[0]])
+
+    def test_a_partly_matching_list_does_not_alert(self):
+        code, out, commits, notices, *_ = run_main(routes(), realm_ids="6798,424242")
+        self.assertEqual((code, notices), (0, []))
+
+    def test_long_list_is_cut_at_25(self):
+        big = {"realms": [{"id": 9000 + i, "name": f"R{i}", "slug": f"r{i}"} for i in range(40)]}
+        code, out, commits, notices, *_ = run_main(routes(index=Resp(200, big)))
+        self.assertIn("first 25 of 40", notices[0])
+        self.assertNotIn("9039 R39", notices[0])
+
+    def test_served_but_empty_list_is_quiet(self):
+        code, out, commits, notices, *_ = run_main(routes(index=Resp(200, {"realms": []})))
+        self.assertEqual((code, commits, notices), (0, [], []))
+        self.assertIn("served but empty", out)
+
+
 class TestGoingLive(unittest.TestCase):
     def test_first_live_hour_writes_one_commit_and_one_alert(self):
         code, out, commits, notices, store, http = run_main(routes(auctions=live()))
@@ -268,6 +296,8 @@ class TestWorkflowFile(unittest.TestCase):
         self.assertIn("python fetch_forever.py", run)
         self.assertNotIn("requirements.txt", run)                                        # never depends on (or replaces) the repo's requirements file
         self.assertNotIn("B2_", text)
+        env = [s for s in job["steps"] if s.get("env")][-1]["env"]
+        self.assertEqual(env["FOREVER_REALM_IDS"], "${{ inputs.realm_ids || vars.FOREVER_REALM_IDS }}")            # hand-typed ids win, then the repository variable
 
     def test_listens_to_the_retail_workflow_by_its_exact_name(self):
         p = os.path.join(_root, ".github", "workflows", "extract.yml")

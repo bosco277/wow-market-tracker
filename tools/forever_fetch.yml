@@ -6,12 +6,14 @@ name: Forever Auction Extractor
 # a hand-started run (Actions tab > Run workflow) always goes. Until Blizzard serves Forever listings a run just says "not live yet" and ends green.
 # Secrets used: BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET, HF_TOKEN (must be allowed to write to the Forever dataset), and optional DISCORD_WEBHOOK_URL (one message when data first arrives, and on real failures).
 # No Backblaze keys: Forever is stored on Hugging Face only.
+# Which realms: blank = the built-in list. To change it without a push, add a repository VARIABLE named FOREVER_REALM_IDS (comma separated realm ids) on the same Variables tab;
+# a hand-started run can also type ids into the realm_ids box, which wins over the variable.
 
 on:
   workflow_dispatch:
     inputs:
       realm_ids:
-        description: "Realm ids, comma separated (blank = the built-in list: the eight US PvP game realms)"
+        description: "Realm ids, comma separated (blank = the repository variable FOREVER_REALM_IDS, or the built-in list if that is empty too)"
         default: ""
   workflow_run:
     workflows: ["Hourly Auction Extractor"]
@@ -45,5 +47,5 @@ jobs:
           BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          FOREVER_REALM_IDS: ${{ inputs.realm_ids }}
+          FOREVER_REALM_IDS: ${{ inputs.realm_ids || vars.FOREVER_REALM_IDS }}
         run: python fetch_forever.py

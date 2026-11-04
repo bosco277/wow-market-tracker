@@ -13,7 +13,9 @@ Before Blizzard serves Forever listings the answers are 403 / 404. That is NOT a
 answers with auctions, one Discord message says so (if the DISCORD_WEBHOOK_URL secret is set). Real problems (token, 5xx after retries, a failed commit) exit 1 and alert.
 
 Settings (environment variables; the defaults are right for launch):
-  FOREVER_REALM_IDS     comma separated realm ids to collect (default: the eight US PvP game realms from the Nov 3 probe: US1 Realm 2/4/6/8 and US2 Realm 2/4/6/8)
+  FOREVER_REALM_IDS     comma separated realm ids to collect. In GitHub it comes from the workflow input `realm_ids` or, for the automatic runs, the repository variable FOREVER_REALM_IDS, so the list can be
+                        changed without a push. Blank = the built-in default: the eight US PvP game realms from the Nov 3 probe (US1 Realm 2/4/6/8 and US2 Realm 2/4/6/8). Those test realms were gone from
+                        Blizzard's list on Nov 4, so after launch the ids will probably need setting from the real realm list.
   FOREVER_NAMESPACE     default dynamic-forever-us
   FOREVER_API_HOST      default https://us.api.blizzard.com
   FOREVER_AUCTION_URL   default <host>/data/wow/connected-realm/{cid}/auctions   (change this if Blizzard serves the listings at another path)
@@ -260,6 +262,17 @@ def main():
     absent = [r for r in wanted if r not in index]
     if absent:
         log(f"Forever: {len(absent)} wanted realm id(s) are not in the realm list: {absent}")
+    if not index:
+        log("Forever: the realm list is served but empty. Nothing to do.")
+        return 0
+    if wanted and len(absent) == len(wanted):
+        shown = "; ".join(f"{i} {index[i].get('name')}" for i in sorted(index)[:25])
+        more = f" (first 25 of {len(index)} shown)" if len(index) > 25 else ""
+        msg = (f"The Forever realm list is live ({len(index)} realms) but none of the wanted realm ids are in it, so nothing is being collected. "
+               f"Set the repository variable FOREVER_REALM_IDS to the ids you want (comma separated). Realms{more}: {shown}")
+        log("Forever: " + msg)
+        notify("fetch_forever.py: " + msg)
+        return 0
     sources = {}
     for rid in wanted:
         if rid not in index:
