@@ -1,0 +1,49 @@
+name: Forever Auction Extractor
+
+# Collects Forever auction snapshots into the separate private Forever dataset (script: fetch_forever.py). The retail extractor and its files are not touched.
+# It runs by itself right after every run of "Hourly Auction Extractor", but only while the repository VARIABLE FOREVER_ENABLED is set to true
+# (GitHub: Settings > Secrets and variables > Actions > Variables tab > New repository variable). Delete the variable or set it to anything else to switch Forever off;
+# a hand-started run (Actions tab > Run workflow) always goes. Until Blizzard serves Forever listings a run just says "not live yet" and ends green.
+# Secrets used: BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET, HF_TOKEN (must be allowed to write to the Forever dataset), and optional DISCORD_WEBHOOK_URL (one message when data first arrives, and on real failures).
+# No Backblaze keys: Forever is stored on Hugging Face only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      realm_ids:
+        description: "Realm ids, comma separated (blank = the built-in list: the eight US PvP game realms)"
+        default: ""
+  workflow_run:
+    workflows: ["Hourly Auction Extractor"]
+    types: [completed]
+
+# Never two at once: two runs could write the same hour_HH_MM file and race on the markers file.
+concurrency:
+  group: forever-extract
+  cancel-in-progress: false
+
+jobs:
+  extract-data:
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.FOREVER_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository files
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pandas pyarrow requests huggingface_hub
+
+      - name: Run Forever extraction
+        env:
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          FOREVER_REALM_IDS: ${{ inputs.realm_ids }}
+        run: python fetch_forever.py

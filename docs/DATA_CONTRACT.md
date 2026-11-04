@@ -659,6 +659,32 @@ after mode `daily`, once a day, with upload ticked. Reads item_daily, market_his
   the Worker's existing secret `GITHUB_PAT` (no second token). The second cron time is added under the Worker's Settings > Triggers > Cron Triggers.
   If "Daily chain" does not appear in Actions at 06:17 UTC but compaction runs then, the cron text entered in the dashboard does not match the text in the Worker exactly.
 
+### 2t. Forecasts in the front end (v0.7.31; `app.py`, `lib.py`)
+* Reads `engine/forecast_ledger.parquet` like the other tables (private dataset, `HF_TOKEN` secret). A missing or empty ledger is fine: the Forecasts tab says none are recorded yet and the item view shows nothing extra.
+* Item view (Market / Flips tabs, or the search box): a selector "Forecast drawn on the chart" (methods that have forecasts for the item; default "Stays put", the bar everything must clear) adds to the hourly price chart
+  (a) diamonds for the item's daily prices known to the ledger (`origin` on each guess day, `actual` on each graded target day, actual wins), (b) a fan from the latest guess day's price through the
+  1 / 3 / 7 day guesses with the 80% (light) and 50% (dark) ranges, and a dotted guess line. A daily price is drawn at midday US Eastern of its day (`lib.day_to_utc`). Below the chart, an expander lists every forecast
+  for the item with the real price and "inside 50% range / inside 80% range / outside: higher / outside: lower / waiting". An item with no forecast yet gets a one-line reason (days of own prices needed per method).
+* Forecasts tab: counts (recorded, items, graded, waiting); the scoreboard per horizon and method (typical and average miss, "closer than staying put?" = vs_naive, share inside the 50% / 80% ranges, typical real-vs-guess
+  lean, typical 80% width, and "first look" below `lib.MIN_TRUST_CASES` = 100 cases); bar charts of the inside-50 / inside-80 shares against their targets; running totals by target day for a chosen horizon (inside 80% and
+  vs_naive); an expander with the same scoreboard by price level. Before anything is graded it shows what is waiting and when the first grades arrive.
+* `lib.ledger_scoreboard` repeats `engine.ledger.scoreboard` so the front end needs no engine import; a test compares the two on a made-up ledger. Plain pandas only, as the rest of `lib.py`.
+* Size: the app downloads the whole ledger (cached 10 minutes). Rows grow by about (items forecast x 9) per day; if that ever becomes slow, the ledger gets split by year or the page reads only recent rows.
+
+### 2u. Forever fetcher (v0.7.32; `fetch_forever.py`, `.github/workflows/forever_fetch.yml`, copy in `tools/`)
+* A separate script; the retail `fetch.py` is not changed and not imported. Its frame code is a copy of the retail `build_frame` / `variant_key` (a test compares the two when `fetch.py` can be imported; checked by hand against the live
+  file on Nov 3: identical frames and variant keys), so the Forever lake reads like the retail lake: `forever_<connected realm id>/year=/month=/day=/hour_HH_MM.parquet`, one row per auction, whole `item` struct kept.
+* Each run: realm list (`dynamic-forever-us`) -> for each wanted realm id its realm record -> `connected_realm.href` -> connected realm id -> `.../connected-realm/{cid}/auctions` with If-Modified-Since. Default realms: the eight US PvP
+  game realms of the Nov 3 probe (ids 6798, 6922, 6924, 6926 = US1 Realm 2/4/6/8; 6800, 6930, 6932, 6934 = US2 Realm 2/4/6/8). Override with the workflow input `realm_ids` / env `FOREVER_REALM_IDS`; the auction path with `FOREVER_AUCTION_URL`
+  (use it if Blizzard serves listings somewhere else). Realms are shards of one ruleset if the Nov 3 probe's one-connected-realm-per-realm reading is wrong, otherwise eight separate markets: the first week of data says which.
+* Storage: Hugging Face only, a separate private dataset (default `wow-forever-data-lake`, constant `HF_REPO_ID`; created on the first commit if the token may create repositories). No Backblaze, so no new cap pressure and no new key. Each live run is ONE
+  commit holding the new snapshots plus `system/forever_markers.json` (last Last-Modified per source) and `system/forever_sources.json` (source -> realm id, name, connected realm id). Markers travel with the data, so a failed commit advances nothing.
+* Dark is not a failure: 403 / 404 from Blizzard (realm list, realm record, auctions) means "not served yet" and the run ends green with a one-line summary. The first time a source returns auctions, one Discord message says Forever is live
+  (needs the `DISCORD_WEBHOOK_URL` secret). A 200 with an empty auction list is logged and kept out. 429 / 5xx are retried three times, then count as failures (red run + alert); a realm that fails does not stop the others.
+* Switch: the job runs after every run of "Hourly Auction Extractor" (`workflow_run`) only while the repository variable `FOREVER_ENABLED` is `true`; a hand-started run always goes. Secrets: BLIZZARD_CLIENT_ID / SECRET, HF_TOKEN (write access to the
+  Forever dataset), optional DISCORD_WEBHOOK_URL. Error text has the dataset name blanked out (`clean()`), so no account name reaches a job log.
+* Not yet Forever-aware: the engine (`tools/lake.py` reads source `commodities`; per-auction `kind="auction"` classification is checklist item 5) and the front end. They wait for the first real files; the lake name will become a setting then.
+
 First real `api_probe` log (Nov 1, 2026, 21:4x ET), and what v0.7.20 adds to the mode:
 * Known namespaces behaved as expected (retail, classic, classic1x, classicann all 200); the made-up namespace answered 403 on both paths. Of 30 guesses exactly one differed: `forever`
   (`static-forever-us` item classes 403, `dynamic-forever-us` connected-realm index 404). `camelot` and every other guess matched the made-up one.
@@ -681,3 +707,10 @@ Second `api_probe` log (Nov 1, 2026, ~21:55 ET) and v0.7.21:
   different connected realms the realms point to, with the ruleset mix of each. Few connected realms for many realms supports the shard idea and tells us how many separate markets (sources) to
   expect; one connected realm per realm says the list is not grouped (yet). The connected-realm records themselves (`/data/wow/connected-realm/{id}`) still answered 404 on Nov 1.
 * Also printed since v0.7.21: the realm names of the EU / KR / TW namespaces that answer.
+
+Third `api_probe` log (Nov 3, 2026, afternoon ET): no change in what Blizzard serves for Forever. `forever` is still the only flagged namespace (item classes 403, connected realms 404); realm index 200 with the same 51 CAMWOW entries
+(Normal 35, PvP 9, PvP RP 4, Roleplaying 3); static item 2589 403; commodities, auction-house index and every connected-realm path 404; realm records for the first three realms answer 200 but their connected-realm records 404.
+* New: the realm map (first run with v0.7.21's mapping): 51 realm records point to 51 DIFFERENT connected realms, so nothing in the list says realms share an auction house. That is no support for the shard idea (one market
+  per ruleset), but weak evidence either way: the connected-realm records themselves are still 404 and the list looks like a staging list, so the mapping may be placeholders.
+* New: Korea answers 404 on the realm index where it answered 403 on Nov 1 (403 = Blizzard does not know the namespace, 404 = it does and finds nothing there): the Korea namespace appears to have been created since. EU 26 realms, TW 5, unchanged.
+* To watch on launch day (Nov 4): static `item/2589` going 403 -> 200 (item data published), then `connected-realm/{id}` and `connected-realm/{id}/auctions` going 404 -> 200 (listings). Run `api_probe` at launch and a few times through the day.
