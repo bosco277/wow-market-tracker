@@ -42,6 +42,7 @@ def load(name: str) -> pd.DataFrame:
 items, hourly, prof = load("items"), load("item_hourly"), load("profile")
 cal, hist, exp, flips = load("calibration"), load("calibration_history"), load("experiment"), load("flips")
 shelves = load("shelves")
+ledger = lib.clean_ledger(load("forecast_ledger"))      # the live forecast record; empty until mode forecast_ledger has run
 shelves_old = len(shelves) > 0 and "test_regime" not in shelves.columns
 shelves_ver = str(shelves["engine_version"].iloc[0]) if len(shelves) and "engine_version" in shelves.columns else "unknown"
 shelves = lib.ensure_shelf_columns(shelves)
@@ -78,6 +79,17 @@ def column_config(df: pd.DataFrame) -> dict:
             cfg[c] = st.column_config.NumberColumn(c, format="%.1f")
     if "Watched" in df.columns:
         cfg["Watched"] = st.column_config.CheckboxColumn("Watched")
+    return cfg
+
+
+def score_config(df: pd.DataFrame) -> dict:
+    """Column formats for the forecast scoreboards: counts are whole numbers, the 'closer than staying put' ratio shows two decimals."""
+    cfg = column_config(df)
+    for c in ("Cases", "Items"):
+        if c in df.columns:
+            cfg[c] = st.column_config.NumberColumn(c, format="%d")
+    if "Closer than staying put?" in df.columns:
+        cfg["Closer than staying put?"] = st.column_config.NumberColumn("Closer than staying put?", format="%.2f")
     return cfg
 
 
@@ -138,6 +150,12 @@ def item_detail(pick: int, key: str):
     if h.empty:
         st.info("No hourly history for this item in the tables yet.")
         return
+    methods = lib.item_methods(ledger, pick)
+    fc_method = None
+    if methods:
+        fc_method = st.selectbox("Forecast drawn on the chart", methods, format_func=lambda m: lib.METHOD_NAME.get(m, m), key=f"{key}_fc_method")
+        if fc_method not in methods:
+            fc_method = methods[0]
     fig = go.Figure()
     # Constant lines are drawn as traces (not hline / hrect) so hovering anywhere shows their numbers, same for every point.
     g = lambda v: f"{v:,.2f}g"
@@ -156,10 +174,36 @@ def item_detail(pick: int, key: str):
         if col in r and r[col] == r[col]:
             fig.add_trace(go.Scatter(x=h["ts"], y=[r[col]] * len(h), name="price wall (low / high)", legendgroup="wall", showlegend=first,
                                      line=dict(dash="dot", color="#8A9BA3"), hovertemplate=nm + " %{y:,.2f}g"))
+    fc = lib.item_forecast(ledger, pick, fc_method) if fc_method else pd.DataFrame()
+    dp = lib.item_daily_points(ledger, pick)
+    if len(dp):
+        fig.add_trace(go.Scatter(x=[lib.day_to_utc(d) for d in dp["day"]], y=dp["price"], mode="markers", name="daily price (median of the day)",
+                                 marker=dict(color="#1B2A33", symbol="diamond", size=9), hovertemplate="%{y:,.2f}g"))
+    if len(fc) and fc["origin"].iloc[0] == fc["origin"].iloc[0]:
+        o, made = float(fc["origin"].iloc[0]), fc["made_day"].iloc[0]
+        X = [lib.day_to_utc(made)] + [lib.day_to_utc(d) for d in fc["target_day"]]
+        for lo, hi, alpha, nm in (("lo80", "hi80", 0.12, "80% range"), ("lo50", "hi50", 0.26, "50% range")):
+            fig.add_trace(go.Scatter(x=X + X[::-1], y=[o] + list(fc[hi]) + list(fc[lo])[::-1] + [o], mode="lines", fill="toself", line=dict(width=0),
+                                     fillcolor=f"rgba(58,110,165,{alpha})", name=f"forecast {nm}", hoverinfo="skip"))
+        tips = [f"daily price on {made}: {o:,.2f}g"] + [
+            f"{lib.HORIZON_NAME.get(int(r['horizon']), str(r['horizon']))} ahead ({r['target_day']}): guess {r['guess']:,.2f}g, "
+            f"50% range {r['lo50']:,.2f} - {r['hi50']:,.2f}g, 80% range {r['lo80']:,.2f} - {r['hi80']:,.2f}g" for _, r in fc.iterrows()]
+        fig.add_trace(go.Scatter(x=X, y=[o] + list(fc["guess"]), mode="lines+markers", name=f"forecast: {lib.METHOD_NAME.get(fc_method, fc_method)}",
+                                 line=dict(color=lib.FORECAST_COLOR, dash="dot"), marker=dict(size=8), text=tips, hovertemplate="%{text}<extra></extra>"))
     fig.update_layout(title=f"Lowest price per hour (UTC), {len(h)} hours of history", height=420, hovermode="x unified",
                       margin=dict(l=10, r=10, t=40, b=10), yaxis_title="gold",
                       legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="left", x=0))
     st.plotly_chart(fig, **WIDE, key=f"{key}_price")
+    if len(fc):
+        st.caption("Forecast: the dotted line is the guess for the item's daily price (the median of that US Eastern day's hourly lowest prices; the diamonds are those daily prices). "
+                   "The dark and light blue bands are the 50% and 80% ranges: the real daily price should land inside them about half and four times in five. "
+                   "A forecast is a record, not advice. The Forecasts tab says whether the ranges have held.")
+    elif len(ledger):
+        st.caption("No forecast for this item yet. It needs complete days of our own prices first: 5 for 'Stays put', 7 for 'Recent average', 12 for 'Pullback model'.")
+    past = lib.item_history_table(ledger, pick)
+    if len(past):
+        with st.expander(f"Forecasts made for this item so far ({len(past)} newest shown)"):
+            st.dataframe(past, hide_index=True, **WIDE, column_config=column_config(past))
 
     rb = lib.daily_ribbon(h)
     fig2 = go.Figure()
@@ -193,7 +237,7 @@ def item_detail(pick: int, key: str):
             ev = lib.past_events_table(f)
             st.dataframe(ev, hide_index=True, **WIDE, column_config=column_config(ev))
 
-tab_market, tab_flip, tab_exp, tab_conf = st.tabs(["Market", "Flips", "Experiment", "Confidence"])
+tab_market, tab_flip, tab_fc, tab_exp, tab_conf = st.tabs(["Market", "Flips", "Forecasts", "Experiment", "Confidence"])
 
 # ---------------------------------------------------------------- Market
 with tab_market:
@@ -268,6 +312,87 @@ with tab_flip:
             st.dataframe(lib.backtest_table(backtest), hide_index=True, **WIDE)
             st.caption("The cheap units stay in the book in the replay, so 'reached' is a cautious reading. Undercut risk is the better "
                        "read of whether cheaper listings would have appeared. This is price behaviour, not a record of profit.")
+
+# ---------------------------------------------------------------- Forecasts
+with tab_fc:
+    cnt = lib.ledger_counts(ledger)
+    if not cnt["made"]:
+        st.info("No forecasts recorded yet. They are written once a day by the forecast ledger (the last step of the Daily chain workflow). "
+                "Once there are some, click an item on the Market tab to see its forecast drawn on the price chart.")
+    else:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Forecasts recorded", f"{cnt['made']:,}")
+        m2.metric("Items forecast", f"{cnt['items']:,}")
+        m3.metric("Graded so far", f"{cnt['graded']:,}")
+        m4.metric("Waiting for their day", f"{cnt['waiting']:,}")
+        st.caption(f"Every forecast is written down with its ranges BEFORE the day happens, then graded against the real daily price (the median of the day's hourly lowest prices, "
+                   f"US Eastern days). Guesses were made from days {cnt['first_origin']} to {cnt['last_origin']}"
+                   + (f"; the latest day graded so far is {cnt['last_target']}." if cnt["last_target"] else "."))
+        board = lib.ledger_scoreboard(ledger)
+        if not board["graded"]:
+            st.info("Nothing is graded yet. A forecast is graded once its day is complete (18 or more usable hours): 1-day forecasts the morning after, 3-day forecasts after three days, "
+                    "7-day forecasts after a week. The scoreboard fills in by itself as the daily workflow runs.")
+            wt = board["waiting"]
+            if len(wt):
+                wdf = pd.DataFrame({"Looking ahead": [lib.HORIZON_NAME.get(int(h), f"{int(h)} days") for h in wt["horizon"]], "Forecasts waiting": wt["rows"].astype(int).to_numpy(),
+                                    "Items": wt["items"].astype(int).to_numpy(), "First day due": wt["first_target"].to_numpy(), "Last day due": wt["last_target"].to_numpy()})
+                st.dataframe(wdf, hide_index=True, **WIDE, column_config={c: st.column_config.NumberColumn(c, format="%d") for c in ("Forecasts waiting", "Items")})
+        else:
+            ovr = board["overall"]
+            ov = lib.score_table(ovr)
+            st.markdown("**Scoreboard: every graded forecast so far**")
+            st.dataframe(ov, hide_index=True, **WIDE, column_config=score_config(ov))
+            st.caption("Typical miss: how far the real price was from the guess, in percent (the middle case; half the cases missed by less). Closer than staying put?: below 1.00 means "
+                       "that method's guesses were closer than simply assuming the price stays where it was, over exactly the same cases; 'Stays put' is 1.00 by definition. "
+                       "Inside 50% / 80% range: should be near 50 and 80. Much lower means the ranges are too narrow, much higher means they are wider than they need to be. "
+                       f"A row with under {lib.MIN_TRUST_CASES} cases is a first look, not a verdict. The ranges were learned from retail history, so this table is also the check "
+                       "on whether that history carries over to our own prices.")
+            hz_all = [int(h) for h in sorted(ovr["horizon"].unique())]
+            hname = lambda h: lib.HORIZON_NAME.get(int(h), f"{int(h)} days")
+
+            def bars(col, title, target):
+                f = go.Figure()
+                for m in lib.METHODS:
+                    s1 = ovr[ovr["method"] == m]
+                    if s1.empty:
+                        continue
+                    f.add_trace(go.Bar(x=[hname(h) for h in s1["horizon"]], y=(s1[col] * 100.0).tolist(), name=lib.METHOD_NAME[m], marker_color=lib.METHOD_COLOR[m],
+                                       customdata=s1["cases"].tolist(), hovertemplate="%{y:.1f}% (%{customdata} cases)<extra></extra>"))
+                f.add_trace(go.Scatter(x=[hname(h) for h in hz_all], y=[target] * len(hz_all), mode="lines", line=dict(dash="dash", color="#B5483A"),
+                                       name=f"target {target}%", hovertemplate=f"target {target}%<extra></extra>"))
+                f.update_layout(title=title, height=340, barmode="group", yaxis=dict(range=[0, 100], title="%"), margin=dict(l=10, r=10, t=40, b=10),
+                                legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="left", x=0))
+                return f
+            a, b = st.columns(2)
+            a.plotly_chart(bars("hit50", "Real price inside the 50% range (should be near 50%)", 50), **WIDE, key="fc_bars50")
+            b.plotly_chart(bars("hit80", "Real price inside the 80% range (should be near 80%)", 80), **WIDE, key="fc_bars80")
+
+            hz = st.selectbox("Accuracy as it comes in, looking ahead", hz_all, format_func=hname, key="fc_horizon")
+            if hz not in hz_all:
+                hz = hz_all[0]
+            ot = lib.accuracy_over_time(ledger, int(hz))
+
+            def running(col, title, target, label):
+                f = go.Figure()
+                for m in lib.METHODS:
+                    s1 = ot[ot["method"] == m]
+                    if s1.empty:
+                        continue
+                    f.add_trace(go.Scatter(x=pd.to_datetime(s1["target_day"]), y=s1[col], mode="lines+markers", name=lib.METHOD_NAME[m], line=dict(color=lib.METHOD_COLOR[m]),
+                                           customdata=s1["cases"].tolist(), hovertemplate=label + " after %{customdata} graded cases<extra></extra>"))
+                if len(ot):
+                    x = pd.to_datetime(ot["target_day"])
+                    f.add_trace(go.Scatter(x=[x.min(), x.max()], y=[target, target], mode="lines", line=dict(dash="dash", color="#B5483A"), name="target", hoverinfo="skip"))
+                f.update_layout(title=title, height=340, margin=dict(l=10, r=10, t=40, b=10), legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="left", x=0))
+                return f
+            a, b = st.columns(2)
+            a.plotly_chart(running("inside80", f"Share inside the 80% range, running total ({hname(hz)} ahead)", 80, "%{y:.1f}% inside"), **WIDE, key="fc_run80")
+            b.plotly_chart(running("vs_naive", f"Closer than staying put? Running ratio, below 1.00 is better ({hname(hz)} ahead)", 1.0, "ratio %{y:.2f}"), **WIDE, key="fc_runnaive")
+            st.caption("Each point is the running total over every forecast whose day had arrived by that date, so early points move a lot and settle as cases accumulate.")
+            with st.expander("By price level (the item's daily price when the guess was made)"):
+                lvt = lib.score_table(board["levels"])
+                st.dataframe(lvt, hide_index=True, **WIDE, column_config=score_config(lvt))
+                st.caption("Cheap items usually swing the most, so expect wider ranges and larger misses there.")
 
 # ---------------------------------------------------------------- Experiment
 with tab_exp:

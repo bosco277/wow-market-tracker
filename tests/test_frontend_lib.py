@@ -11,6 +11,8 @@ for _p in (os.path.join(_root, "frontend"), _root):      # lib.py sits in "front
         sys.path.insert(0, _p)
         break
 import lib  # noqa: E402
+if _root not in sys.path:
+    sys.path.append(_root)           # the engine, for the check that the page's scoreboard equals the engine's
 
 
 def items():
@@ -67,6 +69,158 @@ class TestLib(unittest.TestCase):
         self.assertAlmostEqual(h, 1.0)
         self.assertEqual(label, "fresh")
         self.assertEqual(lib.freshness(cal, now="2026-11-01 12:00")[1], "very stale")
+
+
+def ledger_world(n_items=30, made=("2026-10-20", "2026-10-21", "2026-10-22"), graded_until="2026-10-27", seed=3):
+    """A made-up forecast ledger: three guess days, 1 / 3 / 7 days ahead, three methods, prices across all four price levels; days up to graded_until are graded."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for md in made:
+        for i in range(1, n_items + 1):
+            origin = 10 ** rng.uniform(-0.7, 2.5)
+            for h in (1, 3, 7):
+                td = (pd.Timestamp(md) + pd.Timedelta(days=h)).strftime("%Y-%m-%d")
+                real = origin * float(np.exp(rng.normal(0, 0.12 * np.sqrt(h))))
+                for m, drift in (("naive", 1.0), ("ema25", 1.01), ("kinked", 0.99)):
+                    g = origin * drift
+                    rows.append(dict(made_day=md, item_id=i, horizon=h, method=m, guess=g, lo50=g * 0.92, hi50=g * 1.08, lo80=g * 0.85, hi80=g * 1.18, origin=origin,
+                                     jump_bin=1 + i % 5, target_day=td, actual=real if td <= graded_until else np.nan, made_at="2026-10-23T06:17:00Z", engine_version="x"))
+    return pd.DataFrame(rows)
+
+
+def tiny_ledger():
+    """Naive only, one horizon: guess 10, 50% range 9 - 11, 80% range 8 - 12. Day 1 results 10 and 20, day 2 results 10.5 and 11.5."""
+    rows = []
+    for md, td, acts in (("2026-10-20", "2026-10-21", (10.0, 20.0)), ("2026-10-21", "2026-10-22", (10.5, 11.5))):
+        for i, a in enumerate(acts, start=1):
+            rows.append(dict(made_day=md, item_id=i, horizon=1, method="naive", guess=10.0, lo50=9.0, hi50=11.0, lo80=8.0, hi80=12.0, origin=10.0, jump_bin=1,
+                             target_day=td, actual=a, made_at="x", engine_version="x"))
+    return pd.DataFrame(rows)
+
+
+class TestLedgerViews(unittest.TestCase):
+    def test_clean_ledger_handles_nothing_and_odd_types(self):
+        for bad in (None, pd.DataFrame(), pd.DataFrame({"a": [1]})):
+            c = lib.clean_ledger(bad)
+            self.assertTrue(c.empty)
+            self.assertEqual(list(c.columns), lib.LEDGER_COLUMNS)
+        w = ledger_world(n_items=2)
+        w["made_day"] = pd.to_datetime(w["made_day"])                    # real Timestamps, not text
+        w["guess"] = w["guess"].astype(str)                              # numbers as text
+        c = lib.clean_ledger(w)
+        self.assertEqual(len(c), len(w))
+        self.assertEqual(c["made_day"].iloc[0], "2026-10-20")
+        self.assertTrue(pd.api.types.is_float_dtype(c["guess"]))
+
+    def test_counts(self):
+        c = lib.ledger_counts(lib.clean_ledger(ledger_world()))
+        self.assertEqual(c["made"], 3 * 30 * 3 * 3)
+        self.assertEqual(c["items"], 30)
+        self.assertEqual(c["graded"] + c["waiting"], c["made"])
+        self.assertEqual((c["first_origin"], c["last_origin"]), ("2026-10-20", "2026-10-22"))
+        self.assertEqual(c["last_target"], "2026-10-27")
+        self.assertEqual(lib.ledger_counts(pd.DataFrame())["made"], 0)
+
+    def test_scoreboard_equals_the_engines(self):
+        from engine import ledger as EL
+        led = lib.clean_ledger(ledger_world())
+        mine, theirs = lib.ledger_scoreboard(led), EL.scoreboard(led)
+        self.assertEqual(mine["graded"], theirs["graded"])
+        self.assertGreater(mine["graded"], 500)
+        pd.testing.assert_frame_equal(mine["overall"], theirs["overall"], check_dtype=False)
+        pd.testing.assert_frame_equal(mine["levels"], theirs["levels"], check_dtype=False)
+        self.assertEqual(set(mine["levels"]["level"]), set(lib.LEVELS))
+        pd.testing.assert_frame_equal(mine["waiting"], theirs["waiting"], check_dtype=False)
+
+    def test_scoreboard_with_nothing_graded_or_nothing_at_all(self):
+        led = lib.clean_ledger(ledger_world(graded_until="2000-01-01"))
+        sc = lib.ledger_scoreboard(led)
+        self.assertEqual(sc["graded"], 0)
+        self.assertEqual(sorted(sc["waiting"]["horizon"]), [1, 3, 7])
+        self.assertNotIn("overall", sc)
+        self.assertEqual(lib.ledger_scoreboard(pd.DataFrame())["graded"], 0)
+
+    def test_score_table_percent_numbers_and_trust_flag(self):
+        sc = lib.ledger_scoreboard(lib.clean_ledger(ledger_world()))
+        t = lib.score_table(sc["overall"])
+        self.assertEqual(list(t["Looking ahead"].unique()), ["1 day", "3 days", "7 days"])
+        self.assertEqual(list(t["Method"].unique()), ["Stays put", "Recent average", "Pullback model"])
+        raw = sc["overall"]
+        self.assertAlmostEqual(t["Inside 80% range (%)"].iloc[0], raw["hit80"].iloc[0] * 100.0)
+        self.assertTrue(((t["Inside 80% range (%)"] >= 0) & (t["Inside 80% range (%)"] <= 100)).all())
+        self.assertTrue(pd.api.types.is_numeric_dtype(t["Closer than staying put?"]))
+        naive = t[t["Method"] == "Stays put"]
+        self.assertTrue(np.allclose(naive["Closer than staying put?"], 1.0))              # stays put against itself
+        big = (raw["cases"] >= lib.MIN_TRUST_CASES).to_numpy()
+        self.assertEqual(list(t["Enough cases?"] == "yes"), list(big))
+        self.assertIn("Price level", lib.score_table(sc["levels"]).columns)
+        self.assertTrue(lib.score_table(pd.DataFrame()).empty)
+
+    def test_running_accuracy_by_hand(self):
+        ot = lib.accuracy_over_time(tiny_ledger(), 1)
+        self.assertEqual(list(ot["target_day"]), ["2026-10-21", "2026-10-22"])
+        self.assertEqual(list(ot["cases"]), [2, 4])
+        self.assertAlmostEqual(ot["inside80"].iloc[0], 50.0)       # 10 inside, 20 outside
+        self.assertAlmostEqual(ot["inside80"].iloc[1], 75.0)       # plus 10.5 and 11.5, both inside 8 - 12
+        self.assertAlmostEqual(ot["inside50"].iloc[1], 50.0)       # 10 and 10.5 inside 9 - 11; 20 and 11.5 not
+        self.assertTrue(np.allclose(ot["vs_naive"], 1.0))
+        self.assertTrue(lib.accuracy_over_time(tiny_ledger(), 7).empty)
+        self.assertEqual(list(lib.accuracy_over_time(pd.DataFrame(), 1).columns), ["target_day", "method", "cases", "inside50", "inside80", "vs_naive"])
+
+    def test_running_accuracy_ends_where_the_scoreboard_is(self):
+        led = lib.clean_ledger(ledger_world())
+        sc = lib.ledger_scoreboard(led)["overall"]
+        for h in (1, 3, 7):
+            ot = lib.accuracy_over_time(led, h)
+            for m in lib.METHODS:
+                last, row = ot[ot["method"] == m].iloc[-1], sc[(sc["horizon"] == h) & (sc["method"] == m)].iloc[0]
+                self.assertEqual(last["cases"], row["cases"])
+                self.assertAlmostEqual(last["inside80"], row["hit80"] * 100.0)
+                self.assertAlmostEqual(last["inside50"], row["hit50"] * 100.0)
+                self.assertAlmostEqual(last["vs_naive"], row["vs_naive"])
+                self.assertTrue(ot[ot["method"] == m]["cases"].is_monotonic_increasing)
+
+    def test_newest_forecast_for_an_item(self):
+        led = lib.clean_ledger(ledger_world())
+        f = lib.item_forecast(led, 5, "kinked")
+        self.assertEqual(list(f["horizon"]), [1, 3, 7])
+        self.assertEqual(set(f["made_day"]), {"2026-10-22"})
+        self.assertEqual(set(f["method"]), {"kinked"})
+        self.assertTrue(lib.item_forecast(led, 999, "naive").empty)
+        self.assertTrue(lib.item_forecast(pd.DataFrame(), 5, "naive").empty)
+        self.assertEqual(lib.item_methods(led, 5), ["naive", "ema25", "kinked"])
+        self.assertEqual(lib.item_methods(led[led["method"] != "ema25"], 5), ["naive", "kinked"])
+        self.assertEqual(lib.item_methods(led, 999), [])
+
+    def test_daily_points_prefer_the_real_price(self):
+        led = lib.clean_ledger(tiny_ledger())
+        led.loc[(led["item_id"] == 1) & (led["made_day"] == "2026-10-21"), "origin"] = 99.0      # origin of 10-21 disagrees with the real price on 10-21
+        dp = lib.item_daily_points(led, 1)
+        self.assertEqual(list(dp["day"]), ["2026-10-20", "2026-10-21", "2026-10-22"])
+        self.assertEqual(list(dp["price"]), [10.0, 10.0, 10.5])           # 10-21: the actual (10.0), not the origin (99.0)
+        self.assertTrue(lib.item_daily_points(pd.DataFrame(), 1).empty)
+
+    def test_item_history_results(self):
+        led = lib.clean_ledger(tiny_ledger())
+        extra = led.iloc[[0]].copy()
+        extra["made_day"], extra["target_day"], extra["actual"] = "2026-10-22", "2026-10-23", np.nan
+        led = pd.concat([led, extra], ignore_index=True)
+        led.loc[len(led) - 1, "item_id"] = 2
+        t = lib.item_history_table(led, 2)
+        self.assertEqual(list(t["Made from day"]), ["2026-10-22", "2026-10-21", "2026-10-20"])         # newest first
+        self.assertEqual(list(t["Result"]), ["waiting", "inside 80% range", "outside: higher"])        # waiting; 11.5; 20
+        t1 = lib.item_history_table(led, 1)
+        self.assertEqual(list(t1["Result"]), ["inside 50% range", "inside 50% range"])
+        led2 = led.copy()
+        led2.loc[led2["actual"] == 10.0, "actual"] = 5.0
+        self.assertIn("outside: lower", list(lib.item_history_table(led2, 1)["Result"]))
+        self.assertEqual(len(lib.item_history_table(lib.clean_ledger(ledger_world()), 3, limit=5)), 5)
+        self.assertTrue(lib.item_history_table(led, 999).empty)
+
+    def test_day_is_drawn_at_midday_eastern(self):
+        self.assertEqual(lib.day_to_utc("2026-11-02"), pd.Timestamp("2026-11-02 17:00"))      # winter time, UTC-5
+        self.assertEqual(lib.day_to_utc("2026-07-01"), pd.Timestamp("2026-07-01 16:00"))      # summer time, UTC-4
+        self.assertIsNone(lib.day_to_utc("2026-11-02").tzinfo)
 
 
 if __name__ == "__main__":

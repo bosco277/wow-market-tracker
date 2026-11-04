@@ -398,3 +398,195 @@ def past_events_table(f: pd.DataFrame, tz: str = "America/New_York") -> pd.DataF
     if "likely_flip" in f:
         out["Looks like a flipper"] = f["likely_flip"].map(lambda v: "yes" if bool(v) else "no")
     return out
+
+
+# ---------------------------------------------------------------- forecast ledger (engine/forecast_ledger, written once a day by mode forecast_ledger)
+# The ledger holds one row per (day the guess was made, item, horizon, method). `actual` stays empty until the target day is complete, then is filled in once.
+# Everything here is plain pandas so it can be tested without a browser. `ledger_scoreboard` repeats the engine's scoreboard rules (tests compare the two).
+
+LEDGER_COLUMNS = ["made_day", "item_id", "horizon", "method", "guess", "lo50", "hi50", "lo80", "hi80", "origin", "jump_bin", "target_day", "actual", "made_at", "engine_version"]
+METHODS = ("naive", "ema25", "kinked")
+METHOD_NAME = {"naive": "Stays put", "ema25": "Recent average", "kinked": "Pullback model"}
+METHOD_COLOR = {"naive": "#8A9BA3", "ema25": "#C28A1B", "kinked": "#2B4C59"}
+HORIZON_NAME = {1: "1 day", 3: "3 days", 7: "7 days"}
+LEVELS = ("under 1g", "1g to 10g", "10g to 100g", "100g and up")
+FORECAST_COLOR = "#3A6EA5"
+MIN_TRUST_CASES = 100            # a scoreboard row built on fewer graded cases is a first look, not a verdict
+
+
+def clean_ledger(led: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """The ledger with every column present and typed (days as 'YYYY-MM-DD' text, prices as numbers). Empty frame when there is none or it is not a ledger."""
+    if led is None or led.empty or not {"item_id", "horizon", "method", "guess", "made_day", "target_day"}.issubset(led.columns):
+        return pd.DataFrame(columns=LEDGER_COLUMNS)
+    d = led.reindex(columns=LEDGER_COLUMNS).copy()
+    for c in ("made_day", "target_day"):
+        d[c] = pd.to_datetime(d[c], errors="coerce").dt.strftime("%Y-%m-%d")
+    for c in ("guess", "lo50", "hi50", "lo80", "hi80", "origin", "actual"):
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+    d = d.dropna(subset=["item_id", "horizon", "made_day", "target_day"])
+    d = d[d["guess"] > 0].copy()
+    d["item_id"] = d["item_id"].astype(int)
+    d["horizon"] = d["horizon"].astype(int)
+    return d.reset_index(drop=True)
+
+
+def ledger_counts(led: pd.DataFrame) -> dict:
+    """Headline numbers: rows recorded, items, how many are graded / waiting, and the days they cover."""
+    if led is None or led.empty:
+        return dict(made=0, items=0, graded=0, waiting=0, first_origin=None, last_origin=None, last_target=None)
+    done = led["actual"].notna() & (led["actual"] > 0)
+    return dict(made=len(led), items=int(led["item_id"].nunique()), graded=int(done.sum()), waiting=int((~done).sum()),
+                first_origin=led["made_day"].min(), last_origin=led["made_day"].max(), last_target=led.loc[done, "target_day"].max() if done.any() else None)
+
+
+def _pct(x: float) -> float:
+    return (10.0 ** x - 1.0) * 100.0
+
+
+def _graded(led: pd.DataFrame) -> pd.DataFrame:
+    """Graded rows with the miss (in log10, so +10% and -10% weigh alike), whether the real price fell in the 50% / 80% range, and the naive method's miss on the same case."""
+    g = led[led["actual"].notna() & (led["actual"] > 0)].copy()
+    if g.empty:
+        return g
+    g["E"] = np.log10(g["actual"]) - np.log10(g["guess"])
+    g["ae"] = g["E"].abs()
+    g["in50"] = ((g["actual"] >= g["lo50"]) & (g["actual"] <= g["hi50"])).astype(float)
+    g["in80"] = ((g["actual"] >= g["lo80"]) & (g["actual"] <= g["hi80"])).astype(float)
+    g["w80"] = np.log10(g["hi80"]) - np.log10(g["lo80"])
+    key = ["made_day", "item_id", "horizon"]
+    nv = g[g["method"] == "naive"].drop_duplicates(key).set_index(key)["ae"].rename("en")
+    g = g.join(nv, on=key)
+    g["level"] = np.array(LEVELS, dtype=object)[np.digitize(np.log10(g["origin"].to_numpy(float)), [0.0, 1.0, 2.0])]
+    return g
+
+
+def _score(df: pd.DataFrame, by: list) -> pd.DataFrame:
+    rows = []
+    for keys, q in df.groupby(by, sort=False):
+        keys = keys if isinstance(keys, tuple) else (keys,)
+        ae, en = q["ae"].to_numpy(), q["en"].to_numpy()
+        ok = np.isfinite(en)
+        rows.append({**dict(zip(by, keys)), "cases": len(q), "items": int(q["item_id"].nunique()),
+                     "miss_pct": _pct(float(np.median(ae))), "avg_pct": _pct(float(ae.mean())),
+                     "vs_naive": float(ae[ok].sum() / en[ok].sum()) if ok.any() and en[ok].sum() > 0 else np.nan,
+                     "bias_pct": _pct(float(np.median(q["E"]))), "hit50": float(q["in50"].mean()), "hit80": float(q["in80"].mean()),
+                     "width80_pct": _pct(float(np.median(q["w80"])))})
+    return pd.DataFrame(rows)
+
+
+def ledger_scoreboard(led: pd.DataFrame) -> dict:
+    """{graded: n, waiting: per-horizon frame, overall: per (horizon, method), levels: per (horizon, price level, method)}. Same numbers as the engine's own scoreboard:
+    vs_naive compares each method with 'stays put' on exactly the same graded cases (below 1.00 = closer than staying put); hit50 / hit80 should sit near 0.50 / 0.80."""
+    if led is None or led.empty:
+        return {"graded": 0, "waiting": pd.DataFrame()}
+    waiting = led[led["actual"].isna()].groupby("horizon").agg(rows=("item_id", "size"), items=("item_id", "nunique"),
+                                                               first_target=("target_day", "min"), last_target=("target_day", "max")).reset_index()
+    g = _graded(led)
+    out = {"graded": len(g), "waiting": waiting}
+    if g.empty:
+        return out
+    order = {m: i for i, m in enumerate(METHODS)}
+    o = _score(g, ["horizon", "method"])
+    out["overall"] = o.sort_values(["horizon", "method"], key=lambda s: s.map(order) if s.name == "method" else s).reset_index(drop=True)
+    lv = _score(g, ["horizon", "level", "method"])
+    lv["_l"] = lv["level"].map({k: i for i, k in enumerate(LEVELS)})
+    lv["_m"] = lv["method"].map(order)
+    out["levels"] = lv.sort_values(["horizon", "_l", "_m"]).drop(columns=["_l", "_m"]).reset_index(drop=True)
+    return out
+
+
+def score_table(sc: pd.DataFrame) -> pd.DataFrame:
+    """A scoreboard frame (overall or by price level) with plain headers. Percent columns hold percent numbers (80.0 = 80%), so they sort and format as numbers."""
+    if sc is None or sc.empty:
+        return pd.DataFrame()
+    out = pd.DataFrame({"Looking ahead": sc["horizon"].map(lambda h: HORIZON_NAME.get(int(h), f"{int(h)} days"))})
+    if "level" in sc:
+        out["Price level"] = sc["level"].to_numpy()
+    out["Method"] = sc["method"].map(lambda m: METHOD_NAME.get(m, m)).to_numpy()
+    out["Cases"] = sc["cases"].astype(int).to_numpy()
+    out["Items"] = sc["items"].astype(int).to_numpy()
+    out["Typical miss (%)"] = sc["miss_pct"].to_numpy()
+    out["Average miss (%)"] = sc["avg_pct"].to_numpy()
+    out["Closer than staying put?"] = sc["vs_naive"].to_numpy()
+    out["Inside 50% range (%)"] = (sc["hit50"] * 100.0).to_numpy()
+    out["Inside 80% range (%)"] = (sc["hit80"] * 100.0).to_numpy()
+    out["Real price vs guess, typical (%)"] = sc["bias_pct"].to_numpy()
+    out["Typical 80% range width (%)"] = sc["width80_pct"].to_numpy()
+    out["Enough cases?"] = np.where(sc["cases"].to_numpy() >= MIN_TRUST_CASES, "yes", f"first look (under {MIN_TRUST_CASES})")
+    return out
+
+
+def accuracy_over_time(led: pd.DataFrame, horizon: int) -> pd.DataFrame:
+    """For one horizon: running totals as graded days arrive, per method. One row per (target day, method) with the cumulative number of graded cases, the share inside the 50% and 80% ranges
+    (percent numbers) and the running 'closer than staying put' ratio over the same cases (below 1.00 is better)."""
+    cols = ["target_day", "method", "cases", "inside50", "inside80", "vs_naive"]
+    g = _graded(led) if led is not None and not led.empty else pd.DataFrame()
+    if g.empty:
+        return pd.DataFrame(columns=cols)
+    g = g[g["horizon"] == int(horizon)]
+    parts = []
+    for m, q in g.groupby("method", sort=False):
+        q = q.assign(a=q["ae"].where(q["en"].notna()), b=q["en"])
+        by = q.groupby("target_day").agg(n=("ae", "size"), s50=("in50", "sum"), s80=("in80", "sum"), a=("a", "sum"), b=("b", "sum")).sort_index().cumsum()
+        parts.append(pd.DataFrame({"target_day": by.index.to_numpy(), "method": m, "cases": by["n"].astype(int).to_numpy(),
+                                   "inside50": (by["s50"] / by["n"] * 100.0).to_numpy(), "inside80": (by["s80"] / by["n"] * 100.0).to_numpy(),
+                                   "vs_naive": np.where(by["b"].to_numpy() > 0, by["a"].to_numpy() / np.where(by["b"].to_numpy() > 0, by["b"].to_numpy(), 1.0), np.nan)}))
+    return pd.concat(parts, ignore_index=True)[cols] if parts else pd.DataFrame(columns=cols)
+
+
+def day_to_utc(day: str, hour: int = 12, tz: str = "America/New_York") -> pd.Timestamp:
+    """A forecast is for a whole US Eastern day (the median of its hourly lows); on the hourly chart (UTC, no time zone) it is drawn at midday Eastern of that day."""
+    return pd.Timestamp(f"{day} {hour:02d}:00").tz_localize(tz).tz_convert("UTC").tz_localize(None)
+
+
+def item_methods(led: pd.DataFrame, item_id: int) -> list:
+    """Methods that have written at least one forecast for this item, in the usual order (stays put first)."""
+    if led is None or led.empty:
+        return []
+    have = set(led.loc[led["item_id"] == int(item_id), "method"])
+    return [m for m in METHODS if m in have]
+
+
+def item_forecast(led: pd.DataFrame, item_id: int, method: str) -> pd.DataFrame:
+    """The newest forecast for one item and one method: one row per horizon, sorted short to long. Empty when there is none."""
+    if led is None or led.empty:
+        return pd.DataFrame(columns=LEDGER_COLUMNS)
+    d = led[(led["item_id"] == int(item_id)) & (led["method"] == method)]
+    if d.empty:
+        return d
+    return d[d["made_day"] == d["made_day"].max()].sort_values("horizon").reset_index(drop=True)
+
+
+def item_daily_points(led: pd.DataFrame, item_id: int) -> pd.DataFrame:
+    """The item's daily prices as far as the ledger knows them: the price on each day a forecast was made from (`origin`) and the real price of each graded target day (`actual`, which wins
+    when both exist). Columns day, price."""
+    if led is None or led.empty:
+        return pd.DataFrame(columns=["day", "price"])
+    d = led[led["item_id"] == int(item_id)]
+    a = d[d["actual"].notna() & (d["actual"] > 0)][["target_day", "actual"]].rename(columns={"target_day": "day", "actual": "price"})
+    o = d[d["origin"].notna() & (d["origin"] > 0)][["made_day", "origin"]].rename(columns={"made_day": "day", "origin": "price"})
+    both = pd.concat([a.assign(_k=0), o.assign(_k=1)], ignore_index=True).sort_values(["day", "_k"])
+    return both.drop_duplicates("day", keep="first").drop(columns="_k").sort_values("day").reset_index(drop=True)
+
+
+def item_history_table(led: pd.DataFrame, item_id: int, limit: int = 90) -> pd.DataFrame:
+    """Every forecast written for one item, newest first, with the real price once it is known and whether it landed inside the ranges."""
+    if led is None or led.empty:
+        return pd.DataFrame()
+    d = led[led["item_id"] == int(item_id)].copy()
+    if d.empty:
+        return pd.DataFrame()
+    d["_m"] = d["method"].map({m: i for i, m in enumerate(METHODS)})
+    d = d.sort_values(["made_day", "horizon", "_m"], ascending=[False, True, True]).head(limit)
+    known = d["actual"].notna() & (d["actual"] > 0)
+    in50 = (d["actual"] >= d["lo50"]) & (d["actual"] <= d["hi50"])
+    in80 = (d["actual"] >= d["lo80"]) & (d["actual"] <= d["hi80"])
+    result = np.where(~known, "waiting", np.where(in50, "inside 50% range", np.where(in80, "inside 80% range", np.where(d["actual"] > d["hi80"], "outside: higher", "outside: lower"))))
+    return pd.DataFrame({
+        "Made from day": d["made_day"].to_numpy(), "For day": d["target_day"].to_numpy(),
+        "Looking ahead": d["horizon"].map(lambda h: HORIZON_NAME.get(int(h), f"{int(h)} days")).to_numpy(),
+        "Method": d["method"].map(lambda m: METHOD_NAME.get(m, m)).to_numpy(),
+        "Price then (g)": d["origin"].to_numpy(), "Guess (g)": d["guess"].to_numpy(),
+        "50% range low (g)": d["lo50"].to_numpy(), "50% range high (g)": d["hi50"].to_numpy(),
+        "80% range low (g)": d["lo80"].to_numpy(), "80% range high (g)": d["hi80"].to_numpy(),
+        "Real price (g)": d["actual"].to_numpy(), "Result": result})

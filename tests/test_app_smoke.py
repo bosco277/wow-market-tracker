@@ -173,5 +173,68 @@ class TestAppSmoke(unittest.TestCase):
         run_app(d, selected_row=1)
 
 
+def ledger_for_smoke(graded=True):
+    """Forecasts for items 1 and 2 (not 3): one guess day, 1 / 3 / 7 days ahead, three methods. With graded=True the 1-day targets already have their real price."""
+    rows = []
+    for i, origin in ((1, 1.0), (2, 20.0)):
+        for h, td in ((1, "2026-10-31"), (3, "2026-11-02"), (7, "2026-11-06")):
+            for m in ("naive", "ema25", "kinked"):
+                rows.append(dict(made_day="2026-10-30", item_id=i, horizon=h, method=m, guess=origin, lo50=origin * 0.9, hi50=origin * 1.1, lo80=origin * 0.8, hi80=origin * 1.25,
+                                 origin=origin, jump_bin=2, target_day=td, actual=origin * 1.05 if (graded and h == 1) else np.nan, made_at="2026-10-31T06:17:00Z", engine_version="0.7.30"))
+    return pd.DataFrame(rows)
+
+
+def named(label):
+    return [(a, k) for n, a, k in Any.calls if n == label]
+
+
+class TestForecastViews(unittest.TestCase):
+    def test_item_chart_gets_a_forecast_and_the_tab_gets_a_scoreboard(self):
+        d = tables()
+        d["forecast_ledger"] = ledger_for_smoke()
+        Any.calls.clear()
+        st = run_app(d, selected_row=0)                                # the Market and Flips tables each open an item; items 1 and 2 both have forecasts
+        scatter = [k for a, k in named("Scatter")]
+        lines = [k for k in scatter if str(k.get("name", "")).startswith("forecast: ")]
+        self.assertGreaterEqual(len(lines), 1)
+        self.assertTrue(all(k["name"] == "forecast: Stays put" for k in lines))                    # the honest baseline is the default
+        self.assertTrue(all(len(k["x"]) == 4 for k in lines))                                      # the daily price it starts from, then 1, 3 and 7 days ahead
+        names = [k.get("name") for k in scatter]
+        for nm in ("forecast 80% range", "forecast 50% range", "daily price (median of the day)"):
+            self.assertIn(nm, names)
+        past = next(df for df, k in st.seen if "Result" in df)                                      # this item's list of forecasts
+        self.assertEqual(len(past), 9)
+        self.assertEqual(set(past["Result"]), {"waiting", "inside 50% range"})                     # 1-day targets graded (1.05 x the guess, inside 0.9 - 1.1); 3 and 7 days wait
+        board = next(df for df, k in st.seen if "Inside 80% range (%)" in df)
+        self.assertEqual(len(board), 3)                                                            # only the 1-day forecasts are graded: three methods
+        self.assertTrue(pd.api.types.is_numeric_dtype(board["Typical miss (%)"]))
+        self.assertTrue(any(str(k.get("key", "")).startswith("fc_") for a, k in named("plotly_chart")))
+
+    def test_item_without_forecasts_gets_an_explanation(self):
+        d = tables()
+        d["forecast_ledger"] = ledger_for_smoke()
+        Any.calls.clear()
+        st = run_app(d, selected_row=None, found="item 3")             # item 3 is not in the ledger
+        self.assertFalse([k for a, k in named("Scatter") if str(k.get("name", "")).startswith("forecast")])
+        self.assertTrue(any("No forecast for this item yet" in str(a[0]) for a, k in named("caption")))
+        self.assertFalse(any("Result" in df for df, k in st.seen))
+
+    def test_nothing_graded_yet_shows_the_waiting_message(self):
+        d = tables()
+        d["forecast_ledger"] = ledger_for_smoke(graded=False)
+        Any.calls.clear()
+        st = run_app(d, selected_row=0)
+        self.assertTrue(any("Nothing is graded yet" in str(a[0]) for a, k in named("info")))
+        waiting = next(df for df, k in st.seen if "Forecasts waiting" in df)
+        self.assertEqual(list(waiting["Forecasts waiting"]), [6, 6, 6])        # 2 items x 3 methods at each horizon
+
+    def test_no_ledger_file_at_all(self):
+        Any.calls.clear()
+        st = run_app(tables(), selected_row=0)                                 # no forecast_ledger table: the page loads it as empty
+        self.assertTrue(any("No forecasts recorded yet" in str(a[0]) for a, k in named("info")))
+        self.assertFalse([k for a, k in named("Scatter") if str(k.get("name", "")).startswith("forecast")])
+        self.assertFalse(any("Result" in df for df, k in st.seen))
+
+
 if __name__ == "__main__":
     unittest.main()
