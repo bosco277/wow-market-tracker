@@ -1,0 +1,47 @@
+name: Forever Find Listing
+
+# Hand-started only (Actions tab > Forever Find Listing > Run workflow). Finds WHICH Forever auction house holds one listing you just posted in game, by searching Blizzard's live data
+# (script: forever_find.py). It writes nothing anywhere, sends no alerts and uses only the Blizzard secrets. Costs about 24 downloads of auction data: run it when you expect the listing to be visible,
+# not every few minutes. The three boxes default to the Linen Cloth test (item 2589, 54321 copper = 5g 43s 21c, any quantity).
+
+on:
+  workflow_dispatch:
+    inputs:
+      item_id:
+        description: "Item id (2589 = Linen Cloth)"
+        default: "2589"
+      price_copper:
+        description: "Price of your listing in copper (10,000 copper = 1 gold; 5g 43s 21c = 54321). For a stack of commodities use the PRICE PER UNIT."
+        default: "54321"
+      quantity:
+        description: "Quantity in your listing (blank = any)"
+        default: ""
+
+concurrency:
+  group: forever-find
+  cancel-in-progress: false
+
+jobs:
+  find:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository files
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pandas pyarrow requests huggingface_hub
+
+      - name: Find the listing
+        env:
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+          FIND_ITEM_ID: ${{ inputs.item_id }}
+          FIND_PRICE: ${{ inputs.price_copper }}
+          FIND_QUANTITY: ${{ inputs.quantity }}
+        run: python forever_find.py
