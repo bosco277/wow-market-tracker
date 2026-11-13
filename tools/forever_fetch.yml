@@ -6,14 +6,21 @@ name: Forever Auction Extractor
 # a hand-started run (Actions tab > Run workflow) always goes. Until Blizzard serves Forever listings a run just says "not live yet" and ends green.
 # Secrets used: BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET, HF_TOKEN (must be allowed to write to the Forever dataset), and optional DISCORD_WEBHOOK_URL (one message when data first arrives, and on real failures).
 # No Backblaze keys: Forever is stored on Hugging Face only.
-# Which realms: blank = the built-in list. To change it without a push, add a repository VARIABLE named FOREVER_REALM_IDS (comma separated realm ids) on the same Variables tab;
-# a hand-started run can also type ids into the realm_ids box, which wins over the variable.
+# What it collects: Forever listings sit under rulesets and auction houses (see fetch_forever.py). Blank settings = the defaults: ruleset 1 (PvP), every auction house that has listings.
+# To change that without a push, add repository VARIABLES on the same Variables tab: FOREVER_RULESETS (e.g. 1,2,3,15) and/or FOREVER_HOUSE_IDS (e.g. 110,113);
+# a hand-started run can also type them into the boxes, which win over the variables. FOREVER_REALM_IDS (comma separated realm ids) only matters if Blizzard ever serves the old realm layout.
 
 on:
   workflow_dispatch:
     inputs:
       realm_ids:
         description: "Realm ids, comma separated (blank = the repository variable FOREVER_REALM_IDS, or the built-in list if that is empty too)"
+        default: ""
+      rulesets:
+        description: "Ruleset ids to read, comma separated (blank = the repository variable FOREVER_RULESETS, or ruleset 1 if that is empty too)"
+        default: ""
+      house_ids:
+        description: "Auction-house ids to collect, comma separated (blank = the repository variable FOREVER_HOUSE_IDS, or every house that has listings)"
         default: ""
   workflow_run:
     workflows: ["Hourly Auction Extractor"]
@@ -48,4 +55,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           FOREVER_REALM_IDS: ${{ inputs.realm_ids || vars.FOREVER_REALM_IDS }}
+          FOREVER_RULESETS: ${{ inputs.rulesets || vars.FOREVER_RULESETS }}
+          FOREVER_HOUSE_IDS: ${{ inputs.house_ids || vars.FOREVER_HOUSE_IDS }}
         run: python fetch_forever.py
