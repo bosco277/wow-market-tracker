@@ -127,7 +127,51 @@ class TestRunDaily(unittest.TestCase):
         out, text, uploaded, _ = self._run({"item_daily": old}, upload=True)
         self.assertIn("2026-09-01", set(out["day"]))
         self.assertGreater(len(set(out["day"])), 1)
-        self.assertEqual(uploaded, [["item_daily.parquet"]])
+        self.assertEqual(uploaded, [["hourly", "item_daily.parquet"]])                 # one commit: the daily table and the permanent hourly day files
+
+    def _hourly_files(self, tables):
+        """Run with upload and read back the hourly day files that would be uploaded: {file name: frame}. (to_parquet is swapped for CSV so the contents can be read.)"""
+        import lake
+        store = {"items": pd.DataFrame({"item_id": [1001, 1002, 1003, 1004]}), **tables}
+        seen = {}
+
+        def fake_upload(folder, msg):
+            sub = os.path.join(folder, "hourly")
+            for f in sorted(os.listdir(sub)) if os.path.isdir(sub) else []:
+                seen[f] = pd.read_csv(os.path.join(sub, f), parse_dates=["ts"])
+            seen["_msg"] = msg
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(lake, "_load_all", return_value=self.snaps), \
+                mock.patch.object(pd.DataFrame, "to_parquet", lambda self_, path, **kw: self_.to_csv(path, index=False)), \
+                mock.patch.object(lake, "_upload_folder_to_engine", side_effect=fake_upload), \
+                contextlib.redirect_stdout(io.StringIO()):
+            lake.run_daily(None, lake.argparse.Namespace(ids="", out=d, upload=True), read_table=lambda n: store.get(n, pd.DataFrame()))
+        return seen
+
+    def test_writes_one_hourly_file_per_eastern_day_without_the_window_edges(self):
+        seen = self._hourly_files({})
+        msg = seen.pop("_msg")
+        self.assertTrue(seen)
+        self.assertTrue(all(n.startswith("h_") and n.endswith(".parquet") for n in seen))
+        self.assertIn("hourly days", msg)
+        allrows = pd.concat(seen.values())
+        self.assertEqual(list(allrows.columns), D.HOURLY_COLUMNS)
+        first, last = self.snaps[0].ts, self.snaps[-1].ts
+        self.assertGreaterEqual(allrows["ts"].min(), first + pd.Timedelta(hours=12))
+        self.assertLessEqual(allrows["ts"].max(), last - pd.Timedelta(hours=12))
+        self.assertTrue(allrows["u5"].notna().any())
+
+    def test_a_stored_hourly_day_is_merged_not_replaced(self):
+        first = self._hourly_files({})
+        first.pop("_msg")
+        name = sorted(first)[0]
+        day = name[2:-8]
+        keep = first[name].head(1).assign(item_id=999999)                           # a stored row this run does not recompute
+        stored = pd.concat([first[name], keep], ignore_index=True)
+        seen = self._hourly_files({f"hourly/h_{day}": stored})
+        seen.pop("_msg")
+        self.assertEqual(len(seen[name]), len(first[name]) + 1)
+        self.assertIn(999999, set(seen[name]["item_id"]))
 
     def test_refuses_without_items(self):
         import lake

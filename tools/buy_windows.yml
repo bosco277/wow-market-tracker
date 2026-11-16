@@ -1,0 +1,60 @@
+name: Buy windows
+
+# Manual. Tests whether a time of day or a day of the week is reliably cheaper for buying commodities, on days the test has not learned from (walk-forward).
+# Reads the permanent hourly history (engine/hourly/ in the private dataset, written by the Daily chain). Only reads: nothing is uploaded to the dataset.
+# The report is in the run's summary and in the downloadable file buy_windows.txt.
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Use only the last N stored days (0 = all of them)"
+        default: "0"
+      window:
+        description: "Buying window length in hours (1 to 6)"
+        default: "3"
+      price:
+        description: "Price measure"
+        type: choice
+        options:
+          - floor_gold
+          - p15
+        default: floor_gold
+
+concurrency:
+  group: buy-windows
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pandas numpy pyarrow huggingface_hub
+
+      - name: Buy-window test
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DAYS: ${{ inputs.days || '0' }}
+          WINDOW: ${{ inputs.window || '3' }}
+          PRICE: ${{ inputs.price || 'floor_gold' }}
+        run: |
+          set -o pipefail
+          mkdir -p out
+          python tools/buy_windows.py --days "$DAYS" --window "$WINDOW" --price "$PRICE" --out out | tee out_windows.txt
+          { echo '### buy windows'; echo '```'; cat out_windows.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: buy-windows
+          path: out/buy_windows.txt
+          if-no-files-found: ignore

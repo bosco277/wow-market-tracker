@@ -895,7 +895,8 @@ def run_daily(store, args, reader=None, read_table=None):
         return pd.DataFrame()
     print(f"{len(snaps)} snapshots from {_et_any(snaps[0].ts)} to {_et_any(snaps[-1].ts)} (US Eastern); classifying sales for {len(ids)} items ...")
     intervals = classify_series(snaps)
-    new = D.daily_table(D.build_hourly(snaps, intervals, ids))
+    hourly = D.build_hourly(snaps, intervals, ids)
+    new = D.daily_table(hourly)
     if new.empty:
         print("No usable hours for these items in this window.")
         return new
@@ -913,8 +914,26 @@ def run_daily(store, args, reader=None, read_table=None):
         folder = os.path.join(args.out, "daily_upload")
         os.makedirs(folder, exist_ok=True)
         merged.to_parquet(os.path.join(folder, "item_daily.parquet"), index=False)
-        _upload_folder_to_engine(folder, "item daily history")
+        # The permanent HOURLY table (one file per US Eastern day, engine/hourly/h_YYYY-MM-DD.parquet) that the buy-window test (tools/buy_windows.py) reads. Same commit.
+        wrote_days = _write_hourly_days(D, hourly, snaps, ids, folder, read_table)
+        _upload_folder_to_engine(folder, "item daily history" + (f" + {wrote_days} hourly days" if wrote_days else ""))
     return merged
+
+
+def _write_hourly_days(D, hourly, snaps, ids, folder, read_table):
+    """Write each day of the freshly built hourly table into folder/hourly/h_<day>.parquet, merged with that day's stored file (newer rows win; a partial recompute never shrinks a
+    day). Returns the number of day files written."""
+    hl = D.trim_edges(D.hourly_long(hourly, snaps, ids), snaps[0].ts, snaps[-1].ts)
+    days = D.split_by_day(hl)
+    if not days:
+        return 0
+    sub = os.path.join(folder, "hourly")
+    os.makedirs(sub, exist_ok=True)
+    for day, rows in days.items():
+        old = read_table(f"hourly/h_{day}")
+        D.merge_hourly(old, rows).to_parquet(os.path.join(sub, f"h_{day}.parquet"), index=False)
+    print(f"hourly history: {len(days)} day files ({min(days)} to {max(days)}) written to engine/hourly/")
+    return len(days)
 
 
 def _undermine_client(client=None):

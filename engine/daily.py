@@ -10,7 +10,11 @@ so the history only grows. A day can be re-computed later (for example after a p
   listing cannot set; empty for days stored before v0.7.26), engine_version
 
 Usable hour = no price spike, no listing blip, not a wipe or long gap, and a sales estimate exists. A day with fewer than 18 usable
-hours is stored but not scored by the group test."""
+hours is stored but not scored by the group test.
+
+A second permanent table keeps the HOURLY rows themselves (`hourly_long`, one file per US Eastern day, engine/hourly/h_YYYY-MM-DD.parquet in the private dataset), because the 8-day hourly table is too short to
+test time-of-day and day-of-week buying windows (engine/windows.py): item_id, ts (naive UTC), floor_gold, units_listed, u5 / u10 (units listed at or below 1.05 / 1.10 times the floor: how many a plan could
+buy near the floor), p15 / p30 (the depth prices above) and the four flags. Days merge row by row (same item and hour: the newer row wins), so a partial day never shrinks a fuller one."""
 from __future__ import annotations
 
 from typing import Iterable, Optional, Sequence
@@ -25,6 +29,9 @@ from .schema import COPPER_PER_GOLD, Snapshot
 
 COLUMNS = ["item_id", "day", "hours", "sold_day", "price_day", "units_day", "flagged_hours", "price_p15", "price_p30", "engine_version"]
 DEPTH_SHARES = (0.15, 0.30)
+HOURLY_COLUMNS = ["item_id", "ts", "floor_gold", "units_listed", "u5", "u10", "p15", "p30", "spike", "blip", "flag_wipe", "flag_long_gap"]
+HOURLY_FLAGS = ("spike", "blip", "flag_wipe", "flag_long_gap")
+DEPTH_BANDS = (0.05, 0.10)
 
 
 def depth_prices(snaps: Sequence[Snapshot], ids: Iterable[int], shares=DEPTH_SHARES) -> pd.DataFrame:
@@ -51,6 +58,76 @@ def depth_prices(snaps: Sequence[Snapshot], ids: Iterable[int], shares=DEPTH_SHA
     if not parts:
         return pd.DataFrame(columns=["item_id", "ts", "p15", "p30"])
     return pd.concat(parts, ignore_index=True)
+
+
+def depth_units(snaps: Sequence[Snapshot], ids: Iterable[int], bands=DEPTH_BANDS) -> pd.DataFrame:
+    """Per item per snapshot: item_id, ts, u5, u10 = the units listed at or below 1.05 / 1.10 times the floor price. How many units a buyer could take within 5% / 10% of the cheapest listing."""
+    ids = {int(i) for i in ids}
+    parts = []
+    for s in snaps:
+        b = s.book
+        b = b[b["item_id"].isin(ids)][["item_id", "unit_price", "quantity"]]
+        b = b[b["quantity"] > 0]
+        if b.empty:
+            continue
+        floor = b.groupby("item_id")["unit_price"].transform("min")
+        out = pd.DataFrame({"item_id": sorted(b["item_id"].unique())}).set_index("item_id")
+        for band in bands:
+            near = b[b["unit_price"] <= floor * (1.0 + band) + 1e-9]
+            out[f"u{int(round(band * 100))}"] = near.groupby("item_id")["quantity"].sum()
+        out = out.reset_index()
+        out["ts"] = s.ts
+        parts.append(out)
+    if not parts:
+        return pd.DataFrame(columns=["item_id", "ts"] + [f"u{int(round(b * 100))}" for b in bands])
+    return pd.concat(parts, ignore_index=True)
+
+
+def hourly_long(h: pd.DataFrame, snaps: Sequence[Snapshot], ids: Iterable[int]) -> pd.DataFrame:
+    """The permanent hourly table: `build_hourly`'s rows plus the depth units, in HOURLY_COLUMNS order, `ts` naive UTC."""
+    if h is None or h.empty:
+        return pd.DataFrame(columns=HOURLY_COLUMNS)
+    out = h.copy()
+    t0 = pd.to_datetime(out["ts"])
+    out["ts"] = (t0.dt.tz_convert("UTC") if t0.dt.tz is not None else t0).dt.tz_localize(None)       # snapshot times are naive UTC
+    du = depth_units(snaps, ids)
+    if not du.empty:
+        out = out.merge(du, on=["item_id", "ts"], how="left")
+    for c in HOURLY_COLUMNS:
+        if c not in out.columns:
+            out[c] = False if c in HOURLY_FLAGS else np.nan
+    for c in HOURLY_FLAGS:
+        out[c] = out[c].fillna(False).astype(bool)
+    out["item_id"] = out["item_id"].astype(int)
+    return out[HOURLY_COLUMNS].sort_values(["item_id", "ts"]).reset_index(drop=True)
+
+
+def trim_edges(hl: pd.DataFrame, first_ts, last_ts, hours: int = 12) -> pd.DataFrame:
+    """Drop rows within `hours` of either end of the loaded window. The spike and blip flags look 12 hours either side of an hour, so rows at the edges are flagged with half the
+    evidence; the next run (which sees them in the middle of its window) writes them properly. Pass the first and last snapshot time (naive UTC)."""
+    if hl is None or hl.empty:
+        return hl
+    lo, hi = pd.Timestamp(first_ts) + pd.Timedelta(hours=hours), pd.Timestamp(last_ts) - pd.Timedelta(hours=hours)
+    t = pd.to_datetime(hl["ts"])
+    return hl[(t >= lo) & (t <= hi)].reset_index(drop=True)
+
+
+def split_by_day(hl: pd.DataFrame, tz: str = "America/New_York") -> dict:
+    """{US Eastern day 'YYYY-MM-DD': that day's rows} for an hourly_long table."""
+    if hl is None or hl.empty:
+        return {}
+    t = pd.to_datetime(hl["ts"]).dt.tz_localize("UTC").dt.tz_convert(tz)
+    day = t.dt.strftime("%Y-%m-%d").to_numpy()
+    return {d: hl[day == d].reset_index(drop=True) for d in sorted(set(day))}
+
+
+def merge_hourly(old: Optional[pd.DataFrame], new: pd.DataFrame) -> pd.DataFrame:
+    """One day's stored rows plus freshly computed ones. Same item and hour: the new row wins. Rows only the old table has are kept (a partial recompute never shrinks a day)."""
+    parts = [p.reindex(columns=HOURLY_COLUMNS) for p in (old, new) if p is not None and len(p)]
+    if not parts:
+        return pd.DataFrame(columns=HOURLY_COLUMNS)
+    m = pd.concat(parts, ignore_index=True)
+    return m.drop_duplicates(["item_id", "ts"], keep="last").sort_values(["item_id", "ts"]).reset_index(drop=True)
 
 
 def build_hourly(snaps: Sequence[Snapshot], intervals: pd.DataFrame, ids: Iterable[int]) -> pd.DataFrame:
