@@ -37,7 +37,7 @@ class Resp:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise requests.HTTPError(f"{self.status_code} error for url")
+            raise requests.HTTPError(f"{self.status_code} error for url", response=self)
 
 
 class FakeHTTP:
@@ -497,6 +497,109 @@ class TestFallbackToRealms(unittest.TestCase):
         self.assertEqual((code, len(commits)), (0, 1))
         self.assertTrue([k for k in commits[0][0] if k.startswith("forever_700")])
         self.assertTrue([c for c in http.calls if c[0].endswith("/ruleset/1/auctions/")])              # the ruleset list is asked first
+
+
+class _HfError(Exception):
+    def __init__(self, code):
+        super().__init__(f"Server error '{code}' for url 'https://huggingface.co/api/datasets/x/commit/main'")
+        self.response = type("R", (), {"status_code": code})()
+
+
+def fake_hub(failures):
+    """A stand-in for huggingface_hub whose create_commit fails with the listed status codes first (None = succeed). Returns (module, calls)."""
+    calls = []
+    script = list(failures)
+
+    class Op:
+        def __init__(self, path_in_repo, path_or_fileobj):
+            self.path_in_repo = path_in_repo
+
+    class Api:
+        def __init__(self, token=None):
+            pass
+
+        def create_commit(self, **kw):
+            calls.append(kw["commit_message"])
+            code = script.pop(0) if script else None
+            if code is not None:
+                raise _HfError(code)
+
+    mod = type(sys)("huggingface_hub")
+    mod.CommitOperationAdd, mod.HfApi = Op, Api
+    return mod, calls
+
+
+class ContentResp(Resp):
+    def __init__(self, status=200, content=b""):
+        super().__init__(status)
+        self.content = content
+
+
+class TestHuggingFaceRetries(unittest.TestCase):
+    """A Hugging Face 500 on Nov 16 failed a run after only 6 seconds of retrying. Transient trouble is now ridden out; permanent trouble still fails at once."""
+    def commit(self, failures):
+        hub, calls = fake_hub(failures)
+        sleeps = []
+        out = io.StringIO()
+        with mock.patch.dict(sys.modules, {"huggingface_hub": hub}), mock.patch.object(F.time, "sleep", sleeps.append), contextlib.redirect_stdout(out):
+            try:
+                F.hf_commit({"a/b.parquet": b"x"}, "msg")
+                error = None
+            except Exception as e:
+                error = e
+        return calls, sleeps, error, out.getvalue()
+
+    def test_two_500s_then_success_waits_15_and_30_seconds(self):
+        calls, sleeps, error, out = self.commit([500, 500, None])
+        self.assertIsNone(error)
+        self.assertEqual((len(calls), sleeps), (3, [15.0, 30.0]))
+        self.assertIn("retrying in 15s", out)
+
+    def test_a_long_outage_is_tried_five_times_over_about_four_minutes_then_raised(self):
+        calls, sleeps, error, _ = self.commit([500] * 9)
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(sleeps, [15.0, 30.0, 60.0, 120.0])
+        self.assertIn("500", str(error))
+
+    def test_429_and_network_errors_are_retried_but_a_bad_token_is_not(self):
+        calls, sleeps, error, _ = self.commit([429, None])
+        self.assertEqual((len(calls), error), (2, None))
+        calls, sleeps, error, _ = self.commit([401])
+        self.assertEqual((len(calls), sleeps), (1, []))
+        self.assertIn("401", str(error))
+        calls, sleeps, error, _ = self.commit([403])
+        self.assertEqual(len(calls), 1)
+
+    def test_a_failed_commit_still_advances_nothing_and_alerts(self):
+        # the end-to-end behaviour (nothing advanced, exit 1, alert) is unchanged: covered by test_failed_commit_advances_nothing in the layouts above
+        code, out, commits, notices, store, _ = run_main(hroutes(houses=hlive()), commit_error=_HfError(500))
+        self.assertEqual((code, commits, store), (1, [], {}))
+        self.assertTrue(any("commit failed, nothing advanced" in n for n in notices))
+
+    def read(self, responses):
+        sleeps = []
+        http = FakeHTTP({"https://huggingface.co/datasets/" + F.HF_REPO_ID + "/resolve/main/k.json": responses})
+        with mock.patch.object(F, "HTTP", http), mock.patch.object(F.time, "sleep", sleeps.append), contextlib.redirect_stdout(io.StringIO()):
+            try:
+                return F.hf_get("k.json"), sleeps, None, len(http.calls)
+            except Exception as e:
+                return None, sleeps, e, len(http.calls)
+
+    def test_reading_a_file_retries_a_503_then_returns_it(self):
+        data, sleeps, error, n = self.read([ContentResp(503), ContentResp(200, b"{}")])
+        self.assertEqual((data, sleeps, error, n), (b"{}", [5.0], None, 2))
+
+    def test_a_missing_file_is_none_at_once_and_a_forbidden_one_is_not_retried(self):
+        data, sleeps, error, n = self.read([ContentResp(404)])
+        self.assertEqual((data, sleeps, error, n), (None, [], None, 1))
+        data, sleeps, error, n = self.read([ContentResp(403)])
+        self.assertEqual((sleeps, n), ([], 1))
+        self.assertIsNotNone(error)
+
+    def test_reading_gives_up_after_four_tries(self):
+        data, sleeps, error, n = self.read([ContentResp(500)])
+        self.assertEqual((n, sleeps), (4, [5.0, 10.0, 20.0]))
+        self.assertIsNotNone(error)
 
 
 class TestWorkflowFile(unittest.TestCase):

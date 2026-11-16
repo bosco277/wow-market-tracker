@@ -74,12 +74,13 @@ def clean(text):
     return str(text).replace(HF_REPO_ID, "<forever dataset>")[:300]
 
 
-def with_retries(fn, what, attempts=3, base_delay=2.0):
+def with_retries(fn, what, attempts=3, base_delay=2.0, retry_if=None):
+    """Calls fn up to `attempts` times, waiting base_delay * 2**i between tries. With retry_if, an error it rejects is raised at once instead of retried."""
     for i in range(attempts):
         try:
             return fn()
         except Exception as e:
-            if i == attempts - 1:
+            if i == attempts - 1 or (retry_if is not None and not retry_if(e)):
                 raise
             delay = base_delay * (2 ** i)
             log(f"{what} failed ({clean(e)}); retrying in {delay:.0f}s")
@@ -97,14 +98,25 @@ def notify(message):
 
 
 # --- Hugging Face (the only store) -----------------------------------------------------------------
+def hf_transient(e):
+    """True for trouble that usually passes by itself: a Hugging Face 5xx, 429 (slow down) or a network error. Wrong token, missing permission, bad request are NOT transient."""
+    code = getattr(getattr(e, "response", None), "status_code", None)
+    return code is None or code >= 500 or code == 429
+
+
 def hf_get(key):
-    """The file's bytes from the Forever dataset, or None if it (or the dataset) does not exist yet."""
+    """The file's bytes from the Forever dataset, or None if it (or the dataset) does not exist yet. Transient trouble is retried (5s, 10s, 20s)."""
     url = f"https://huggingface.co/datasets/{HF_REPO_ID}/resolve/main/{key}"
-    r = HTTP.get(url, headers={"Authorization": f"Bearer {HF_TOKEN}"}, timeout=120)
-    if r.status_code == 404:
-        return None
-    r.raise_for_status()
-    return r.content
+
+    def once():
+        r = HTTP.get(url, headers={"Authorization": f"Bearer {HF_TOKEN}"}, timeout=120)
+        if r.status_code == 404:
+            return None
+        if r.status_code >= 500 or r.status_code == 429:
+            raise requests.HTTPError(f"HTTP {r.status_code}", response=r)
+        r.raise_for_status()
+        return r.content
+    return with_retries(once, "HF read", attempts=4, base_delay=5.0, retry_if=hf_transient)
 
 
 def ensure_repo():
@@ -121,7 +133,9 @@ def hf_commit(files, message):
     from huggingface_hub import CommitOperationAdd, HfApi
     ops = [CommitOperationAdd(path_in_repo=k, path_or_fileobj=v) for k, v in files.items()]
     api = HfApi(token=HF_TOKEN)
-    with_retries(lambda: api.create_commit(repo_id=HF_REPO_ID, repo_type="dataset", operations=ops, commit_message=message), "HF commit")
+    # A Hugging Face 500 on Nov 16 outlasted the old 3 tries in 6 seconds and turned a run red. Five tries over about four minutes (15s, 30s, 60s, 120s) ride out a short blip; the job has already
+    # downloaded the data, so waiting costs only a few Actions minutes. Errors that will not pass (wrong token, no permission) are raised at once.
+    with_retries(lambda: api.create_commit(repo_id=HF_REPO_ID, repo_type="dataset", operations=ops, commit_message=message), "HF commit", attempts=5, base_delay=15.0, retry_if=hf_transient)
 
 
 def load_json(key, default):
