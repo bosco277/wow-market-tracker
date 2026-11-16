@@ -82,6 +82,49 @@ class TestDips(unittest.TestCase):
             self.assertIn(part, text)
         self.assertLess(text.index("3-6% under"), text.index("20%+ under"))        # depth rows are in depth order, not alphabetical
 
+    def test_a_two_hour_dump_is_still_there_one_hour_later_but_not_two(self):
+        res = Dp.analyze_dips(dumps(), two_groups())
+        lag = res["lag"]
+        x = lag[(lag["pool"] == "everything") & (lag["k"] == 2) & (lag["depth"] == "20%+ under")].set_index("lag")
+        self.assertGreater(x.loc[1, "still"], 0.95)                                 # the dump lasts two hourly snapshots
+        self.assertLess(x.loc[2, "still"], 0.05)                                    # and is gone at the third
+        self.assertLess(x.loc[3, "still"], 0.05)
+        self.assertGreater(x.loc[1, "median"], 0.25)                                # arriving one hour late still gets the bargain
+        self.assertEqual(x.loc[1, "units_med"], 50)
+
+    def test_sell_through_turns_units_near_the_floor_into_days_to_sell_and_a_plan(self):
+        hl = dumps()
+        days = pd.date_range("2026-06-01", periods=40, freq="D").strftime("%Y-%m-%d")
+        sales = lambda per_day: pd.DataFrame([{"item_id": 1000 + i, "day": d, "sold_day": per_day} for i in range(8) for d in days])
+        fast = Dp.analyze_dips(hl, two_groups(), sales=sales(100.0))["depth"]
+        r = fast[(fast["pool"] == "everything") & (fast["k"] == 2) & (fast["depth"] == "20%+ under")].iloc[0]
+        self.assertAlmostEqual(r["days_to_sell"], 0.5)                              # 50 units near the floor, 100 sold a day
+        self.assertEqual(r["plan_qty"], 50)                                         # two days of sales is 200: the 50 units near the floor are the limit
+        self.assertGreater(r["plan_profit"], 0)
+        self.assertAlmostEqual(r["sell_known"], 1.0)
+        slow = Dp.analyze_dips(hl, two_groups(), sales=sales(10.0))["depth"]
+        r = slow[(slow["pool"] == "everything") & (slow["k"] == 2) & (slow["depth"] == "20%+ under")].iloc[0]
+        self.assertAlmostEqual(r["days_to_sell"], 5.0)                              # 50 units, 10 sold a day
+        self.assertEqual(r["plan_qty"], 20)                                         # capped at two days of sales
+        none = Dp.analyze_dips(hl, two_groups())["depth"]                           # no sales table: the columns are empty, nothing breaks
+        self.assertTrue(none["days_to_sell"].isna().all())
+
+    def test_events_per_day_and_the_loss_definition(self):
+        res = Dp.analyze_dips(dumps(), two_groups())
+        d = res["depth"]
+        r = d[(d["pool"] == "everything") & (d["k"] == 1) & (d["depth"] == "20%+ under")].iloc[0]
+        self.assertGreater(r["per_day"], 7.0)                                        # eight items, about one dump each a day
+        self.assertLess(r["per_day"], 8.5)
+        falling = Dp.analyze_dips(market(days=40, noise=0.01, step=(20, -0.2)), two_groups())["table"]
+        f = falling[(falling["pool"] == "everything") & (falling["k"] == 1)].iloc[0]
+        self.assertAlmostEqual(f["median_dip"], -0.05, places=1)                    # the price stays at its new level: only the cut is lost
+        self.assertLess(f["loss_dip"], 0.1)                                         # a flat price is not a loss
+
+    def test_the_report_has_the_acting_sections(self):
+        text = Dp.format_dips(Dp.analyze_dips(dumps(), two_groups()))
+        for part in ("CAN YOU STILL BUY IT", "still there", "days to sell", "plan units", "per day", "neither"):
+            self.assertIn(part, text)
+
     def test_resale_verdict_words(self):
         cfg = Dp.DipConfig()
         self.assertEqual(Dp.resale_verdict(0.08, 0.5, 0.1, cfg), "resale clears 5%")

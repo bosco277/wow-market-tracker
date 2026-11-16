@@ -39,7 +39,7 @@ class WindowConfig:
     min_train_days: int = 10            # the hour-of-day test starts after this many days of learning
     min_train_dow: int = 28             # the weekday test learns from at least this many days
     clip: float = 1.0                   # log price ratios are clipped to +-clip (a 2.7x move), so one broken price cannot drive a group
-    cut: float = 0.05                   # AH cut taken from a sale
+    cut: float = 0.05                   # AH cut taken from a sale. A resale "loss" means the price fell by min_profit or more, i.e. a margin of -(cut + min_profit) or worse
     min_profit: float = 0.05            # the resale check wants at least this much left after the cut
     sale_days: tuple = (1, 2, 3)
     tiers: tuple = (1.0, 100.0)         # price tiers by the item's median price in gold: under 1g, 1g to 100g, 100g and up
@@ -357,7 +357,7 @@ def resale_check(p: pd.DataFrame, rel: pd.DataFrame, wf: pd.DataFrame, pools: pd
             rows.append({"pool": pool, "k": k, "n": len(d), "margin_window": float(d["mw"].clip(-1, 5).mean()), "margin_random": float(d["mr"].clip(-1, 5).mean()),
                          "median_window": float(d["mw"].median()), "median_random": float(d["mr"].median()),
                          "share_window": float((d["mw"] >= cfg.min_profit).mean()), "share_random": float((d["mr"] >= cfg.min_profit).mean()),
-                         "loss_window": float((d["mw"] <= -cfg.min_profit).mean()), "loss_random": float((d["mr"] <= -cfg.min_profit).mean())})
+                         "loss_window": float((d["mw"] <= -(cfg.cut + cfg.min_profit)).mean()), "loss_random": float((d["mr"] <= -(cfg.cut + cfg.min_profit)).mean())})
     return pd.DataFrame(rows, columns=cols)
 
 
@@ -441,7 +441,8 @@ def format_report(res: dict, top: int = 25) -> str:
             L.append(f"   {r['pool'][:42]:42s} test days {r['test_days']:4d}, on the learned weekdays ({r['weekdays']}) {r['chosen_days']:3d}: saving {_pct(r['saving'])} ({_pct(r['lo'])} to {_pct(r['hi'])})  {r['verdict']}")
     L.append("")
     rs = res.get("resale", pd.DataFrame())
-    L.append(f"== RESALE CHECK: buy in the learned window, sell at the median price k days later, after a {cfg.cut * 100:.0f}% AH cut. Gain = {cfg.min_profit * 100:.0f}% or more left; loss = {cfg.min_profit * 100:.0f}% or more lost")
+    L.append(f"== RESALE CHECK: buy in the learned window, sell at the median price k days later, after a {cfg.cut * 100:.0f}% AH cut. Gain = {cfg.min_profit * 100:.0f}% or more left; loss = the price fell {cfg.min_profit * 100:.0f}% or more "
+             f"({(cfg.cut + cfg.min_profit) * 100:.0f}% lost after the cut). A flat price lands exactly at the cut ({-cfg.cut * 100:.0f}%) and counts as neither.")
     if rs.empty:
         L.append("   Nothing to check yet (needs test days that have a later sale day).")
     else:

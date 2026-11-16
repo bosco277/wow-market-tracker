@@ -590,3 +590,134 @@ def item_history_table(led: pd.DataFrame, item_id: int, limit: int = 90) -> pd.D
         "50% range low (g)": d["lo50"].to_numpy(), "50% range high (g)": d["hi50"].to_numpy(),
         "80% range low (g)": d["lo80"].to_numpy(), "80% range high (g)": d["hi80"].to_numpy(),
         "Real price (g)": d["actual"].to_numpy(), "Result": result})
+
+
+# ---------------------------------------------------------------- Buy targets (what to look for when you scan the auction house)
+BUY_TIERS = {"good": "Good: the bottom 25% of its hours", "great": "Great: the bottom 10%", "steal": "Steal: the bottom 3% (about the lowest it touches in a week)"}
+BUY_DEPTH_ORDER = ["under 3%", "3-10%", "10-20%", "20%+"]
+BUY_STALE_HOURS = 36           # the daily chain runs once a day; older than a day and a half means it missed a run
+
+
+def buy_names(bt: pd.DataFrame, items: pd.DataFrame) -> pd.DataFrame:
+    """Buy-target rows with a `name` column: the market table's name when it has one, else the name stored with the target, else blank."""
+    if bt is None or bt.empty:
+        return bt
+    out = bt.copy()
+    stored = out["name"].fillna("").astype(str) if "name" in out.columns else pd.Series([""] * len(out), index=out.index)
+    if items is not None and len(items) and "name" in items.columns:
+        m = items[["item_id", "name"]].drop_duplicates("item_id").set_index("item_id")["name"].fillna("").astype(str)
+        market = out["item_id"].map(m).fillna("")
+    else:
+        market = pd.Series([""] * len(out), index=out.index)
+    out["name"] = market.where(market != "", stored)
+    return out
+
+
+def buy_view(t: pd.DataFrame, tier: str = "great", price_tiers=None, groups=None, query: str = "", min_depth: float = 0.0, min_prob: float = 0.0,
+             prob_days: int = 3, min_units: float = 0.0) -> pd.DataFrame:
+    """The shopping list for one kind of target (good / great / steal), filtered, best first. Depth and chances are fractions in the table, percents in the view.
+    `Worth (g)` = the units usually near the floor at that price x (the 7-day median - the target): the gold saved against paying the median for those units.
+    An item with no calibrated chance (nothing graded at its depth yet) passes a chance filter of 0 and fails any higher one."""
+    cols = ["_id", "Item", "Group", "7-day median (g)", "Buy below (g)", "Depth under median (%)", "Chance in 1 day (%)", "Chance in 3 days (%)", "Chance in 7 days (%)",
+            "Units near floor (units)", "Worth (g)"]
+    if t is None or t.empty:
+        return pd.DataFrame(columns=cols)
+    need = ["item_id", "med7_g", f"{tier}_g", f"{tier}_depth", f"{tier}_units"] + [f"{tier}_p{d}d" for d in (1, 3, 7)]
+    if any(c not in t.columns for c in need):
+        return pd.DataFrame(columns=cols)
+    v = t.copy()
+    v["worth"] = v[f"{tier}_units"].fillna(0.0) * (v["med7_g"] - v[f"{tier}_g"])
+    name = v["name"].fillna("").astype(str) if "name" in v.columns else pd.Series([""] * len(v), index=v.index)
+    group = v["group"].fillna("").astype(str) if "group" in v.columns else pd.Series([""] * len(v), index=v.index)
+    keep = (v[f"{tier}_depth"].fillna(0.0) >= min_depth) & (v[f"{tier}_units"].fillna(0.0) >= min_units)
+    if min_prob > 0:
+        keep &= v[f"{tier}_p{int(prob_days)}d"].fillna(-1.0) >= min_prob
+    if price_tiers:
+        keep &= v["price_tier"].isin(list(price_tiers))
+    if groups:
+        keep &= group.isin(list(groups))
+    q = (query or "").strip().lower()
+    if q:
+        keep &= name.str.lower().str.contains(q, regex=False) | v["item_id"].astype(str).str.contains(q, regex=False)
+    v, name, group = v[keep], name[keep], group[keep]
+    out = pd.DataFrame({"_id": v["item_id"].astype(int).to_numpy(),
+                        "Item": [n if n else f"item {int(i)}" for n, i in zip(name, v["item_id"])],
+                        "Group": group.to_numpy(), "7-day median (g)": v["med7_g"].to_numpy(), "Buy below (g)": v[f"{tier}_g"].to_numpy(),
+                        "Depth under median (%)": v[f"{tier}_depth"].to_numpy() * 100.0,
+                        "Chance in 1 day (%)": v[f"{tier}_p1d"].to_numpy() * 100.0, "Chance in 3 days (%)": v[f"{tier}_p3d"].to_numpy() * 100.0,
+                        "Chance in 7 days (%)": v[f"{tier}_p7d"].to_numpy() * 100.0, "Units near floor (units)": v[f"{tier}_units"].to_numpy(),
+                        "Worth (g)": v["worth"].to_numpy()})
+    return out.sort_values("Worth (g)", ascending=False).reset_index(drop=True)
+
+
+def buy_copy_text(view: pd.DataFrame, n: int = 40) -> str:
+    """One line per item, best first, ready to paste into a note or a shopping list: 'Saronite Ore: buy below 12g 34s 56c'."""
+    if view is None or view.empty:
+        return ""
+    return "\n".join(f"{r['Item']}: buy below {gsc(r['Buy below (g)'])}" for _, r in view.head(max(int(n), 1)).iterrows())
+
+
+def buy_calibration_view(cal: pd.DataFrame, pool: str = "everything", tier: str = "great") -> pd.DataFrame:
+    """How often a target of each depth was reached on days it had not seen: one row per depth, columns for 1 / 3 / 7 days."""
+    cols = ["Depth under median", "Item-days graded", "Reached in 1 day (%)", "Reached in 3 days (%)", "Reached in 7 days (%)", "Typical wait, 1-day window (hours)", "Units near floor then (units)",
+            "Saving vs average price, 3 days (%)"]
+    if cal is None or cal.empty:
+        return pd.DataFrame(columns=cols)
+    c = cal[(cal["pool"] == pool) & (cal["tier"] == tier)]
+    rows = []
+    for depth in BUY_DEPTH_ORDER:
+        d = c[c["depth"] == depth].set_index("H")
+        if d.empty:
+            continue
+        g = lambda col, H: float(d[col].get(H, np.nan))
+        rows.append({cols[0]: depth, cols[1]: int(d["n"].max()), cols[2]: g("reached", 1) * 100.0, cols[3]: g("reached", 3) * 100.0, cols[4]: g("reached", 7) * 100.0,
+                     cols[5]: g("wait_med", 1), cols[6]: g("units_med", 3), cols[7]: g("saving_med", 3) * 100.0})
+    return pd.DataFrame(rows, columns=cols)
+
+
+def buy_when_row(when: pd.DataFrame, pool: str = "everything", tier: str = "great"):
+    """The when-table row for one pool and target tier, or None."""
+    if when is None or when.empty:
+        return None
+    r = when[(when["pool"] == pool) & (when["tier"] == tier)]
+    return r.iloc[0] if len(r) else None
+
+
+def buy_when_lifts(row) -> list:
+    """The 24 hit-rate multiples (US Eastern hour 0..23) of a when-table row, NaN where nothing was observed."""
+    if row is None:
+        return []
+    return [float(row.get(f"lift_{h:02d}", np.nan)) for h in range(24)]
+
+
+def buy_when_verdict(row, window_hours: int = 3) -> tuple:
+    """(plain words, level) for the 'when is it cheapest' question; level is 'rhythm', 'hint' or 'none'. The number that counts is `lift_later`: the best window learned on the first
+    half of the days, graded on the second half (1.0 = no better than any other hour)."""
+    if row is None or row.get("lift_later") is None or row.get("lift_later") != row.get("lift_later"):
+        return "Not enough days yet to tell whether any hour is better (it needs about 8 days of data).", "none"
+    s, later, rep = int(row["window_start"]), float(row["lift_later"]), row.get("replication")
+    rep = float(rep) if rep is not None and rep == rep else 0.0
+    span = f"{HOURS[s]} to {HOURS[(s + window_hours) % 24]} Eastern"
+    if later >= 1.3 and rep >= 0.5:
+        return (f"A repeating rhythm: the best {window_hours} hours ({span}) had {later:.1f} times the average chance of a low price on days they were not learned from. "
+                "Worth timing your scans around them."), "rhythm"
+    if later >= 1.15 and rep >= 0.3:
+        return (f"A weak hint: {span} had {later:.2f} times the average chance on later days, but the hourly pattern only partly repeats. Do not plan around it."), "hint"
+    return "No reliable best hour: low prices show up at all times of day, so scan whenever you are online.", "none"
+
+
+def buy_meta_caption(meta: pd.DataFrame, now=None) -> tuple:
+    """(caption, stale) for the top of the Buy targets tab."""
+    if meta is None or meta.empty:
+        return "", False
+    m = meta.iloc[0]
+    now = pd.Timestamp(now) if now is not None else pd.Timestamp.now("UTC").tz_localize(None)
+    age = (now - pd.Timestamp(m["built_at"])).total_seconds() / 3600.0
+    last = pd.Timestamp(m["last_hour"]) if m.get("last_hour") is not None and m.get("last_hour") == m.get("last_hour") else None
+    text = (f"Prices set from each item's own last {int(m['lookback_days'])} days of hourly prices, using data through {last:%a %b %d %H:%M} UTC; {int(m['days'])} days of history; "
+            f"{int(m['listed']):,} items listed. Refreshed once a day, last at {pd.Timestamp(m['built_at']):%a %b %d %H:%M} UTC ({age:.0f} h ago)." if last is not None else
+            f"{int(m['listed']):,} items listed; refreshed once a day, last at {pd.Timestamp(m['built_at']):%a %b %d %H:%M} UTC ({age:.0f} h ago).")
+    stale = age > BUY_STALE_HOURS
+    if stale:
+        text += " This is older than a day and a half: the daily chain may have missed a run (check the Actions tab on GitHub)."
+    return text, stale

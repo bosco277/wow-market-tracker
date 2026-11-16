@@ -1,12 +1,14 @@
 name: Daily chain
 
-# The two daily jobs, one after the other, so a scheduler only has to start ONE workflow:
-#   1. mode daily           adds the last few days to the permanent per-item history (engine/item_daily in the private dataset)
+# The three daily jobs, one after the other, so a scheduler only has to start ONE workflow:
+#   1. mode daily           adds the last few days to the permanent per-item history (engine/item_daily in the private dataset) and the permanent hourly history (engine/hourly/)
 #   2. mode forecast_ledger grades every earlier guess whose day has now arrived and writes new guesses (engine/forecast_ledger)
+#   3. buy targets          sets every item's buy-below prices from its own last 7 days of hourly prices, checks how often such prices were reached on earlier days, and writes
+#                           the tables the front end's "Buy targets" tab reads (engine/buy_targets, buy_calibration, buy_when, buy_meta)
 # It has no schedule of its own: start it once a day from your scheduler (the Cloudflare Worker) at 06:17 UTC. The US Eastern day ended at 05:00 UTC
 # (04:00 UTC in summer time) and its last hourly file is on the Hugging Face mirror well before 06:17, so the day is complete when this runs.
 # You can also run it by hand from the Actions tab. Safe to run twice: days are merged (the row with more usable hours wins) and a ledger row is written once.
-# If step 1 fails the job stops and step 2 does not run.
+# If a step fails the job stops and the later steps do not run.
 
 on:
   workflow_dispatch:
@@ -65,6 +67,14 @@ jobs:
           set -o pipefail
           python tools/lake.py forecast_ledger --upload --store hf | tee out_ledger.txt
           { echo '### forecast_ledger'; echo '```'; cat out_ledger.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Buy targets
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -o pipefail
+          python tools/buy_windows.py --only targets --days 60 --upload | tee out_targets.txt
+          { echo '### buy targets'; echo '```'; head -c 60000 out_targets.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save downloaded files
         if: ${{ always() }}

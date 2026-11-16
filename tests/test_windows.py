@@ -208,7 +208,10 @@ class TestResaleCheck(unittest.TestCase):
         self.assertAlmostEqual(r["margin_window"], -0.05, places=3)                # sell at the same price minus the 5% cut
         self.assertEqual(r["share_window"], 0.0)
         self.assertAlmostEqual(r["median_window"], -0.05, places=3)
-        self.assertGreater(r["loss_window"], 0.9)                                  # every flat-market resale loses the cut
+        self.assertEqual(r["loss_window"], 0.0)                                    # a flat price lands exactly at the cut: neither a gain nor a loss
+        falling = W.analyze(market(days=40, noise=0.0, drift=np.log(0.88)), None, cfg)["resale"]
+        f1 = falling[(falling["pool"] == "everything") & (falling["k"] == 1)].iloc[0]
+        self.assertEqual(f1["loss_window"], 1.0)                                   # a 12% daily fall: 0.88 x 0.95 - 1 = -16%
         rising = W.analyze(market(days=40, noise=0.0, drift=np.log(1.12)), None, cfg)["resale"]
         r1 = rising[(rising["pool"] == "everything") & (rising["k"] == 1)].iloc[0]
         r2 = rising[(rising["pool"] == "everything") & (rising["k"] == 2)].iloc[0]
@@ -257,22 +260,70 @@ class TestTool(unittest.TestCase):
         import buy_windows
         hl = market(days=40, hour_effect={3: -0.08, 4: -0.08, 5: -0.08})
         with tempfile.TemporaryDirectory() as d:
-            args = buy_windows.argparse.Namespace(days=0, window=3, price="p15", cut=0.05, lookback=7, out=d)
+            args = buy_windows.argparse.Namespace(days=0, window=3, price="p15", cut=0.05, lookback=7, only="all", upload=False, out=d)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 res = buy_windows.run(args, read_hourly=lambda n: (hl, ["2026-06-01", "2026-07-10"]), read_table=lambda n: two_groups())
             with open(os.path.join(d, "buy_windows.txt"), encoding="utf-8") as f:
                 saved = f.read()
+            shopping = pd.read_csv(os.path.join(d, "buy_targets.csv"))
         self.assertEqual(res["cfg"].price_col, "p15")
         self.assertIn("depth price", saved)
         self.assertIn("Loaded 2 stored days", buf.getvalue())
         self.assertIn("DIP TEST", saved)                                           # one report holds the clock test and the dip test
+        self.assertIn("BUY-BELOW PRICES", saved)                                    # and the buy-below prices
+        self.assertEqual(len(shopping), 8)                                          # the shopping list is written next to the report, one row per item
+        self.assertTrue({"item_id", "great_g", "great_copper", "great_p3d", "steal_g", "good_g", "score_g"} <= set(shopping.columns))
+
+    def test_only_targets_skips_the_tests_and_uploads_the_four_tables(self):
+        import buy_windows
+        hl = market(days=30, noise=0.04, day_walk=0.02)
+        got = {}
+        with tempfile.TemporaryDirectory() as d:
+            args = buy_windows.argparse.Namespace(days=0, window=3, price="floor_gold", cut=0.05, lookback=7, only="targets", upload=True, out=d)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                res = buy_windows.run(args, read_hourly=lambda n: (hl, ["a"]), read_table=lambda n: two_groups(), upload=lambda tables, extra="": got.update(tables=tables, extra=extra))
+            with open(os.path.join(d, "buy_windows.txt"), encoding="utf-8") as f:
+                saved = f.read()
+        self.assertNotIn("HOUR-OF-DAY BUY WINDOW", saved)                           # the clock, weekday and dip tests are skipped in the daily run
+        self.assertNotIn("DIP TEST", saved)
+        self.assertIn("BUY-BELOW PRICES", saved)
+        self.assertNotIn("dips", res)
+        self.assertEqual(set(got["tables"]), {"buy_targets", "buy_calibration", "buy_when", "buy_meta"})
+        self.assertEqual(len(got["tables"]["buy_targets"]), 8)
+        self.assertIn("30 days of data", got["extra"])
+
+    def test_nothing_is_uploaded_when_there_are_no_targets_yet(self):
+        import buy_windows
+        calls = []
+        with tempfile.TemporaryDirectory() as d:
+            args = buy_windows.argparse.Namespace(days=0, window=3, price="floor_gold", cut=0.05, lookback=7, only="targets", upload=True, out=d)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                buy_windows.run(args, read_hourly=lambda n: (market(days=4, noise=0.04), ["a"]), read_table=lambda n: two_groups(), upload=lambda *a, **k: calls.append(a))
+        self.assertEqual(calls, [])                                                 # four days is too little: yesterday's good tables stay in place
+        self.assertIn("Nothing to upload", buf.getvalue())
+
+    def test_upload_tables_writes_parquet_files_and_commits_once(self):
+        import buy_windows
+        import lake
+        from unittest import mock
+        from engine import targets as Tg
+        tables = Tg.export_tables(Tg.analyze_targets(market(days=30, noise=0.04, day_walk=0.02), two_groups()))
+        seen = []
+        with mock.patch.object(pd.DataFrame, "to_parquet", lambda self_, path, **kw: open(path, "wb").close()), \
+                mock.patch.object(lake, "_upload_folder_to_engine", side_effect=lambda folder, msg: seen.append((sorted(os.listdir(folder)), msg))):
+            buy_windows.upload_tables(tables, " (30 days of data)")
+        self.assertEqual(len(seen), 1)                                              # one commit
+        self.assertEqual(seen[0][0], ["buy_calibration.parquet", "buy_meta.parquet", "buy_targets.parquet", "buy_when.parquet"])
+        self.assertIn("buy targets", seen[0][1])
 
     def test_run_with_nothing_stored_tells_you_what_to_do(self):
         import buy_windows
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            res = buy_windows.run(buy_windows.argparse.Namespace(days=0, window=3, price="floor_gold", cut=0.05, lookback=7, out="x"), read_hourly=lambda n: (pd.DataFrame(), []),
+            res = buy_windows.run(buy_windows.argparse.Namespace(days=0, window=3, price="floor_gold", cut=0.05, lookback=7, only="all", upload=False, out="x"), read_hourly=lambda n: (pd.DataFrame(), []),
                                   read_table=lambda n: pd.DataFrame())
         self.assertEqual(res, {})
         self.assertIn("backfill", buf.getvalue())

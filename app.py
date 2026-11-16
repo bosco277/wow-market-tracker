@@ -48,6 +48,7 @@ shelves_ver = str(shelves["engine_version"].iloc[0]) if len(shelves) and "engine
 shelves = lib.ensure_shelf_columns(shelves)
 backtest = load("backtest_summary")
 bt_rates = lib.backtest_rates(backtest)
+buy_targets, buy_cal, buy_when, buy_meta = load("buy_targets"), load("buy_calibration"), load("buy_when"), load("buy_meta")   # written daily by the Daily chain
 if hist.empty:
     hist = cal
 
@@ -237,7 +238,7 @@ def item_detail(pick: int, key: str):
             ev = lib.past_events_table(f)
             st.dataframe(ev, hide_index=True, **WIDE, column_config=column_config(ev))
 
-tab_market, tab_flip, tab_fc, tab_exp, tab_conf = st.tabs(["Market", "Flips", "Forecasts", "Experiment", "Confidence"])
+tab_market, tab_buy, tab_flip, tab_fc, tab_exp, tab_conf = st.tabs(["Market", "Buy targets", "Flips", "Forecasts", "Experiment", "Confidence"])
 
 # ---------------------------------------------------------------- Market
 with tab_market:
@@ -279,6 +280,87 @@ with tab_market:
         item_detail(sel, "market")
 
 # ---------------------------------------------------------------- Flips
+# ---------------------------------------------------------------- Buy targets
+with tab_buy:
+    st.write("What to pay when you are gathering inventory. For every item, the price at or under which it is a good buy compared with its own last week, "
+             "and how often that price has actually shown up. Scan the auction house in game and buy what is at or under the number. "
+             "This does not look at what you will do with the items.")
+    if buy_targets.empty:
+        st.info("No buy targets yet. The daily chain writes them once the hourly history holds at least a week of prices. Check the Actions tab on GitHub "
+                "(Daily chain) if this stays empty for more than a day.")
+    else:
+        caption, stale = lib.buy_meta_caption(buy_meta)
+        if caption:
+            (st.warning if stale else st.caption)(caption)
+        bt = lib.buy_names(buy_targets, items)
+        c1, c2, c3 = st.columns([2, 2, 2])
+        tier_key = c1.radio("How low", list(lib.BUY_TIERS), index=1, format_func=lambda k: lib.BUY_TIERS[k], key="buy_tier",
+                            help="Good prices come up often; steals are rare but the cheapest. The chance columns say how often.")
+        tiers_present = sorted(bt["price_tier"].dropna().unique().tolist()) if "price_tier" in bt.columns else []
+        price_tiers = c2.multiselect("Price level", tiers_present, default=tiers_present, key="buy_price_tiers",
+                                     help="Items are judged against items of a similar price, so each level has its own calibration.")
+        group_opts = sorted(g for g in bt["group"].dropna().unique().tolist() if g) if "group" in bt.columns else []
+        groups_sel = c3.multiselect("Item group", group_opts, key="buy_groups", help="Leave empty for all groups.")
+        d1, d2, d3, d4 = st.columns(4)
+        query = d1.text_input("Name or ID contains", key="buy_query")
+        min_prob = d2.slider("At least this chance within 3 days (%)", 0, 100, 50, 5, key="buy_min_prob") / 100.0
+        min_depth = d3.slider("At least this far under the median (%)", 0, 30, 3, 1, key="buy_min_depth") / 100.0
+        min_units = d4.number_input("At least this many units near the floor", min_value=0, value=0, step=10, key="buy_min_units")
+        view = lib.buy_view(bt, tier=tier_key, price_tiers=price_tiers, groups=groups_sel, query=query, min_depth=min_depth, min_prob=min_prob, prob_days=3,
+                            min_units=float(min_units))
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Items on this list", f"{len(view):,}")
+        a2.metric("Gold you would save", lib.short_num(float(view["Worth (g)"].sum())) + "g" if len(view) else "0g",
+                  help="Units usually sitting near the floor at that price, times how far the target is under the 7-day median, summed over the list. "
+                       "It is what you save against paying the median, not a profit.")
+        rhythm = lib.buy_when_verdict(lib.buy_when_row(buy_when, "everything", tier_key))[1] == "rhythm"
+        a3.metric("Best hours (US Eastern)", "see below" if rhythm else "no reliable hour", help="Whether some hours of the day reliably have more low prices. Details at the bottom of this tab.")
+        if view.empty:
+            st.info("No item passes these filters. Loosen the chance or depth sliders.")
+        else:
+            sel = pick_row(view, "buy_table", height=520)
+            with st.expander("Copy the list for your in-game notes (best first)"):
+                st.code(lib.buy_copy_text(view, 40), language=None)
+                st.download_button("Download the whole filtered list (CSV)", view.drop(columns=["_id"]).to_csv(index=False, float_format="%.4f"),
+                                   file_name="buy_targets.csv", mime="text/csv", key="buy_csv")
+            if sel is not None:
+                if sel in set(items["item_id"].astype(int)):
+                    item_detail(sel, "buy")
+                else:
+                    st.caption("This item has no market-table row yet, so there are no item charts for it.")
+        with st.expander("How reliable are these prices?"):
+            st.write("We replayed history: for each item and day, set the target from the previous 7 days only, then watched whether the price reached it on that day "
+                     "and on the next days. Rows are how far under the median the target was. These are days the tool had not seen when it set the price.")
+            pools = sorted(buy_cal["pool"].unique().tolist()) if not buy_cal.empty else []
+            if pools:
+                pool = st.selectbox("Judged over", pools, index=pools.index("everything") if "everything" in pools else 0, key="buy_pool")
+                cv = lib.buy_calibration_view(buy_cal, pool, tier_key)
+                st.dataframe(cv, hide_index=True, **WIDE, column_config=column_config(cv))
+                st.caption("The deeper the target, the less often it is reached and the fewer units are there when it is. 'Saving vs average price' is how much under the "
+                           "average hourly price the first reach was. A wait is how many hours into the day it first showed up.")
+            else:
+                st.caption("Not enough graded days yet.")
+        with st.expander("When is it cheapest? (hour of day, US Eastern)"):
+            wp = sorted(buy_when["pool"].unique().tolist()) if not buy_when.empty else []
+            if not wp:
+                st.caption("Not enough days yet to look at hours (it needs about 8 days of data).")
+            else:
+                wpool = st.selectbox("Judged over", wp, index=wp.index("everything") if "everything" in wp else 0, key="buy_when_pool")
+                row = lib.buy_when_row(buy_when, wpool, tier_key)
+                words, level = lib.buy_when_verdict(row, int(buy_meta["window_hours"].iloc[0]) if not buy_meta.empty else 3)
+                (st.success if level == "rhythm" else st.info)(words)
+                lifts = lib.buy_when_lifts(row)
+                if lifts:
+                    f = go.Figure(go.Bar(x=lib.HOURS, y=lifts, marker_color=["#2E7D4F" if (v == v and v >= 1.15) else "#9AA5AB" for v in lifts]))
+                    f.add_hline(y=1.0, line_dash="dot")
+                    f.update_layout(title="Chance of reaching the target, by hour, as a multiple of the average (1.0 = same as any hour)", height=300,
+                                    margin=dict(l=10, r=10, t=50, b=10), xaxis=dict(type="category"))
+                    st.plotly_chart(f, **WIDE, key="buy_when_chart")
+                st.caption("The verdict above is based on days the hour pattern was not learned from. A green bar alone means little: with only a few weeks of days, "
+                           "some hours always look better by chance.")
+        st.caption("These are price levels, not instructions. They are set from the item's own recent past, so after a real shift (a patch, a new season) they lag for about a week. "
+                   "Prices shown on the Market tab can be older than these.")
+
 with tab_flip:
     st.write("Cheap units sitting below a gap in the price tiers: buy them, relist at the tier above the gap. These are candidates to "
              "check against the live auction house, not instructions. Limits per flip come from the engine run (units and gold). "

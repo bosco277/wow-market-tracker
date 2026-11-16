@@ -398,3 +398,191 @@ class TestPastEvents(unittest.TestCase):
         self.assertEqual(list(t["Looks like a flipper"]), ["no", "no", "yes"])
         self.assertTrue(lib.past_events_table(pd.DataFrame()).empty)
         self.assertNotIn("Back to old price?", lib.past_events_table(f.drop(columns=["ended_by"])).columns)
+
+
+def buy_targets_table():
+    """Three items with all three target tiers. Item 1: deep and likely; item 2: shallow; item 3: deep but never graded (no chances)."""
+    def tier(depth, g, units, p1, p3, p7):
+        return {"_g": g, "_depth": depth, "_units": units, "_p1d": p1, "_p3d": p3, "_p7d": p7}
+    rows = []
+    for iid, name, grp, ptier, med, specs in (
+            (1, "Iceweb Spider Silk", "cloth", "under 1g", 1.0, {"good": (0.05, 0.95, 400, 0.9, 0.95, 0.99), "great": (0.10, 0.90, 300, 0.7, 0.85, 0.95), "steal": (0.20, 0.80, 100, 0.3, 0.5, 0.7)}),
+            (2, "Saronite Ore", "ore", "100g+", 100.0, {"good": (0.02, 98.0, 50, 0.9, 0.95, 0.99), "great": (0.04, 96.0, 30, 0.5, 0.7, 0.9), "steal": (0.08, 92.0, 5, 0.1, 0.2, 0.4)}),
+            (3, "", "ore", "1-100g", 10.0, {"good": (0.06, 9.4, 80, np.nan, np.nan, np.nan), "great": (0.12, 8.8, 60, np.nan, np.nan, np.nan), "steal": (0.25, 7.5, 10, np.nan, np.nan, np.nan)})):
+        r = {"item_id": iid, "name": name, "group": grp, "price_tier": ptier, "med7_g": med, "last_g": med}
+        for t, (depth, g, units, p1, p3, p7) in specs.items():
+            r.update({f"{t}_g": g, f"{t}_depth": depth, f"{t}_units": float(units), f"{t}_p1d": p1, f"{t}_p3d": p3, f"{t}_p7d": p7})
+        rows.append(r)
+    return pd.DataFrame(rows)
+
+
+class TestBuyTargets(unittest.TestCase):
+    def test_worth_is_units_times_the_gap_and_the_list_is_best_first(self):
+        v = lib.buy_view(buy_targets_table(), "great")
+        self.assertEqual(list(v["_id"]), [2, 3, 1])                                       # worth 120g, 72g, 30g
+        by = v.set_index("_id")
+        self.assertAlmostEqual(by.loc[1, "Worth (g)"], 300 * (1.0 - 0.90))                # 300 units x 0.10g under the median
+        self.assertAlmostEqual(by.loc[2, "Worth (g)"], 30 * (100.0 - 96.0))
+        self.assertAlmostEqual(by.loc[1, "Depth under median (%)"], 10.0)                 # percent in the view, a fraction in the table
+        self.assertAlmostEqual(by.loc[1, "Chance in 3 days (%)"], 85.0)
+        self.assertEqual(by.loc[3, "Item"], "item 3")                                     # a blank name falls back to the id
+        self.assertTrue(v["Worth (g)"].is_monotonic_decreasing)
+
+    def test_each_tier_reads_its_own_columns(self):
+        t = buy_targets_table()
+        for tier, g1 in (("good", 0.95), ("great", 0.90), ("steal", 0.80)):
+            v = lib.buy_view(t, tier).set_index("_id")
+            self.assertAlmostEqual(v.loc[1, "Buy below (g)"], g1)
+
+    def test_filters(self):
+        t = buy_targets_table()
+        ids = lambda **k: set(lib.buy_view(t, "great", **k)["_id"])
+        self.assertEqual(ids(), {1, 2, 3})
+        self.assertEqual(ids(min_depth=0.05), {1, 3})                                     # depth is a fraction of the median
+        self.assertEqual(ids(min_prob=0.8, prob_days=3), {1})                             # item 3 has no chance: it passes 0 and fails anything higher
+        self.assertEqual(ids(min_prob=0.6, prob_days=3), {1, 2})
+        self.assertEqual(ids(min_prob=0.0), {1, 2, 3})
+        self.assertEqual(ids(min_units=50), {1, 3})
+        self.assertEqual(ids(price_tiers=["100g+"]), {2})
+        self.assertEqual(ids(groups=["ore"]), {2, 3})
+        self.assertEqual(ids(query="saron"), {2})
+        self.assertEqual(ids(query="3"), {3})                                             # an id works as well as a name
+        self.assertEqual(ids(groups=["ore"], min_prob=0.6), {2})
+
+    def test_empty_and_old_tables_give_an_empty_view_with_the_columns(self):
+        for t in (None, pd.DataFrame(), buy_targets_table().drop(columns=["steal_p3d"])):
+            v = lib.buy_view(t, "steal")
+            self.assertTrue(v.empty)
+            self.assertIn("Worth (g)", v.columns)
+        self.assertTrue(lib.buy_view(buy_targets_table(), "great", query="zzz").empty)
+
+    def test_missing_name_and_group_columns_are_fine(self):
+        v = lib.buy_view(buy_targets_table().drop(columns=["name", "group"]), "good")
+        self.assertEqual(len(v), 3)
+        self.assertEqual(set(v["Item"]), {"item 1", "item 2", "item 3"})
+
+    def test_names_prefer_the_market_table_then_the_stored_one(self):
+        t = buy_targets_table().assign(name=["stored 1", "stored 2", "stored 3"])
+        got = lib.buy_names(t, items())                                                   # items(): 1 Iceweb, 2 Saronite, 3 blank
+        self.assertEqual(list(got["name"]), ["Iceweb Spider Silk", "Saronite Ore", "stored 3"])
+        self.assertEqual(list(lib.buy_names(t, pd.DataFrame())["name"]), ["stored 1", "stored 2", "stored 3"])
+        self.assertEqual(list(lib.buy_names(t.drop(columns=["name"]), pd.DataFrame())["name"]), ["", "", ""])
+        self.assertTrue(lib.buy_names(pd.DataFrame(), items()).empty)
+
+    def test_copy_text_one_line_per_item_in_gold_silver_copper(self):
+        v = lib.buy_view(buy_targets_table(), "great")
+        text = lib.buy_copy_text(v, 2)
+        lines = text.split("\n")
+        self.assertEqual(lines, ["Saronite Ore: buy below 96g 0s 0c", "item 3: buy below 8g 80s 0c"])   # best first, two lines
+        self.assertIn("Iceweb Spider Silk: buy below 90s 0c", lib.buy_copy_text(v, 3))                    # 0.90 g
+        self.assertEqual(lib.buy_copy_text(pd.DataFrame()), "")
+        self.assertEqual(len(lib.buy_copy_text(v, 0).split("\n")), 1)                    # never an empty list when there is something
+
+
+class TestBuyMatchesTheEngine(unittest.TestCase):
+    def test_depth_bands_and_tier_names_are_the_engines(self):
+        from engine import targets as Tg
+        self.assertEqual(lib.BUY_DEPTH_ORDER, Tg.DEPTH_NAMES)
+        self.assertEqual(set(lib.BUY_TIERS), {"good", "great", "steal"})
+
+    def test_the_real_export_feeds_every_helper(self):
+        sys.path.insert(0, os.path.join(_root, "tools"))
+        from engine import targets as Tg
+        from tests.test_targets import market, named_groups
+        t = Tg.export_tables(Tg.analyze_targets(market(days=40, noise=0.04, day_walk=0.02, hour_effect={3: -0.08, 4: -0.08, 5: -0.08}), named_groups()))
+        for tier in lib.BUY_TIERS:
+            v = lib.buy_view(lib.buy_names(t["buy_targets"], pd.DataFrame()), tier)
+            self.assertEqual(len(v), len(t["buy_targets"]))
+            self.assertTrue((v["Buy below (g)"] < v["7-day median (g)"]).all())
+            self.assertFalse(lib.buy_calibration_view(t["buy_calibration"], "everything", tier).empty)
+            words, level = lib.buy_when_verdict(lib.buy_when_row(t["buy_when"], "everything", tier), int(t["buy_meta"]["window_hours"].iloc[0]))
+            self.assertIn(level, ("rhythm", "hint", "none"))
+            self.assertEqual(len(lib.buy_when_lifts(lib.buy_when_row(t["buy_when"], "everything", tier))), 24)
+        self.assertTrue(lib.buy_meta_caption(t["buy_meta"])[0])
+
+
+class TestBuyCalibrationView(unittest.TestCase):
+    def cal(self):
+        rows = []
+        for pool in ("everything", "cloth"):
+            for depth, base in (("under 3%", 0.95), ("3-10%", 0.7), ("20%+", 0.1)):
+                for H in (1, 3, 7):
+                    rows.append({"pool": pool, "tier": "great", "depth": depth, "H": H, "n": 100 + H, "reached": min(base + 0.02 * H, 1.0), "wait_med": 5.0 + H, "units_med": 40.0,
+                                 "saving_med": 0.05, "depth_med": 0.05})
+        return pd.DataFrame(rows)
+
+    def test_rows_follow_depth_order_with_percent_numbers(self):
+        v = lib.buy_calibration_view(self.cal(), "everything", "great")
+        self.assertEqual(list(v["Depth under median"]), ["under 3%", "3-10%", "20%+"])    # the shallow-to-deep order, bands with no data skipped
+        self.assertAlmostEqual(v["Reached in 1 day (%)"].iloc[0], 97.0)
+        self.assertAlmostEqual(v["Reached in 7 days (%)"].iloc[1], 84.0)
+        self.assertEqual(v["Item-days graded"].iloc[0], 107)
+        self.assertAlmostEqual(v["Saving vs average price, 3 days (%)"].iloc[0], 5.0)
+        self.assertEqual(v["Typical wait, 1-day window (hours)"].iloc[0], 6.0)
+
+    def test_pool_and_tier_pick_their_own_rows_and_nothing_gives_empty(self):
+        self.assertEqual(len(lib.buy_calibration_view(self.cal(), "cloth", "great")), 3)
+        self.assertTrue(lib.buy_calibration_view(self.cal(), "cloth", "steal").empty)
+        self.assertTrue(lib.buy_calibration_view(pd.DataFrame()).empty)
+        self.assertTrue(lib.buy_calibration_view(None).empty)
+
+
+class TestBuyWhen(unittest.TestCase):
+    def row(self, later, rep, start=2, nan=False):
+        r = {"pool": "everything", "tier": "great", "days": 20, "window_start": start, "lift_later": later, "lift_all": 1.5, "replication": rep}
+        r.update({f"lift_{h:02d}": (np.nan if nan else 1.0 + 0.1 * (h == start)) for h in range(24)})
+        return pd.DataFrame([r])
+
+    def test_lifts_are_24_numbers_in_order(self):
+        r = lib.buy_when_row(self.row(1.5, 0.8), "everything", "great")
+        lifts = lib.buy_when_lifts(r)
+        self.assertEqual(len(lifts), 24)
+        self.assertAlmostEqual(lifts[2], 1.1)
+        self.assertEqual(lib.buy_when_lifts(None), [])
+        self.assertIsNone(lib.buy_when_row(self.row(1.5, 0.8), "cloth", "great"))
+        self.assertIsNone(lib.buy_when_row(pd.DataFrame()))
+
+    def test_verdict_words_follow_the_later_days_not_the_learned_ones(self):
+        r = lambda later, rep: lib.buy_when_row(self.row(later, rep), "everything", "great")
+        words, level = lib.buy_when_verdict(r(1.5, 0.8))
+        self.assertEqual(level, "rhythm")
+        self.assertIn("2am to 5am Eastern", words)                                        # start 2, three-hour window
+        self.assertIn("1.5 times", words)
+        self.assertEqual(lib.buy_when_verdict(r(1.2, 0.4))[1], "hint")
+        self.assertEqual(lib.buy_when_verdict(r(1.5, 0.1))[1], "none")                    # a big lift that does not repeat is not a rhythm
+        self.assertEqual(lib.buy_when_verdict(r(1.0, 0.9))[1], "none")
+        words, level = lib.buy_when_verdict(r(np.nan, np.nan))
+        self.assertEqual(level, "none")
+        self.assertIn("Not enough days", words)
+        self.assertEqual(lib.buy_when_verdict(None)[1], "none")
+
+    def test_window_wraps_past_midnight(self):
+        r = lib.buy_when_row(self.row(1.5, 0.8, start=22), "everything", "great")
+        self.assertIn("10pm to 1am Eastern", lib.buy_when_verdict(r, 3)[0])
+
+
+class TestBuyMeta(unittest.TestCase):
+    def meta(self):
+        return pd.DataFrame([{"built_at": pd.Timestamp("2026-11-17 06:30"), "first_day": "2026-09-20", "last_day": "2026-11-16", "last_hour": pd.Timestamp("2026-11-17 05:00"),
+                              "days": 58, "items": 2900, "listed": 2400, "lookback_days": 7, "window_hours": 3}])
+
+    def test_fresh_and_stale(self):
+        text, stale = lib.buy_meta_caption(self.meta(), now=pd.Timestamp("2026-11-17 18:30"))
+        self.assertFalse(stale)
+        self.assertIn("2,400 items listed", text)
+        self.assertIn("58 days of history", text)
+        self.assertIn("12 h ago", text)
+        self.assertIn("through Tue Nov 17 05:00 UTC", text)
+        text, stale = lib.buy_meta_caption(self.meta(), now=pd.Timestamp("2026-11-19 06:30"))
+        self.assertTrue(stale)
+        self.assertIn("missed a run", text)                                               # older than a day and a half
+        self.assertEqual(lib.buy_meta_caption(pd.DataFrame()), ("", False))
+        self.assertEqual(lib.buy_meta_caption(None), ("", False))
+
+    def test_missing_last_hour_still_gives_a_caption(self):
+        m = self.meta()
+        m["last_hour"] = pd.NaT
+        text, stale = lib.buy_meta_caption(m, now=pd.Timestamp("2026-11-17 08:30"))
+        self.assertIn("2,400 items listed", text)
+        self.assertFalse(stale)
+

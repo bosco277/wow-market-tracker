@@ -53,6 +53,25 @@ class TestDailyChainWorkflow(unittest.TestCase):
         self.assertIn("--store hf", runs[i_daily])
         self.assertIn("--store hf", runs[i_ledger])
 
+    def test_buy_targets_run_last_and_upload_with_a_capped_history(self):
+        _, doc = _load()
+        runs = [s.get("run", "") for s in _steps(doc)]
+        i_ledger = next(i for i, r in enumerate(runs) if "lake.py forecast_ledger" in r)
+        i_buy = next(i for i, r in enumerate(runs) if "buy_windows.py" in r)
+        self.assertLess(i_ledger, i_buy)
+        self.assertIn("--only targets", runs[i_buy])
+        self.assertIn("--upload", runs[i_buy])
+        self.assertIn("--days 60", runs[i_buy])                                     # the history is capped so the run stays inside a runner's memory
+        self.assertIn("set -o pipefail", runs[i_buy])
+        buy = _steps(doc)[i_buy]
+        self.assertNotIn("if", buy)
+        self.assertEqual(buy["env"]["HF_TOKEN"], "${{ secrets.HF_TOKEN }}")
+
+    def test_the_cache_is_still_saved_when_a_step_fails(self):
+        _, doc = _load()
+        save = next(s for s in _steps(doc) if "cache/save" in s.get("uses", ""))
+        self.assertEqual(save["if"], "${{ always() }}")
+
     def test_stops_if_daily_fails(self):
         # `set -o pipefail` makes a failing python (not tee) fail the step, and a failed step skips the next one unless it says always()
         _, doc = _load()

@@ -2,7 +2,7 @@ name: Buy windows
 
 # Manual. Tests whether a time of day or a day of the week is reliably cheaper for buying commodities, on days the test has not learned from (walk-forward).
 # Reads the permanent hourly history (engine/hourly/ in the private dataset, written by the Daily chain). Only reads: nothing is uploaded to the dataset.
-# The report is in the run's summary and in the downloadable file buy_windows.txt.
+# The report is in the run's summary and in the downloadable files buy_windows.txt (the report) and buy_targets.csv (the shopping list: buy-below prices per item).
 
 on:
   workflow_dispatch:
@@ -56,5 +56,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: buy-windows
-          path: out/buy_windows.txt
+          path: |
+            out/buy_windows.txt
+            out/buy_targets.csv
           if-no-files-found: ignore

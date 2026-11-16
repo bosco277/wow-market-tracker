@@ -51,7 +51,7 @@ class Col(Any):
         return getattr(self._st, k)
 
 
-def fake_streamlit(selected_row=0, found=None, version="1.51.0"):
+def fake_streamlit(selected_row=0, found=None, version="1.51.0", only_for=None):  # only_for: a column name; only tables that have it get the clicked row
     st = types.ModuleType("streamlit")
     st.__version__ = version
     st.set_page_config = lambda **k: None
@@ -61,21 +61,26 @@ def fake_streamlit(selected_row=0, found=None, version="1.51.0"):
     st.query_params = {"watch": "2"}
     st.columns = lambda spec, **k: [Col(st) for _ in range(spec if isinstance(spec, int) else len(spec))]
     st.tabs = lambda names: [Col(st) for _ in names]
-    st.selectbox = lambda label, options, **k: found
+    st.selectbox = lambda label, options, index=0, key=None, **k: found if key == "find_item" else (options[index] if index is not None and len(options) else None)
+    st.radio = lambda label, options, index=0, **k: options[index]
+    st.slider = lambda label, lo, hi, value=None, *a, **k: value
+    st.text_input = lambda *a, **k: ""
     st.multiselect = lambda label, options, default=None, key=None, **k: st.session_state.get(key, default or [])
     st.checkbox = lambda *a, **k: False
     st.number_input = lambda *a, **k: 0.0
     ev = types.SimpleNamespace(selection=types.SimpleNamespace(rows=[selected_row] if selected_row is not None else []))
     seen = []
 
+    nothing = types.SimpleNamespace(selection=types.SimpleNamespace(rows=[]))
+
     def dataframe(df, **k):
         seen.append((df, k))
-        return ev
+        return ev if only_for is None or only_for in df.columns else nothing
     st.dataframe = dataframe
     st.seen = seen
     st.column_config = Any("column_config")
-    for name in ("title", "caption", "error", "warning", "info", "write", "markdown", "subheader", "metric", "table", "plotly_chart",
-                 "divider", "expander", "stop"):
+    for name in ("title", "caption", "error", "warning", "info", "success", "write", "markdown", "subheader", "metric", "table", "plotly_chart",
+                 "divider", "expander", "stop", "code", "download_button"):
         setattr(st, name, Any(name))
     return st
 
@@ -110,7 +115,22 @@ def tables():
                 experiment=pd.DataFrame(), flips=flips, shelves=shelves, backtest_summary=pd.DataFrame())
 
 
-def run_app(data, **kw):  # kw: selected_row, found, version
+def buy_tables(days=40):
+    """The four tables the Daily chain writes for the Buy targets tab, from the engine itself on a made-up market; item ids 1.. so some match the items table."""
+    sys.path.insert(0, _root)
+    from engine import targets as Tg
+    from tests.test_targets import market, named_groups
+    hl = market(days=days, noise=0.04, day_walk=0.02, hour_effect={3: -0.08, 4: -0.08, 5: -0.08})
+    g = named_groups()
+    m = {int(i): n + 1 for n, i in enumerate(sorted(g["item_id"]))}
+    hl["item_id"] = hl["item_id"].map(m)
+    g["item_id"] = g["item_id"].map(m)
+    t = Tg.export_tables(Tg.analyze_targets(hl, g))
+    t["buy_targets"] = t["buy_targets"].drop(columns=["name"], errors="ignore")
+    return t
+
+
+def run_app(data, **kw):  # kw: selected_row, found, version, only_for
     st = fake_streamlit(**kw)
     px = types.ModuleType("plotly")
     go = types.ModuleType("plotly.graph_objects")
@@ -171,6 +191,60 @@ class TestAppSmoke(unittest.TestCase):
         d["item_hourly"] = pd.DataFrame()
         d["shelves"] = pd.DataFrame()
         run_app(d, selected_row=1)
+
+
+class TestBuyTargetsTab(unittest.TestCase):
+    def data(self, **kw):
+        d = tables()
+        d.update(buy_tables(**kw))
+        return d
+
+    def test_tab_runs_and_the_table_holds_numbers(self):
+        st = run_app(self.data(), selected_row=0)
+        shown = next(d for d, k in st.seen if "Buy below (g)" in d)
+        for c in ("Buy below (g)", "7-day median (g)", "Chance in 3 days (%)", "Worth (g)", "Depth under median (%)"):
+            self.assertTrue(pd.api.types.is_numeric_dtype(shown[c]), c)
+        self.assertNotIn("_id", shown.columns)
+        self.assertTrue((shown["Worth (g)"].diff().dropna() <= 1e-9).all())             # best first
+        self.assertTrue((shown["Buy below (g)"] < shown["7-day median (g)"]).all())     # a target is always under the median
+        self.assertTrue(any("Reached in 3 days (%)" in d for d, k in st.seen))          # the calibration table
+
+    def test_clicking_a_row_opens_the_item_charts_only_when_the_item_has_a_market_row(self):
+        first = run_app(self.data(), selected_row=None)
+        shown = next(d for d, k in first.seen if "Buy below (g)" in d)
+        in_market = [i for i, n in enumerate(shown["Item"]) if n in ("Iceweb Spider Silk", "Saronite Ore")]
+        not_in_market = [i for i, n in enumerate(shown["Item"]) if n not in ("Iceweb Spider Silk", "Saronite Ore", "Item 3")]
+        self.assertTrue(in_market and not_in_market, list(shown["Item"]))
+        def charts(row):
+            Any.calls.clear()
+            run_app(self.data(), selected_row=row, only_for="Buy below (g)")
+            return [k.get("key") for n, a, k in Any.calls if n == "plotly_chart"]
+        self.assertIn("buy_price", charts(in_market[0]))                                # the item's price chart, keyed to this tab
+        self.assertNotIn("buy_price", charts(not_in_market[0]))                         # no market row: a note, not a crash
+        self.assertNotIn("buy_price", charts(None))
+
+    def test_the_other_tabs_still_show_up(self):
+        st = run_app(self.data(), selected_row=0)
+        self.assertTrue(any("Sold/day best" in d for d, k in st.seen))                  # Market
+        self.assertTrue(any("Profit at target (g)" in d for d, k in st.seen))           # Flips
+
+    def test_survives_no_buy_tables_old_buy_tables_and_a_short_history(self):
+        run_app(tables(), selected_row=0)                                                # nothing written yet
+        d = self.data()
+        d["buy_targets"] = d["buy_targets"].drop(columns=[c for c in d["buy_targets"].columns if c.startswith("steal")])
+        run_app(d, selected_row=0)                                                       # a table from an older engine
+        d = self.data(days=12)
+        run_app(d, selected_row=0)
+        d = self.data()
+        d["buy_calibration"] = pd.DataFrame()
+        d["buy_when"] = pd.DataFrame()
+        d["buy_meta"] = pd.DataFrame()
+        run_app(d, selected_row=0)
+
+    def test_old_streamlit_still_works_with_the_tab(self):
+        out = run_app(self.data(), selected_row=0, version="1.40.0")
+        for df, k in out.seen:
+            self.assertTrue(k.get("use_container_width"))
 
 
 def ledger_for_smoke(graded=True):
