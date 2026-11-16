@@ -16,9 +16,9 @@ from engine import windows as W  # noqa: E402
 from tests.helpers import T0, mk  # noqa: E402
 
 
-def market(days=40, items=8, start="2026-06-01", seed=1, hour_effect=None, dow_effect=None, noise=0.03, day_walk=0.0, drift=0.0, base=10.0):
+def market(days=40, items=8, start="2026-06-01", seed=1, hour_effect=None, dow_effect=None, noise=0.03, day_walk=0.0, drift=0.0, base=10.0, step=None, slide=0.0):
     """A synthetic hourly table (HOURLY_COLUMNS) whose answer is known. hour_effect: {ET hour: log effect} or a function of the day number returning that dict;
-    dow_effect: {weekday: log effect}; drift: log growth per day. June to September: no clock change."""
+    dow_effect: {weekday: log effect}; drift: log growth per day; step: (day number, log change) a permanent level shift from that day; slide: log change per day applied continuously, hour by hour (drift moves in one jump a day). June to September: no clock change."""
     rng = np.random.default_rng(seed)
     et = pd.date_range(start, periods=days * 24, freq="h", tz="America/New_York")
     day_no = np.repeat(np.arange(days), 24)
@@ -29,8 +29,8 @@ def market(days=40, items=8, start="2026-06-01", seed=1, hour_effect=None, dow_e
         eff = np.zeros(len(et))
         for i in range(len(et)):
             he = hour_effect(day_no[i]) if callable(hour_effect) else (hour_effect or {})
-            eff[i] = he.get(hrs[i], 0.0) + (dow_effect or {}).get(dows[i], 0.0)
-        price = base * (1 + it) * np.exp(walk + eff + drift * day_no + rng.normal(0, noise, len(et)))
+            eff[i] = he.get(hrs[i], 0.0) + (dow_effect or {}).get(dows[i], 0.0) + (step[1] if step and day_no[i] >= step[0] else 0.0)
+        price = base * (1 + it) * np.exp(walk + eff + drift * day_no + slide * np.arange(len(et)) / 24.0 + rng.normal(0, noise, len(et)))
         rows.append(pd.DataFrame({"item_id": 1000 + it, "ts": et.tz_convert("UTC").tz_localize(None), "floor_gold": price, "units_listed": 100, "u5": 50, "u10": 80,
                                   "p15": price * 1.02, "p30": price * 1.04, "spike": False, "blip": False, "flag_wipe": False, "flag_long_gap": False}))
     return pd.concat(rows, ignore_index=True)[D.HOURLY_COLUMNS]
@@ -158,6 +158,23 @@ class TestHourOfDay(unittest.TestCase):
         self.assertGreater(r["saving"], 0.06)
 
 
+class TestDriftProof(unittest.TestCase):
+    def test_a_steady_fall_across_days_does_not_fake_a_cheap_evening(self):
+        hl = market(days=40, slide=-0.04, noise=0.02)                             # no time-of-day pattern at all, just prices sliding 4% a day
+        fooled = W.analyze(hl, None, W.WindowConfig(reference="day")), None
+        day_ref = fooled[0]["hours_summary"].set_index("pool").loc["everything"]
+        roll = W.analyze(hl, None, W.WindowConfig()) ["hours_summary"].set_index("pool").loc["everything"]
+        self.assertGreater(day_ref["saving"], 0.015)                              # the first version reads the slide as a cheap evening
+        self.assertLess(abs(roll["saving"]), 0.006)                               # the default reference sees through it
+        self.assertNotEqual(roll["verdict"], "holds on later days")
+
+    def test_a_real_cheap_window_still_shows_with_the_rolling_reference(self):
+        res = W.analyze(market(days=40, hour_effect={3: -0.08, 4: -0.08, 5: -0.08}, slide=-0.03), None, W.WindowConfig())
+        r = res["hours_summary"].set_index("pool").loc["everything"]
+        self.assertEqual(r["window_start"], 3)
+        self.assertGreater(r["saving"], 0.05)
+
+
 class TestDayOfWeek(unittest.TestCase):
     def test_a_cheap_tuesday_is_seen_and_holds_on_later_weeks(self):
         hl = market(days=100, items=6, dow_effect={1: -0.06}, noise=0.02, day_walk=0.01)
@@ -166,8 +183,9 @@ class TestDayOfWeek(unittest.TestCase):
         self.assertEqual(wp["pct"].idxmin(), "Tue")
         self.assertLess(wp.loc["Tue", "pct"], -3.0)
         ws = res["weekday_summary"].set_index("pool").loc["everything"]
-        self.assertGreaterEqual(ws["learned_days"], 6)
-        self.assertGreater(ws["saving"], 0.03)
+        self.assertGreaterEqual(ws["chosen_days"], 6)
+        self.assertIn("Tue", ws["weekdays"])
+        self.assertGreater(ws["saving"], 0.015)                                   # Tuesday plus one noise day, averaged: about half of the 5% Tuesday saving
         self.assertEqual(ws["verdict"], "holds on later days")
 
     def test_no_weekday_effect_is_not_reported_as_one(self):
@@ -179,7 +197,7 @@ class TestDayOfWeek(unittest.TestCase):
     def test_a_few_weeks_are_not_enough_and_the_report_says_how_long_it_needs(self):
         res = W.analyze(market(days=30, items=6, dow_effect={1: -0.06}), None, W.WindowConfig())
         self.assertTrue(res["weekday_summary"].empty)
-        self.assertIn("about 7 weeks", W.format_report(res))
+        self.assertIn("about 8 weeks", W.format_report(res))
 
 
 class TestResaleCheck(unittest.TestCase):
@@ -189,6 +207,8 @@ class TestResaleCheck(unittest.TestCase):
         r = flat[(flat["pool"] == "everything") & (flat["k"] == 1)].iloc[0]
         self.assertAlmostEqual(r["margin_window"], -0.05, places=3)                # sell at the same price minus the 5% cut
         self.assertEqual(r["share_window"], 0.0)
+        self.assertAlmostEqual(r["median_window"], -0.05, places=3)
+        self.assertGreater(r["loss_window"], 0.9)                                  # every flat-market resale loses the cut
         rising = W.analyze(market(days=40, noise=0.0, drift=np.log(1.12)), None, cfg)["resale"]
         r1 = rising[(rising["pool"] == "everything") & (rising["k"] == 1)].iloc[0]
         r2 = rising[(rising["pool"] == "everything") & (rising["k"] == 2)].iloc[0]
@@ -237,7 +257,7 @@ class TestTool(unittest.TestCase):
         import buy_windows
         hl = market(days=40, hour_effect={3: -0.08, 4: -0.08, 5: -0.08})
         with tempfile.TemporaryDirectory() as d:
-            args = buy_windows.argparse.Namespace(days=0, window=3, price="p15", cut=0.05, out=d)
+            args = buy_windows.argparse.Namespace(days=0, window=3, price="p15", cut=0.05, lookback=7, out=d)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 res = buy_windows.run(args, read_hourly=lambda n: (hl, ["2026-06-01", "2026-07-10"]), read_table=lambda n: two_groups())
@@ -246,12 +266,13 @@ class TestTool(unittest.TestCase):
         self.assertEqual(res["cfg"].price_col, "p15")
         self.assertIn("depth price", saved)
         self.assertIn("Loaded 2 stored days", buf.getvalue())
+        self.assertIn("DIP TEST", saved)                                           # one report holds the clock test and the dip test
 
     def test_run_with_nothing_stored_tells_you_what_to_do(self):
         import buy_windows
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            res = buy_windows.run(buy_windows.argparse.Namespace(days=0, window=3, price="floor_gold", cut=0.05, out="x"), read_hourly=lambda n: (pd.DataFrame(), []),
+            res = buy_windows.run(buy_windows.argparse.Namespace(days=0, window=3, price="floor_gold", cut=0.05, lookback=7, out="x"), read_hourly=lambda n: (pd.DataFrame(), []),
                                   read_table=lambda n: pd.DataFrame())
         self.assertEqual(res, {})
         self.assertIn("backfill", buf.getvalue())

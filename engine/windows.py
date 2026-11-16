@@ -30,6 +30,9 @@ WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 class WindowConfig:
     tz: str = TZ
     price_col: str = "floor_gold"       # "floor_gold" or "p15" (depth price, falls back to the floor where there is no depth price)
+    reference: str = "rolling"          # what an hour is compared with: "rolling" = the item's median over the 25 hours around it (a steady rise or fall across days cannot fake a cheap hour),
+                                        # "day" = the item's median over that US Eastern day (the first version; a steady fall makes evenings look cheap)
+    weekday_pick: int = 2               # the weekday test picks the cheapest this-many weekdays of 7 from earlier days
     window_hours: int = 3               # length of the buying window, in hours
     min_hours_day: int = 18             # an item-day needs this many usable hours
     min_items: int = 3                  # a group needs this many items in an hour for that hour to count
@@ -58,11 +61,13 @@ def tier_label(gold: float, tiers=(1.0, 100.0)) -> str:
 def prepare(hl: pd.DataFrame, cfg: Optional[WindowConfig] = None) -> pd.DataFrame:
     """Hourly rows with: item_id, day (US Eastern date, midnight, no zone), hour (0-23 ET), dow (0 = Monday), price (the chosen price column), usable."""
     cfg = cfg or WindowConfig()
+    cols = ["item_id", "t", "day", "hour", "dow", "price", "usable", "u5"]
     if hl is None or hl.empty:
-        return pd.DataFrame(columns=["item_id", "day", "hour", "dow", "price", "usable"])
+        return pd.DataFrame(columns=cols)
     h = hl.copy()
     t = pd.to_datetime(h["ts"])
     t = t.dt.tz_localize("UTC") if t.dt.tz is None else t.dt.tz_convert("UTC")
+    h["t"] = t.dt.tz_localize(None).dt.floor("h")                                # the hour, naive UTC (one snapshot a day is published a few minutes past each hour)
     et = t.dt.tz_convert(cfg.tz)
     h["day"] = et.dt.tz_localize(None).dt.normalize()
     h["hour"] = et.dt.hour
@@ -76,22 +81,38 @@ def prepare(hl: pd.DataFrame, cfg: Optional[WindowConfig] = None) -> pd.DataFram
         if c in h.columns:
             bad |= h[c].fillna(False).astype(bool)
     h["usable"] = ~bad & h["price"].notna() & (h["price"] > 0)
-    return h[["item_id", "day", "hour", "dow", "price", "usable"]].reset_index(drop=True)
+    if "u5" not in h.columns:
+        h["u5"] = np.nan
+    return h[cols].reset_index(drop=True)
+
+
+def rolling_reference(u: pd.DataFrame, window: int = 25, min_periods: int = 18) -> pd.DataFrame:
+    """Per item and hour: the median price over the `window` hours centred on it (needs `min_periods` usable hours). Returns item_id, t, ref."""
+    wide = u.pivot_table(index="t", columns="item_id", values="price", aggfunc="mean")
+    wide = wide.reindex(pd.date_range(wide.index.min(), wide.index.max(), freq="h"))
+    ref = wide.rolling(window, center=True, min_periods=min_periods).median()
+    ref.index.name, ref.columns.name = "t", "item_id"
+    long = ref.stack()
+    long = long[long.notna()].rename("ref").reset_index()
+    return long
 
 
 def relative_hours(p: pd.DataFrame, cfg: Optional[WindowConfig] = None) -> pd.DataFrame:
-    """Per usable hour: log of its price over the median price of the same item on the same day. Item-days with too few usable hours are dropped."""
+    """Per usable hour: log of its price over a reference price of the same item (cfg.reference: the median of the 25 hours around it, or the median of the same
+    US Eastern day). Item-days with too few usable hours are dropped."""
     cfg = cfg or WindowConfig()
+    cols = ["item_id", "day", "hour", "dow", "price", "ref", "rel"]
     u = p[p["usable"]]
     if u.empty:
-        return pd.DataFrame(columns=["item_id", "day", "hour", "dow", "price", "ref", "rel"])
-    g = u.groupby(["item_id", "day"])["price"]
-    ref = g.transform("median")
-    n = g.transform("size")
-    out = u.assign(ref=ref, n=n)
+        return pd.DataFrame(columns=cols)
+    n = u.groupby(["item_id", "day"])["price"].transform("size")
+    if cfg.reference == "day":
+        out = u.assign(ref=u.groupby(["item_id", "day"])["price"].transform("median"), n=n)
+    else:
+        out = u.assign(n=n).merge(rolling_reference(u), on=["item_id", "t"], how="inner")
     out = out[out["n"] >= cfg.min_hours_day].copy()
     out["rel"] = np.log(out["price"] / out["ref"]).clip(-cfg.clip, cfg.clip)
-    return out[["item_id", "day", "hour", "dow", "price", "ref", "rel"]].reset_index(drop=True)
+    return out[cols].reset_index(drop=True)
 
 
 def label_items(p: pd.DataFrame, groups: Optional[pd.DataFrame], cfg: Optional[WindowConfig] = None) -> pd.DataFrame:
@@ -276,32 +297,35 @@ def weekday_profile(series: pd.Series) -> pd.DataFrame:
 
 
 def walk_forward_weekday(wk: dict, cfg: Optional[WindowConfig] = None) -> pd.DataFrame:
-    """One row per pool: days tested, test days that fell on the weekday learned from earlier days (only days at least 4 before, since a day's 7-day level reaches 3 days
-    ahead), mean saving on those days against the average of all test days (fraction, 90% range)."""
+    """One row per pool. For every test day the cheapest `cfg.weekday_pick` weekdays (of 7) are learned from days at least 4 earlier (a day's 7-day level reaches 3 days
+    ahead). The test days that fall on those weekdays are the 'chosen' days. Saving = how much cheaper the chosen days were than the average of ALL test days (fraction, with a
+    90% range over the chosen days). Every test day takes part, so the test speaks about three times sooner than one that only counts days landing on a single weekday."""
     cfg = cfg or WindowConfig()
     rows = []
     for pool, s in wk.items():
         days, vals = list(s.index), s.to_numpy()
-        chosen, tested = [], []
+        tested, chosen, picks = [], [], []
         for i, t in enumerate(days):
-            cutoff = t - pd.Timedelta(days=4)
-            tr = s[s.index <= cutoff]
+            tr = s[s.index <= t - pd.Timedelta(days=4)]
             if len(tr) < cfg.min_train_dow:
                 continue
             prof = tr.groupby(tr.index.dayofweek).agg(["mean", "size"])
             if len(prof) < 7 or (prof["size"] < 3).any():
                 continue
+            best = set(prof["mean"].nsmallest(cfg.weekday_pick).index)
             tested.append(vals[i])
-            if t.dayofweek == int(prof["mean"].idxmin()):
+            if t.dayofweek in best:
                 chosen.append(vals[i])
+                picks.append(tuple(sorted(best)))
         if not tested:
             continue
         base = float(np.mean(tested))
-        sav = 1.0 - np.exp(np.asarray(chosen) - base) if chosen else np.array([])
-        m, lo, hi = block_bootstrap_mean(sav, cfg.boot, 1, cfg.seed) if len(sav) else (np.nan, np.nan, np.nan)
-        rows.append({"pool": pool, "test_days": len(tested), "learned_days": len(chosen), "saving": m, "lo": lo, "hi": hi,
+        excess = np.asarray(chosen) - base
+        m, lo, hi = block_bootstrap_mean(1.0 - np.exp(excess), cfg.boot, 1, cfg.seed) if len(excess) else (np.nan, np.nan, np.nan)
+        mode = pd.Series(picks).mode().iloc[0] if picks else ()
+        rows.append({"pool": pool, "test_days": len(tested), "chosen_days": len(chosen), "weekdays": "+".join(WEEKDAYS[d] for d in mode), "saving": m, "lo": lo, "hi": hi,
                      "verdict": verdict(m, lo, hi, len(chosen), min_n=6)})
-    return pd.DataFrame(rows, columns=["pool", "test_days", "learned_days", "saving", "lo", "hi", "verdict"])
+    return pd.DataFrame(rows, columns=["pool", "test_days", "chosen_days", "weekdays", "saving", "lo", "hi", "verdict"])
 
 
 # ------------------------------------------------------------------ resale check
@@ -310,8 +334,9 @@ def resale_check(p: pd.DataFrame, rel: pd.DataFrame, wf: pd.DataFrame, pools: pd
     """Buy each item in its pool's learned window on each test day, sell at that item's median price k days later (k in cfg.sale_days) minus the AH cut. Per pool and k:
     items-days tested, mean margin, and the share that left at least min_profit, for the learned window and for a random-hour buy (all hours that day)."""
     cfg = cfg or WindowConfig()
+    cols = ["pool", "k", "n", "margin_window", "margin_random", "median_window", "median_random", "share_window", "share_random", "loss_window", "loss_random"]
     if wf.empty or daily.empty:
-        return pd.DataFrame(columns=["pool", "k", "n", "margin_window", "margin_random", "share_window", "share_random"])
+        return pd.DataFrame(columns=cols)
     w = cfg.window_hours
     m = rel.merge(pools, on="item_id").merge(wf[["pool", "day", "start"]], on=["pool", "day"])
     inwin = (m["hour"] >= m["start"]) & (m["hour"] < m["start"] + w)
@@ -330,8 +355,10 @@ def resale_check(p: pd.DataFrame, rel: pd.DataFrame, wf: pd.DataFrame, pools: pd
         b["mr"] = net / b["b_rnd"] - 1.0
         for pool, d in b.groupby("pool"):
             rows.append({"pool": pool, "k": k, "n": len(d), "margin_window": float(d["mw"].clip(-1, 5).mean()), "margin_random": float(d["mr"].clip(-1, 5).mean()),
-                         "share_window": float((d["mw"] >= cfg.min_profit).mean()), "share_random": float((d["mr"] >= cfg.min_profit).mean())})
-    return pd.DataFrame(rows, columns=["pool", "k", "n", "margin_window", "margin_random", "share_window", "share_random"])
+                         "median_window": float(d["mw"].median()), "median_random": float(d["mr"].median()),
+                         "share_window": float((d["mw"] >= cfg.min_profit).mean()), "share_random": float((d["mr"] >= cfg.min_profit).mean()),
+                         "loss_window": float((d["mw"] <= -cfg.min_profit).mean()), "loss_random": float((d["mr"] <= -cfg.min_profit).mean())})
+    return pd.DataFrame(rows, columns=cols)
 
 
 # ------------------------------------------------------------------ everything together
@@ -385,9 +412,14 @@ def format_report(res: dict, top: int = 25) -> str:
     else:
         L.append(f"   {'pool':42s} {'days':>5s} {'saving':>8s} {'90% range':>17s} {'beat random':>11s} {'oracle':>8s}  window (ET)    verdict")
         order = {"holds on later days": 0, "no pattern visible": 1, "worse than random": 2, "too few test days": 3}
-        for _, r in hs.assign(o=hs["verdict"].map(order)).sort_values(["o", "saving"], ascending=[True, False]).head(top).iterrows():
+        hs = hs.assign(o=hs["verdict"].map(order)).sort_values(["o", "saving"], ascending=[True, False])
+        broad = hs[~hs["pool"].str.startswith("group:")]
+        groups = hs[hs["pool"].str.startswith("group:")]
+        for _, r in pd.concat([broad, groups.head(top)]).iterrows():
             L.append(f"   {r['pool'][:42]:42s} {r['test_days']:5d} {_pct(r['saving']):>8s} {_pct(r['lo']):>8s} to {_pct(r['hi']):>6s} {r['beat_random'] * 100:10.0f}% {_pct(r['oracle']):>8s}  "
                      f"{int(r['window_start']):02d}-{int(r['window_start']) + cfg.window_hours:02d}h ({r['window_steady'] * 100:.0f}%)  {r['verdict']}")
+        if len(groups) > top:
+            L.append(f"   ({len(groups)} item groups were tested; the best {top} are shown, best first, so some look good by luck. Judge the broad rows first and look for groups that agree.)")
         L.append("   (window (x%): the hours most often chosen and the share of test days that chose them. A window that keeps moving is noise.)")
     L.append("")
     wp = res.get("weekday_profile")
@@ -399,20 +431,24 @@ def format_report(res: dict, top: int = 25) -> str:
             L.append(f"   {r['weekday']}: {r['pct']:+.2f}%  (+/- {r['se']:.2f}, {int(r['days'])} days)")
     ws = res.get("weekday_summary", pd.DataFrame())
     L.append("")
-    L.append(f"== DAY-OF-WEEK BUY DAY, tested on later days (learns from at least {cfg.min_train_dow} days, then grades on days at least 4 later)")
+    L.append(f"== DAY-OF-WEEK BUY DAYS, tested on later days (the cheapest {cfg.weekday_pick} weekdays are learned from days at least 4 earlier, after {cfg.min_train_dow} days of learning)")
     if ws.empty:
-        L.append(f"   Not enough days yet: the weekday test needs about {cfg.min_train_dow + 4 + 14} days of hourly history, which means about 7 weeks. Until then, treat the weekday as unknown.")
+        L.append(f"   Not enough days yet: the weekday test grades nothing before {cfg.min_train_dow + 4} days of hourly history and needs about {cfg.min_train_dow + 4 + 21} days (about 8 weeks) for a verdict. "
+                 "Until then, treat the weekday as unknown.")
     else:
-        for _, r in ws.sort_values("saving", ascending=False).head(top).iterrows():
-            L.append(f"   {r['pool'][:42]:42s} test days {r['test_days']:4d}, on the learned weekday {r['learned_days']:3d}: saving {_pct(r['saving'])} ({_pct(r['lo'])} to {_pct(r['hi'])})  {r['verdict']}")
+        broad = ws[~ws["pool"].str.startswith("group:")]
+        for _, r in pd.concat([broad, ws[ws["pool"].str.startswith("group:")].sort_values("saving", ascending=False).head(top)]).iterrows():
+            L.append(f"   {r['pool'][:42]:42s} test days {r['test_days']:4d}, on the learned weekdays ({r['weekdays']}) {r['chosen_days']:3d}: saving {_pct(r['saving'])} ({_pct(r['lo'])} to {_pct(r['hi'])})  {r['verdict']}")
     L.append("")
     rs = res.get("resale", pd.DataFrame())
-    L.append(f"== RESALE CHECK: buy in the learned window, sell at the median price k days later, after a {cfg.cut * 100:.0f}% AH cut. Share of item-days leaving at least {cfg.min_profit * 100:.0f}%")
+    L.append(f"== RESALE CHECK: buy in the learned window, sell at the median price k days later, after a {cfg.cut * 100:.0f}% AH cut. Gain = {cfg.min_profit * 100:.0f}% or more left; loss = {cfg.min_profit * 100:.0f}% or more lost")
     if rs.empty:
         L.append("   Nothing to check yet (needs test days that have a later sale day).")
     else:
-        L.append(f"   {'pool':42s} {'k':>2s} {'item-days':>10s} {'learned window':>15s} {'random hour':>12s}   average margin (window / random)")
-        for _, r in rs[rs["pool"].isin(["everything"] + [x for x in rs["pool"].unique() if x.startswith("price")])].sort_values(["pool", "k"]).iterrows():
-            L.append(f"   {r['pool'][:42]:42s} {int(r['k']):2d} {int(r['n']):10d} {r['share_window'] * 100:14.1f}% {r['share_random'] * 100:11.1f}%   {_pct(r['margin_window'])} / {_pct(r['margin_random'])}")
-        L.append("   Read this as: if the learned window is not clearly better than a random hour, time of day alone does not make a resale profit; a price DIP against the item's own range has to do the work.")
+        L.append(f"   {'pool':34s} {'k':>1s} {'item-days':>9s} | {'gain: window':>12s} {'random':>7s} | {'loss: window':>12s} {'random':>7s} | {'median margin: window':>21s} {'random':>7s}")
+        broad_rs = rs[(rs["pool"] == "everything") | rs["pool"].str.startswith("price")]
+        for _, r in broad_rs.sort_values(["pool", "k"]).iterrows():
+            L.append(f"   {r['pool'][:34]:34s} {int(r['k']):1d} {int(r['n']):9d} | {r['share_window'] * 100:11.1f}% {r['share_random'] * 100:6.1f}% | {r['loss_window'] * 100:11.1f}% {r['loss_random'] * 100:6.1f}% | "
+                     f"{_pct(r['median_window']):>21s} {_pct(r['median_random']):>7s}")
+        L.append("   Read this as: if the learned window is not clearly better than a random hour (more gain, less loss), time of day alone does not make a resale profit; a price DIP against the item's own range has to do the work (next section).")
     return "\n".join(L)
