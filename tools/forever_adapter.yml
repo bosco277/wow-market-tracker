@@ -1,0 +1,60 @@
+name: Forever adapter check
+
+# Manual. Reads the separate private Forever dataset through the Forever adapter (engine/forever.py) and reports what it found: files and snapshots per house, the kind of each
+# source (commodity or auction, set from the source name), repeated auction ids that were dropped (and whether their copies disagreed), gaps, and, if ticked, the house-keyed hourly table.
+# It only reads; nothing is written to any dataset. It asks first: it counts the files and megabytes before downloading and stops if that is over the limits.
+# The report is in the run's summary and in the downloadable file forever_adapter.txt. Nothing in it names an account or a character (the dataset's name is blanked out).
+# Secrets used: HF_TOKEN (read access to the Forever dataset).
+
+on:
+  workflow_dispatch:
+    inputs:
+      houses:
+        description: "Auction houses, comma separated (blank = the PvP set 110,113,116; 'all' = every house in the dataset)"
+        default: "110,113,116"
+      days:
+        description: "How many UTC days to read, ending today"
+        default: "2"
+      tables:
+        description: "Also build the house-keyed hourly table and describe it (yes / no)"
+        default: "no"
+
+concurrency:
+  group: forever-adapter
+  cancel-in-progress: false
+
+jobs:
+  adapter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pandas numpy pyarrow requests
+
+      - name: Forever adapter check
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HOUSES: ${{ inputs.houses || '110,113,116' }}
+          DAYS: ${{ inputs.days || '2' }}
+          TABLES: ${{ inputs.tables || 'no' }}
+        run: |
+          set -o pipefail
+          mkdir -p out
+          EXTRA=""
+          if [ "$TABLES" = "yes" ]; then EXTRA="--tables"; fi
+          python tools/forever_adapter.py --houses "$HOUSES" --days "$DAYS" $EXTRA --out out | tee out_adapter.txt
+          { echo '### forever adapter'; echo '```'; head -c 900000 out_adapter.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: forever-adapter
+          path: out/forever_adapter.txt
+          if-no-files-found: ignore
