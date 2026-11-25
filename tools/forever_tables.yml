@@ -1,0 +1,65 @@
+name: Forever tables
+
+# Manual. WoW Forever only. Builds the recipe, reagent and item-name tables from Blizzard's Forever data and writes the house map (script: tools/forever_tables.py):
+#   recipes   every profession of Forever's static data -> skill tiers -> recipes -> what each recipe uses and makes (Classic Era does not serve professions, so there is no fallback)
+#   items     a name and details for every item id on the auction houses and in a recipe: Forever's own data first, Classic Era for what Forever does not name; each row says which
+#   housemap  house -> faction / ruleset, with how sure we are of each row
+# With save = no (the default) it only REPORTS what it would store. With save = yes it writes the tables that are new or changed to the Forever dataset, in one commit:
+#   tables/forever_recipes.csv.gz, tables/forever_reagents.csv.gz, tables/forever_items.csv.gz, tables/forever_house_map.json
+# Later runs only ask about item ids that are new (or were unnamed and are due another try), so they are short. Nothing in the report names an account or a character (the dataset's name is blanked out).
+# Secrets used: BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET, HF_TOKEN (needs write access to the Forever dataset when save = yes; the same token the Forever fetcher uses).
+
+on:
+  workflow_dispatch:
+    inputs:
+      parts:
+        description: "all, or a comma separated list of: recipes, items, housemap"
+        default: "all"
+      save:
+        description: "yes = store the tables that are new or changed; no = report only"
+        default: "no"
+      retry_days:
+        description: "Ask again about an unnamed item id after this many days"
+        default: "3"
+
+concurrency:
+  group: forever-tables
+  cancel-in-progress: false
+
+jobs:
+  tables:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pandas numpy pyarrow requests huggingface_hub
+
+      - name: Forever tables
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+          PARTS: ${{ inputs.parts || 'all' }}
+          SAVE: ${{ inputs.save || 'no' }}
+          RETRY_DAYS: ${{ inputs.retry_days || '3' }}
+        run: |
+          set -o pipefail
+          mkdir -p out
+          EXTRA=""
+          if [ "$SAVE" = "yes" ]; then EXTRA="--save"; fi
+          python tools/forever_tables.py --parts "$PARTS" --retry-days "$RETRY_DAYS" $EXTRA --out out | tee out_tables.txt
+          { echo '### forever tables'; echo '```'; head -c 900000 out_tables.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: forever-tables
+          path: out/forever_tables.txt
+          if-no-files-found: ignore
