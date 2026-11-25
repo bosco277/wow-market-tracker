@@ -1,0 +1,784 @@
+{
+ "captured": "2026-11-25 about 14:10 ET (19:10 UTC)",
+ "source": "foreverwowcraft.com /routes/<slug>/alchemy/ pages, Profit route shopping list; read through a summarising fetch tool, so treat numbers as approximate. 'each' is the average price for buying qty units, NOT the floor. Scan ages are as printed on each page.",
+ "houses": {
+  "uspvp--alliance": {
+   "scan_age": "4 h ago",
+   "price_ladders": 1858,
+   "rows": [
+    {
+     "item": "Stranglevine",
+     "qty": 368,
+     "each_copper": 2591,
+     "source": "ah"
+    },
+    {
+     "item": "Firebloom",
+     "qty": 225,
+     "each_copper": 1041,
+     "source": "ah"
+    },
+    {
+     "item": "Rosecap",
+     "qty": 140,
+     "each_copper": 1420,
+     "source": "ah"
+    },
+    {
+     "item": "Crystal Vial",
+     "qty": 259,
+     "each_copper": 500,
+     "source": "vendor"
+    },
+    {
+     "item": "Deviate Fish",
+     "qty": 166,
+     "each_copper": 456,
+     "source": "ah"
+    },
+    {
+     "item": "Goldthorn",
+     "qty": 122,
+     "each_copper": 549,
+     "source": "ah"
+    },
+    {
+     "item": "Earthroot",
+     "qty": 201,
+     "each_copper": 181,
+     "source": "ah"
+    },
+    {
+     "item": "Swiftthistle",
+     "qty": 24,
+     "each_copper": 902,
+     "source": "ah"
+    },
+    {
+     "item": "Wild Steelbloom",
+     "qty": 122,
+     "each_copper": 156,
+     "source": "ah"
+    },
+    {
+     "item": "Pyrite",
+     "qty": 36,
+     "each_copper": 474,
+     "source": "ah"
+    },
+    {
+     "item": "Leaded Vial",
+     "qty": 208,
+     "each_copper": 40,
+     "source": "vendor"
+    },
+    {
+     "item": "Peacebloom",
+     "qty": 33,
+     "each_copper": 220,
+     "source": "ah"
+    },
+    {
+     "item": "Fire Oil",
+     "qty": 225,
+     "each_copper": 24,
+     "source": "ah"
+    },
+    {
+     "item": "Silverleaf",
+     "qty": 52,
+     "each_copper": 100,
+     "source": "ah"
+    },
+    {
+     "item": "Kingsblood",
+     "qty": 16,
+     "each_copper": 250,
+     "source": "ah"
+    }
+   ],
+   "hints": {
+    "page_modified": "2026-11-25T03:11:29Z",
+    "depth_newest_min": 60,
+    "depth_oldest_min": 120
+   }
+  },
+  "uspvp--horde": {
+   "scan_age": "4 h ago",
+   "price_ladders": 1866,
+   "rows": [
+    {
+     "item": "Ghost Mushroom",
+     "qty": 178,
+     "each_copper": 4760,
+     "source": "ah"
+    },
+    {
+     "item": "Wintersbite",
+     "qty": 296,
+     "each_copper": 1385,
+     "source": "ah"
+    },
+    {
+     "item": "Khadgar's Whisker",
+     "qty": 643,
+     "each_copper": 632,
+     "source": "ah"
+    },
+    {
+     "item": "Sungrass",
+     "qty": 178,
+     "each_copper": 1439,
+     "source": "ah"
+    },
+    {
+     "item": "Arthas' Tears",
+     "qty": 92,
+     "each_copper": 2020,
+     "source": "ah"
+    },
+    {
+     "item": "Blindweed",
+     "qty": 92,
+     "each_copper": 1589,
+     "source": "ah"
+    },
+    {
+     "item": "Swiftthistle",
+     "qty": 159,
+     "each_copper": 885,
+     "source": "ah"
+    },
+    {
+     "item": "Crystal Vial",
+     "qty": 276,
+     "each_copper": 500,
+     "source": "vendor"
+    },
+    {
+     "item": "Frilled Lichen",
+     "qty": 12,
+     "each_copper": 6390,
+     "source": "ah"
+    },
+    {
+     "item": "Stranglekelp",
+     "qty": 197,
+     "each_copper": 291,
+     "source": "ah"
+    },
+    {
+     "item": "Briarthorn",
+     "qty": 158,
+     "each_copper": 247,
+     "source": "ah"
+    },
+    {
+     "item": "Pyrite",
+     "qty": 60,
+     "each_copper": 642,
+     "source": "ah"
+    },
+    {
+     "item": "Plaguebloom",
+     "qty": 12,
+     "each_copper": 2097,
+     "source": "ah"
+    },
+    {
+     "item": "Wild Steelbloom",
+     "qty": 217,
+     "each_copper": 89,
+     "source": "ah"
+    },
+    {
+     "item": "Mountain Silversage",
+     "qty": 12,
+     "each_copper": 1377,
+     "source": "ah"
+    }
+   ],
+   "hints": {
+    "page_modified": "2026-11-25T13:12:10Z",
+    "depth_newest_min": 43,
+    "depth_oldest_min": 48
+   }
+  },
+  "uspve--alliance": {
+   "scan_age": "4 h ago",
+   "price_ladders": 1855,
+   "rows": [
+    {
+     "item": "Gromsblood",
+     "qty": 169,
+     "each_copper": 2499,
+     "source": "ah"
+    },
+    {
+     "item": "Wintersbite",
+     "qty": 264,
+     "each_copper": 1030,
+     "source": "ah"
+    },
+    {
+     "item": "Sungrass",
+     "qty": 169,
+     "each_copper": 1362,
+     "source": "ah"
+    },
+    {
+     "item": "Khadgar's Whisker",
+     "qty": 528,
+     "each_copper": 388,
+     "source": "ah"
+    },
+    {
+     "item": "Crystal Vial",
+     "qty": 209,
+     "each_copper": 500,
+     "source": "vendor"
+    },
+    {
+     "item": "Blindweed",
+     "qty": 40,
+     "each_copper": 1521,
+     "source": "ah"
+    },
+    {
+     "item": "Swiftthistle",
+     "qty": 72,
+     "each_copper": 300,
+     "source": "ah"
+    },
+    {
+     "item": "Goldthorn",
+     "qty": 50,
+     "each_copper": 417,
+     "source": "ah"
+    },
+    {
+     "item": "Pyrite",
+     "qty": 88,
+     "each_copper": 185,
+     "source": "ah"
+    },
+    {
+     "item": "Rosecap",
+     "qty": 20,
+     "each_copper": 752,
+     "source": "ah"
+    },
+    {
+     "item": "Briarthorn",
+     "qty": 71,
+     "each_copper": 191,
+     "source": "ah"
+    },
+    {
+     "item": "Leaded Vial",
+     "qty": 235,
+     "each_copper": 40,
+     "source": "vendor"
+    },
+    {
+     "item": "Stranglekelp",
+     "qty": 34,
+     "each_copper": 244,
+     "source": "ah"
+    },
+    {
+     "item": "Wild Steelbloom",
+     "qty": 44,
+     "each_copper": 118,
+     "source": "ah"
+    },
+    {
+     "item": "Kingsblood",
+     "qty": 34,
+     "each_copper": 133,
+     "source": "ah"
+    }
+   ],
+   "hints": {
+    "page_modified": "2026-11-25T14:13:31Z",
+    "depth_newest_min": 22,
+    "depth_oldest_min": 46
+   }
+  },
+  "uspve--horde": {
+   "scan_age": "8 min ago",
+   "price_ladders": 1857,
+   "rows": [
+    {
+     "item": "Wintersbite",
+     "qty": 282,
+     "each_copper": 1212,
+     "source": "ah"
+    },
+    {
+     "item": "Firebloom",
+     "qty": 276,
+     "each_copper": 1219,
+     "source": "ah"
+    },
+    {
+     "item": "Khadgar's Whisker",
+     "qty": 564,
+     "each_copper": 334,
+     "source": "ah"
+    },
+    {
+     "item": "Crystal Vial",
+     "qty": 92,
+     "each_copper": 500,
+     "source": "vendor"
+    },
+    {
+     "item": "Swiftthistle",
+     "qty": 68,
+     "each_copper": 270,
+     "source": "ah"
+    },
+    {
+     "item": "Earthroot",
+     "qty": 125,
+     "each_copper": 144,
+     "source": "ah"
+    },
+    {
+     "item": "Rosecap",
+     "qty": 20,
+     "each_copper": 687,
+     "source": "ah"
+    },
+    {
+     "item": "Pyrite",
+     "qty": 46,
+     "each_copper": 275,
+     "source": "ah"
+    },
+    {
+     "item": "Leaded Vial",
+     "qty": 216,
+     "each_copper": 40,
+     "source": "vendor"
+    },
+    {
+     "item": "Kingsblood",
+     "qty": 65,
+     "each_copper": 115,
+     "source": "ah"
+    },
+    {
+     "item": "Firefin Snapper",
+     "qty": 276,
+     "each_copper": 16,
+     "source": "ah"
+    },
+    {
+     "item": "Peacebloom",
+     "qty": 28,
+     "each_copper": 83,
+     "source": "ah"
+    },
+    {
+     "item": "Silverleaf",
+     "qty": 97,
+     "each_copper": 23,
+     "source": "ah"
+    },
+    {
+     "item": "Deviate Fish",
+     "qty": 12,
+     "each_copper": 123,
+     "source": "ah"
+    },
+    {
+     "item": "Empty Vial",
+     "qty": 287,
+     "each_copper": 4,
+     "source": "vendor"
+    }
+   ]
+  },
+  "usrp--alliance": {
+   "scan_age": "2 h ago",
+   "price_ladders": 1532,
+   "rows": [
+    {
+     "item": "Stranglevine",
+     "qty": 72,
+     "each_copper": 7273,
+     "source": "ah"
+    },
+    {
+     "item": "Sungrass",
+     "qty": 34,
+     "each_copper": 2700,
+     "source": "ah"
+    },
+    {
+     "item": "Arthas' Tears",
+     "qty": 25,
+     "each_copper": 2566,
+     "source": "ah"
+    },
+    {
+     "item": "Swiftthistle",
+     "qty": 195,
+     "each_copper": 280,
+     "source": "ah"
+    },
+    {
+     "item": "Crystal Vial",
+     "qty": 95,
+     "each_copper": 500,
+     "source": "vendor"
+    },
+    {
+     "item": "Blindweed",
+     "qty": 25,
+     "each_copper": 1395,
+     "source": "ah"
+    },
+    {
+     "item": "Khadgar's Whisker",
+     "qty": 47,
+     "each_copper": 433,
+     "source": "ah"
+    },
+    {
+     "item": "Kingsblood",
+     "qty": 127,
+     "each_copper": 106,
+     "source": "ah"
+    },
+    {
+     "item": "Stranglekelp",
+     "qty": 54,
+     "each_copper": 188,
+     "source": "ah"
+    },
+    {
+     "item": "Leaded Vial",
+     "qty": 163,
+     "each_copper": 40,
+     "source": "vendor"
+    },
+    {
+     "item": "Wintersbite",
+     "qty": 4,
+     "each_copper": 1545,
+     "source": "ah"
+    },
+    {
+     "item": "Earthroot",
+     "qty": 87,
+     "each_copper": 69,
+     "source": "ah"
+    },
+    {
+     "item": "Stonescale Eel",
+     "qty": 34,
+     "each_copper": 130,
+     "source": "ah"
+    },
+    {
+     "item": "Silverleaf",
+     "qty": 231,
+     "each_copper": 18,
+     "source": "ah"
+    },
+    {
+     "item": "Pyrite",
+     "qty": 20,
+     "each_copper": 107,
+     "source": "ah"
+    }
+   ]
+  },
+  "usrp--horde": {
+   "scan_age": "4 h ago",
+   "price_ladders": 1390,
+   "rows": [
+    {
+     "item": "Stranglevine",
+     "qty": 152,
+     "each_copper": 6695,
+     "source": "ah"
+    },
+    {
+     "item": "Arthas' Tears",
+     "qty": 35,
+     "each_copper": 6371,
+     "source": "ah"
+    },
+    {
+     "item": "Plaguebloom",
+     "qty": 42,
+     "each_copper": 2484,
+     "source": "ah"
+    },
+    {
+     "item": "Crystal Vial",
+     "qty": 143,
+     "each_copper": 500,
+     "source": "vendor"
+    },
+    {
+     "item": "Blindweed",
+     "qty": 35,
+     "each_copper": 1543,
+     "source": "ah"
+    },
+    {
+     "item": "Gromsblood",
+     "qty": 22,
+     "each_copper": 2280,
+     "source": "ah"
+    },
+    {
+     "item": "Mountain Silversage",
+     "qty": 42,
+     "each_copper": 1054,
+     "source": "ah"
+    },
+    {
+     "item": "Rosecap",
+     "qty": 20,
+     "each_copper": 1615,
+     "source": "ah"
+    },
+    {
+     "item": "Firebloom",
+     "qty": 16,
+     "each_copper": 1300,
+     "source": "ah"
+    },
+    {
+     "item": "Wild Steelbloom",
+     "qty": 80,
+     "each_copper": 238,
+     "source": "ah"
+    },
+    {
+     "item": "Swiftthistle",
+     "qty": 100,
+     "each_copper": 187,
+     "source": "ah"
+    },
+    {
+     "item": "Pyrite",
+     "qty": 88,
+     "each_copper": 165,
+     "source": "ah"
+    },
+    {
+     "item": "Stranglekelp",
+     "qty": 69,
+     "each_copper": 200,
+     "source": "ah"
+    },
+    {
+     "item": "Fadeleaf",
+     "qty": 23,
+     "each_copper": 352,
+     "source": "ah"
+    }
+   ]
+  },
+  "usrppvp--alliance": {
+   "scan_age": "10 h ago",
+   "price_ladders": 1599,
+   "rows": [
+    {
+     "item": "Firebloom",
+     "qty": 297,
+     "each_copper": 1592,
+     "source": "ah"
+    },
+    {
+     "item": "Frilled Lichen",
+     "qty": 78,
+     "each_copper": 3018,
+     "source": "ah"
+    },
+    {
+     "item": "Khadgar's Whisker",
+     "qty": 204,
+     "each_copper": 938,
+     "source": "ah"
+    },
+    {
+     "item": "Pyrite",
+     "qty": 208,
+     "each_copper": 825,
+     "source": "ah"
+    },
+    {
+     "item": "Wintersbite",
+     "qty": 120,
+     "each_copper": 1339,
+     "source": "ah"
+    },
+    {
+     "item": "Volatile Rum",
+     "qty": 144,
+     "each_copper": 898,
+     "source": "ah"
+    },
+    {
+     "item": "Plaguebloom",
+     "qty": 30,
+     "each_copper": 3968,
+     "source": "ah"
+    },
+    {
+     "item": "Rosecap",
+     "qty": 60,
+     "each_copper": 1206,
+     "source": "ah"
+    },
+    {
+     "item": "Mountain Silversage",
+     "qty": 30,
+     "each_copper": 1256,
+     "source": "ah"
+    },
+    {
+     "item": "Kingsblood",
+     "qty": 164,
+     "each_copper": 188,
+     "source": "ah"
+    },
+    {
+     "item": "Goldthorn",
+     "qty": 56,
+     "each_copper": 545,
+     "source": "ah"
+    },
+    {
+     "item": "Crystal Vial",
+     "qty": 60,
+     "each_copper": 500,
+     "source": "vendor"
+    },
+    {
+     "item": "Leaded Vial",
+     "qty": 412,
+     "each_copper": 40,
+     "source": "vendor"
+    },
+    {
+     "item": "Earthroot",
+     "qty": 165,
+     "each_copper": 95,
+     "source": "ah"
+    },
+    {
+     "item": "Oily Blackmouth",
+     "qty": 122,
+     "each_copper": 100,
+     "source": "ah"
+    }
+   ]
+  },
+  "usrppvp--horde": {
+   "scan_age": "4 h ago",
+   "price_ladders": 1459,
+   "rows": [
+    {
+     "item": "Gromsblood",
+     "qty": 215,
+     "each_copper": 2049,
+     "source": "ah"
+    },
+    {
+     "item": "Stranglevine",
+     "qty": 78,
+     "each_copper": 3973,
+     "source": "ah"
+    },
+    {
+     "item": "Sungrass",
+     "qty": 99,
+     "each_copper": 1671,
+     "source": "ah"
+    },
+    {
+     "item": "Crystal Vial",
+     "qty": 208,
+     "each_copper": 500,
+     "source": "vendor"
+    },
+    {
+     "item": "Firebloom",
+     "qty": 62,
+     "each_copper": 1478,
+     "source": "ah"
+    },
+    {
+     "item": "Swiftthistle",
+     "qty": 79,
+     "each_copper": 910,
+     "source": "ah"
+    },
+    {
+     "item": "Pyrite",
+     "qty": 168,
+     "each_copper": 329,
+     "source": "ah"
+    },
+    {
+     "item": "Stranglekelp",
+     "qty": 143,
+     "each_copper": 305,
+     "source": "ah"
+    },
+    {
+     "item": "Earthroot",
+     "qty": 203,
+     "each_copper": 200,
+     "source": "ah"
+    },
+    {
+     "item": "Deviate Fish",
+     "qty": 183,
+     "each_copper": 195,
+     "source": "ah"
+    },
+    {
+     "item": "Blindweed",
+     "qty": 36,
+     "each_copper": 910,
+     "source": "ah"
+    },
+    {
+     "item": "Wild Steelbloom",
+     "qty": 143,
+     "each_copper": 177,
+     "source": "ah"
+    },
+    {
+     "item": "Volatile Rum",
+     "qty": 38,
+     "each_copper": 642,
+     "source": "ah"
+    },
+    {
+     "item": "Kingsblood",
+     "qty": 169,
+     "each_copper": 128,
+     "source": "ah"
+    },
+    {
+     "item": "Large Fang",
+     "qty": 168,
+     "each_copper": 107,
+     "source": "ah"
+    }
+   ]
+  }
+ },
+ "note": "Point-in-time capture of foreverwowcraft.com route pages (Alchemy, Profit route). 'each_copper' is the average price of buying qty units from that site's own scan, NOT the floor. The pages are static and rebuilt now and then, so 'scanned N h ago' is relative to the page's build time (page_modified, known for three pages only); the probe therefore searches every snapshot in its window. Numbers were read through a summarising fetch tool: approximate. Vendor rows are kept but never matched (a vendor price is fixed, not a market price)."
+}

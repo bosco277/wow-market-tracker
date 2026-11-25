@@ -1,0 +1,64 @@
+name: Forever probe
+
+# Manual. Read-only: nothing is written to any dataset. Three questions in one run (script: tools/forever_probe.py):
+#   1 structure    what Blizzard's Forever API says about how markets are laid out (rulesets, auction houses, the `ruleset` field of each house's record, the realm routes)
+#   2 items        every item id in the newest snapshots, looked up in Forever's static data and then Classic Era, Classic and retail: who names how many, and what the gaps are worth; plus professions / recipes
+#   3 fingerprint  eight foreverwowcraft.com pages (US PvE / PvP / RP / RP PvP x Alliance / Horde) priced against each of our houses, to see which house is which. Method check: US PvP Alliance must be house 110.
+# It downloads the newest snapshot of every house (items; about 10 to 20 MB), every house's full record through each ruleset's URL from Blizzard (structure; hundreds of MB in all, and the slowest part;
+# reading each house through two rulesets, not four) and about 40 hours of commodity files for every house (fingerprint; a few hundred MB, only the columns it needs). The report is in the run's summary and in the downloadable file forever_probe.txt. Nothing in it names an account or a character (the dataset's name is blanked out).
+# Secrets used: HF_TOKEN (read access to the Forever dataset), BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sections:
+        description: "all, or a comma separated list of: structure, items, fingerprint"
+        default: "all"
+      hours:
+        description: "Fingerprint: hours of snapshots to search"
+        default: "40"
+      all_rulesets:
+        description: "Structure: read each house through all four rulesets instead of 1 and 2 (yes / no; doubles the downloads)"
+        default: "no"
+
+concurrency:
+  group: forever-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pandas numpy pyarrow requests
+
+      - name: Forever probe
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
+          BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
+          SECTIONS: ${{ inputs.sections || 'all' }}
+          HOURS: ${{ inputs.hours || '40' }}
+          ALL_RULESETS: ${{ inputs.all_rulesets || 'no' }}
+        run: |
+          set -o pipefail
+          mkdir -p out
+          EXTRA=""
+          if [ "$ALL_RULESETS" = "yes" ]; then EXTRA="--all-rulesets"; fi
+          python tools/forever_probe.py --sections "$SECTIONS" --hours "$HOURS" $EXTRA --out out | tee out_probe.txt
+          { echo '### forever probe'; echo '```'; head -c 900000 out_probe.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: forever-probe
+          path: out/forever_probe.txt
+          if-no-files-found: ignore
