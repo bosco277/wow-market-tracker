@@ -1,0 +1,53 @@
+name: Forever health check
+
+# Manual. Reads the separate private Forever dataset (written by "Forever Auction Extractor") and answers: is every hour there, how fast is it growing, how are the files stored
+# (and does the engine's own reader take them), and are the auction houses separate markets. It only reads; nothing is written to any dataset.
+# The report is in the run's summary and in the downloadable file forever_health.txt. Nothing in it names an account or a character (the dataset's name is blanked out).
+# Secrets used: HF_TOKEN (read access to the Forever dataset).
+
+on:
+  workflow_dispatch:
+    inputs:
+      compare_hours:
+        description: "Hours of commodity files to download for the price comparison between houses (0 = skip it; more hours = more files)"
+        default: "48"
+      days:
+        description: "Only look at files from the last N days (0 = all of them)"
+        default: "0"
+
+concurrency:
+  group: forever-health
+  cancel-in-progress: false
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pandas numpy pyarrow huggingface_hub requests
+
+      - name: Forever health check
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          COMPARE_HOURS: ${{ inputs.compare_hours || '48' }}
+          DAYS: ${{ inputs.days || '0' }}
+        run: |
+          set -o pipefail
+          mkdir -p out
+          python tools/forever_health.py --compare-hours "$COMPARE_HOURS" --days "$DAYS" --out out | tee out_health.txt
+          { echo '### forever health'; echo '```'; head -c 900000 out_health.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: forever-health
+          path: out/forever_health.txt
+          if-no-files-found: ignore
