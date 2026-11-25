@@ -117,6 +117,62 @@ class TestTargets(unittest.TestCase):
             self.assertIn(part, text)
 
 
+def with_clusters(hl, item_ids, cluster_days, hours=(10, 18), factor=0.02, start="2026-06-01"):
+    """Copy of an hourly table in which each listed item's floor drops to `factor` of itself for a few US Eastern hours on each listed day (day numbers from `start`) and is normal otherwise:
+    the price that swings between two levels (an 11,695g median and a 48g floor), whose cheap hours are a one-off."""
+    out = hl.copy()
+    et = out["ts"].dt.tz_localize("UTC").dt.tz_convert("America/New_York")
+    day_no = ((et.dt.normalize().dt.tz_localize(None) - pd.Timestamp(start)).dt.days).to_numpy()
+    hr = et.dt.hour.to_numpy()
+    mask = out["item_id"].isin(item_ids).to_numpy() & np.isin(day_no, list(cluster_days)) & (hr >= hours[0]) & (hr < hours[1])
+    out.loc[mask, "floor_gold"] *= factor
+    return out
+
+
+class TestDeepTargets(unittest.TestCase):
+    """The v0.7.40 'Tavern Mug' problem: one open-ended 20%+ band gave a target 99% under the median the hit rate of one 21% under."""
+    @classmethod
+    def setUpClass(cls):
+        hl = with_clusters(market(days=45, noise=0.03, day_walk=0.01), [1000, 1001, 1002, 1003], (5, 15, 25, 35, 42))
+        cls.res = Tg.analyze_targets(hl, named_groups())
+
+    def test_the_bands_split_the_deep_end(self):
+        self.assertEqual(Tg.DEPTH_NAMES, ["under 3%", "3-10%", "10-20%", "20-35%", "35-50%", "50%+"])
+        self.assertEqual(len(Tg.DEPTH_EDGES), len(Tg.DEPTH_NAMES) + 1)
+        for d, name in ((0.0, "under 3%"), (0.029, "under 3%"), (0.03, "3-10%"), (0.199, "10-20%"), (0.2, "20-35%"), (0.35, "35-50%"), (0.499, "35-50%"), (0.5, "50%+"), (0.996, "50%+")):
+            self.assertEqual(Tg.depth_name(d), name)
+
+    def test_a_one_off_cheap_cluster_makes_a_deep_target_that_is_not_reached(self):
+        c = self.res["calibration"]
+        row = c[(c["pool"] == "everything") & (c["tier"] == "steal") & (c["depth"] == "50%+") & (c["H"] == 1)]
+        self.assertEqual(len(row), 1)
+        self.assertGreaterEqual(int(row["n"].iloc[0]), 30)
+        self.assertLess(float(row["reached"].iloc[0]), 0.05)                          # the cheap hours were over before the window: the deep target is almost never met again
+        shallow = c[(c["pool"] == "everything") & (c["tier"] == "steal") & (c["depth"].isin(["under 3%", "3-10%"])) & (c["H"] == 3)]
+        self.assertGreater(float(np.average(shallow["reached"], weights=shallow["n"])), 0.5)      # while ordinary shallow targets are
+
+    def test_an_item_in_that_state_now_gets_the_deep_bands_chance_not_a_shallow_one(self):
+        lst = self.res["list"].set_index("item_id")
+        r = lst.loc[1000]                                                              # its last cluster was day 42: inside the last 7 days of a 45-day table
+        self.assertGreaterEqual(r["steal_depth"], 0.5)
+        self.assertEqual(r["steal_depth_band"], "50%+")
+        c = self.res["calibration"]
+        want = c[(c["pool"] == r["price_tier"]) & (c["tier"] == "steal") & (c["depth"] == "50%+") & (c["H"] == 3)]
+        if len(want):
+            self.assertAlmostEqual(r["steal_p3d"], float(want["reached"].iloc[0]))
+            self.assertLess(r["steal_p3d"], 0.2)
+        else:
+            self.assertTrue(np.isnan(r["steal_p3d"]))                                  # or no chance at all, never somebody else's
+
+    def test_a_thin_cell_shows_no_chance_instead_of_a_shaky_one(self):
+        hl = market(days=40, noise=0.04, day_walk=0.02)
+        none = Tg.analyze_targets(hl, named_groups(), cfg=Tg.TargetConfig(min_cal_n=10 ** 6))
+        self.assertFalse(none["calibration"].empty)
+        self.assertTrue(none["list"][["good_p1d", "good_p3d", "great_p7d", "steal_p3d"]].isna().all().all())
+        some = Tg.analyze_targets(hl, named_groups(), cfg=Tg.TargetConfig(min_cal_n=1))
+        self.assertTrue(some["list"][["good_p1d", "good_p3d"]].notna().any().any())
+
+
 class TestExport(unittest.TestCase):
     """The four tables the Daily chain uploads for the front end's Buy targets tab."""
     @classmethod

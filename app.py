@@ -301,20 +301,27 @@ with tab_buy:
                                      help="Items are judged against items of a similar price, so each level has its own calibration.")
         group_opts = sorted(g for g in bt["group"].dropna().unique().tolist() if g) if "group" in bt.columns else []
         groups_sel = c3.multiselect("Item group", group_opts, key="buy_groups", help="Leave empty for all groups.")
+        show_extreme = st.checkbox("Include extreme discounts (target more than 50% under the median)", value=False, key="buy_extreme",
+                                   help="Left out by default. A price that far under an item's own week is usually a one-off listing or an item whose price swings between two levels. "
+                                        "Tick to see them anyway; each carries a note.")
         d1, d2, d3, d4 = st.columns(4)
         query = d1.text_input("Name or ID contains", key="buy_query")
         min_prob = d2.slider("At least this chance within 3 days (%)", 0, 100, 50, 5, key="buy_min_prob") / 100.0
         min_depth = d3.slider("At least this far under the median (%)", 0, 30, 3, 1, key="buy_min_depth") / 100.0
         min_units = d4.number_input("At least this many units near the floor", min_value=0, value=0, step=10, key="buy_min_units")
-        view = lib.buy_view(bt, tier=tier_key, price_tiers=price_tiers, groups=groups_sel, query=query, min_depth=min_depth, min_prob=min_prob, prob_days=3,
-                            min_units=float(min_units))
+        view_args = dict(tier=tier_key, price_tiers=price_tiers, groups=groups_sel, query=query, min_depth=min_depth, min_prob=min_prob, prob_days=3, min_units=float(min_units))
+        view = lib.buy_view(bt, max_depth=None if show_extreme else lib.BUY_EXTREME, **view_args)
+        hidden = 0 if show_extreme else len(lib.buy_view(bt, max_depth=None, **view_args)) - len(view)
         a1, a2, a3 = st.columns(3)
         a1.metric("Items on this list", f"{len(view):,}")
-        a2.metric("Gold you would save", lib.short_num(float(view["Worth (g)"].sum())) + "g" if len(view) else "0g",
-                  help="Units usually sitting near the floor at that price, times how far the target is under the 7-day median, summed over the list. "
-                       "It is what you save against paying the median, not a profit.")
+        a2.metric("Combined worth of the list", lib.short_num(float(view["Worth (g)"].sum())) + "g" if len(view) else "0g",
+                  help="Each item's Worth added up: units usually sitting near the floor at that price, times how far the target is under the 7-day median. It assumes you bought every "
+                       "item's whole usual pile, so read it as a size gauge, not a total you could realistically save. It is a saving against paying the median, not a profit.")
         rhythm = lib.buy_when_verdict(lib.buy_when_row(buy_when, "everything", tier_key))[1] == "rhythm"
         a3.metric("Best hours (US Eastern)", "see below" if rhythm else "no reliable hour", help="Whether some hours of the day reliably have more low prices. Details at the bottom of this tab.")
+        if hidden:
+            st.caption(f"{hidden:,} more item{'s' if hidden != 1 else ''} would pass these filters but {'has' if hidden == 1 else 'have'} a target more than 50% under {'its' if hidden == 1 else 'their'} median, "
+                       "so they are left out. Tick the box above to see them.")
         if view.empty:
             st.info("No item passes these filters. Loosen the chance or depth sliders.")
         else:

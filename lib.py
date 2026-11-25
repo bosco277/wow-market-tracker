@@ -594,7 +594,9 @@ def item_history_table(led: pd.DataFrame, item_id: int, limit: int = 90) -> pd.D
 
 # ---------------------------------------------------------------- Buy targets (what to look for when you scan the auction house)
 BUY_TIERS = {"good": "Good: the bottom 25% of its hours", "great": "Great: the bottom 10%", "steal": "Steal: the bottom 3% (about the lowest it touches in a week)"}
-BUY_DEPTH_ORDER = ["under 3%", "3-10%", "10-20%", "20%+"]
+BUY_DEPTH_ORDER = ["under 3%", "3-10%", "10-20%", "20-35%", "35-50%", "50%+"]
+BUY_VERY_DEEP = 0.35          # a target this far under the item's 7-day median gets a "check first" note
+BUY_EXTREME = 0.50            # and from here it is hidden unless asked for: such a price is usually a one-off listing or a price that swings between two levels (e.g. 11,695g median, 48g target)
 BUY_STALE_HOURS = 36           # the daily chain runs once a day; older than a day and a half means it missed a run
 
 
@@ -613,13 +615,25 @@ def buy_names(bt: pd.DataFrame, items: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def buy_note(depth: float) -> str:
+    """The 'check first' note for a very deep target (depth is a fraction of the 7-day median)."""
+    if depth != depth:
+        return ""
+    if depth >= BUY_EXTREME:
+        return "Extreme: over half under its median. Usually a one-off listing or a price that swings; confirm in game before relying on it"
+    if depth >= BUY_VERY_DEEP:
+        return "Very deep: unusual for this item; check in game first"
+    return ""
+
+
 def buy_view(t: pd.DataFrame, tier: str = "great", price_tiers=None, groups=None, query: str = "", min_depth: float = 0.0, min_prob: float = 0.0,
-             prob_days: int = 3, min_units: float = 0.0) -> pd.DataFrame:
+             prob_days: int = 3, min_units: float = 0.0, max_depth: Optional[float] = BUY_EXTREME) -> pd.DataFrame:
     """The shopping list for one kind of target (good / great / steal), filtered, best first. Depth and chances are fractions in the table, percents in the view.
     `Worth (g)` = the units usually near the floor at that price x (the 7-day median - the target): the gold saved against paying the median for those units.
-    An item with no calibrated chance (nothing graded at its depth yet) passes a chance filter of 0 and fails any higher one."""
+    An item with no calibrated chance (nothing graded at its depth yet) passes a chance filter of 0 and fails any higher one.
+    `max_depth`: targets deeper than this fraction under the median are left out (default BUY_EXTREME = 50%; None keeps everything). The `Note` column marks very deep and extreme targets."""
     cols = ["_id", "Item", "Group", "7-day median (g)", "Buy below (g)", "Depth under median (%)", "Chance in 1 day (%)", "Chance in 3 days (%)", "Chance in 7 days (%)",
-            "Units near floor (units)", "Worth (g)"]
+            "Units near floor (units)", "Worth (g)", "Note"]
     if t is None or t.empty:
         return pd.DataFrame(columns=cols)
     need = ["item_id", "med7_g", f"{tier}_g", f"{tier}_depth", f"{tier}_units"] + [f"{tier}_p{d}d" for d in (1, 3, 7)]
@@ -630,6 +644,8 @@ def buy_view(t: pd.DataFrame, tier: str = "great", price_tiers=None, groups=None
     name = v["name"].fillna("").astype(str) if "name" in v.columns else pd.Series([""] * len(v), index=v.index)
     group = v["group"].fillna("").astype(str) if "group" in v.columns else pd.Series([""] * len(v), index=v.index)
     keep = (v[f"{tier}_depth"].fillna(0.0) >= min_depth) & (v[f"{tier}_units"].fillna(0.0) >= min_units)
+    if max_depth is not None:
+        keep &= v[f"{tier}_depth"].fillna(0.0) < max_depth
     if min_prob > 0:
         keep &= v[f"{tier}_p{int(prob_days)}d"].fillna(-1.0) >= min_prob
     if price_tiers:
@@ -646,7 +662,7 @@ def buy_view(t: pd.DataFrame, tier: str = "great", price_tiers=None, groups=None
                         "Depth under median (%)": v[f"{tier}_depth"].to_numpy() * 100.0,
                         "Chance in 1 day (%)": v[f"{tier}_p1d"].to_numpy() * 100.0, "Chance in 3 days (%)": v[f"{tier}_p3d"].to_numpy() * 100.0,
                         "Chance in 7 days (%)": v[f"{tier}_p7d"].to_numpy() * 100.0, "Units near floor (units)": v[f"{tier}_units"].to_numpy(),
-                        "Worth (g)": v["worth"].to_numpy()})
+                        "Worth (g)": v["worth"].to_numpy(), "Note": [buy_note(d) for d in v[f"{tier}_depth"]]})
     return out.sort_values("Worth (g)", ascending=False).reset_index(drop=True)
 
 

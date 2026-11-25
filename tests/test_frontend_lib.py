@@ -428,6 +428,29 @@ class TestBuyTargets(unittest.TestCase):
         self.assertEqual(by.loc[3, "Item"], "item 3")                                     # a blank name falls back to the id
         self.assertTrue(v["Worth (g)"].is_monotonic_decreasing)
 
+    def test_extreme_targets_are_left_out_by_default_and_every_deep_one_has_a_note(self):
+        t = buy_targets_table()
+        t.loc[t["item_id"] == 3, ["great_depth", "great_g"]] = [0.99, 0.10]               # the Tavern Mug: a 99% discount
+        t.loc[t["item_id"] == 2, ["great_depth", "great_g"]] = [0.40, 60.0]               # very deep but not extreme
+        self.assertEqual(set(lib.buy_view(t, "great")["_id"]), {1, 2})                      # default: nothing at or over 50% under the median
+        self.assertEqual(set(lib.buy_view(t, "great", max_depth=None)["_id"]), {1, 2, 3})
+        self.assertEqual(set(lib.buy_view(t, "great", max_depth=0.45)["_id"]), {1, 2})
+        self.assertEqual(set(lib.buy_view(t, "great", max_depth=0.30)["_id"]), {1})
+        v = lib.buy_view(t, "great", max_depth=None).set_index("_id")
+        self.assertEqual(v.loc[1, "Note"], "")
+        self.assertIn("Very deep", v.loc[2, "Note"])
+        self.assertIn("Extreme", v.loc[3, "Note"])
+        self.assertEqual(lib.buy_note(0.3499), "")
+        self.assertIn("Very deep", lib.buy_note(0.35))
+        self.assertIn("Very deep", lib.buy_note(0.4999))
+        self.assertIn("Extreme", lib.buy_note(0.5))
+        self.assertEqual(lib.buy_note(float("nan")), "")
+
+    def test_the_cut_off_is_the_engines_top_band(self):
+        from engine import targets as Tg
+        self.assertEqual(lib.BUY_EXTREME, Tg.DEPTH_EDGES[-2])
+        self.assertEqual(lib.BUY_VERY_DEEP, Tg.DEPTH_EDGES[-3])
+
     def test_each_tier_reads_its_own_columns(self):
         t = buy_targets_table()
         for tier, g1 in (("good", 0.95), ("great", 0.90), ("steal", 0.80)):
@@ -505,7 +528,7 @@ class TestBuyCalibrationView(unittest.TestCase):
     def cal(self):
         rows = []
         for pool in ("everything", "cloth"):
-            for depth, base in (("under 3%", 0.95), ("3-10%", 0.7), ("20%+", 0.1)):
+            for depth, base in (("under 3%", 0.95), ("3-10%", 0.7), ("50%+", 0.1)):
                 for H in (1, 3, 7):
                     rows.append({"pool": pool, "tier": "great", "depth": depth, "H": H, "n": 100 + H, "reached": min(base + 0.02 * H, 1.0), "wait_med": 5.0 + H, "units_med": 40.0,
                                  "saving_med": 0.05, "depth_med": 0.05})
@@ -513,7 +536,7 @@ class TestBuyCalibrationView(unittest.TestCase):
 
     def test_rows_follow_depth_order_with_percent_numbers(self):
         v = lib.buy_calibration_view(self.cal(), "everything", "great")
-        self.assertEqual(list(v["Depth under median"]), ["under 3%", "3-10%", "20%+"])    # the shallow-to-deep order, bands with no data skipped
+        self.assertEqual(list(v["Depth under median"]), ["under 3%", "3-10%", "50%+"])    # the shallow-to-deep order, bands with no data skipped
         self.assertAlmostEqual(v["Reached in 1 day (%)"].iloc[0], 97.0)
         self.assertAlmostEqual(v["Reached in 7 days (%)"].iloc[1], 84.0)
         self.assertEqual(v["Item-days graded"].iloc[0], 107)

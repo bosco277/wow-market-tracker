@@ -209,6 +209,18 @@ class TestBuyTargetsTab(unittest.TestCase):
         self.assertTrue((shown["Buy below (g)"] < shown["7-day median (g)"]).all())     # a target is always under the median
         self.assertTrue(any("Reached in 3 days (%)" in d for d, k in st.seen))          # the calibration table
 
+    def test_an_extreme_discount_is_hidden_and_counted(self):
+        d = self.data()
+        d["buy_targets"] = d["buy_targets"].copy()
+        d["buy_targets"].loc[0, ["great_depth", "great_g"]] = [0.99, 0.01]               # one item with a 99% discount that passes every other filter
+        Any.calls.clear()
+        st = run_app(d, selected_row=None)
+        shown = next(x for x, k in st.seen if "Buy below (g)" in x)
+        self.assertTrue((shown["Depth under median (%)"] < 50.0).all())
+        self.assertIn("Note", shown.columns)
+        notes = [str(a[0]) for n, a, k in Any.calls if n == "caption" and a]
+        self.assertTrue(any("1 more item would pass these filters" in t for t in notes), notes)
+
     def test_clicking_a_row_opens_the_item_charts_only_when_the_item_has_a_market_row(self):
         first = run_app(self.data(), selected_row=None)
         shown = next(d for d, k in first.seen if "Buy below (g)" in d)

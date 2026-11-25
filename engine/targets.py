@@ -7,7 +7,7 @@ For gathering inventory (crafting inputs, stock you will use), not for reselling
 Setting a target proves nothing, so the engine CALIBRATES it the only honest way: at the start of every US Eastern day it sets the targets from the 7 days BEFORE that day, then checks
 whether any hourly snapshot of the next 1, 3 and 7 days was at or under the target, how many hours later the first one came, how many units were listed near the floor at that moment (u5),
 and how much cheaper that first hit was than the average price over the same window. Results are pooled by how deep the target sits under the item's 7-day median (under 3%, 3-10%,
-10-20%, 20%+) and by price tier, because "10% under the median" behaves alike across items while individual items have too little history.
+10-20%, 20-35%, 35-50%, 50%+) and by price tier, because "10% under the median" behaves alike across items while individual items have too little history.
 
 WHEN: for every hourly snapshot the engine asks whether the price was at or under that day's target, by US Eastern hour (only items whose target is at least 3% under their median, so a
 flat item cannot hit all day). The hit rate by hour is shown as a multiple of the average (1.0 = no pattern), and the best 3-hour window is learned on the first half of the days and
@@ -28,8 +28,8 @@ import pandas as pd
 from . import windows as W
 
 TIERS = {"good": 0.25, "great": 0.10, "steal": 0.03}
-DEPTH_EDGES = [0.0, 0.03, 0.10, 0.20, 10.0]
-DEPTH_NAMES = ["under 3%", "3-10%", "10-20%", "20%+"]
+DEPTH_EDGES = [0.0, 0.03, 0.10, 0.20, 0.35, 0.50, 10.0]     # the deep end is split finely: v0.7.40 had one open-ended 20%+ band, so a target 99% under the median borrowed the hit rate of one 21% under
+DEPTH_NAMES = ["under 3%", "3-10%", "10-20%", "20-35%", "35-50%", "50%+"]
 
 
 @dataclass
@@ -40,6 +40,7 @@ class TargetConfig:
     window_hours: int = 3               # length of the best-window test for the hit hours
     min_items: int = 3
     min_depth: float = 0.03             # the hit-hour test only counts items whose target is at least this far under their median
+    min_cal_n: int = 30                 # a calibrated chance needs at least this many graded item-days behind it; thinner cells show no chance rather than a shaky one
     min_pool_days: int = 8              # days needed before the halves of the hit-hour test mean anything
     weekday_days: int = 42              # days needed before the weekday split is shown
     tz: str = W.TZ
@@ -254,7 +255,7 @@ def current_targets(grid: Optional[dict], pools: pd.DataFrame, calib: pd.DataFra
                 near = np.where(Wp <= T[None, :], Wu, np.nan)
             tcols[name] = (T, np.nanmedian(near, axis=0))
     tier_of = pools[pools["pool"].str.startswith("price")].drop_duplicates("item_id").set_index("item_id")["pool"]
-    lookup = {(r.pool, r.tier, r.depth, r.H): r.reached for r in calib.itertuples()} if len(calib) else {}
+    lookup = {(r.pool, r.tier, r.depth, r.H): r.reached for r in calib.itertuples() if r.n >= cfg.min_cal_n} if len(calib) else {}
     rows = []
     for j in np.where(ok)[0]:
         iid = int(items[j])
