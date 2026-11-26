@@ -158,10 +158,14 @@ def build_hourly(snaps: Sequence[Snapshot], intervals: pd.DataFrame, ids: Iterab
     return h
 
 
-def daily_table(h: pd.DataFrame, tz: str = "America/New_York") -> pd.DataFrame:
-    """Collapse an hourly table (item_id, ts, floor_gold, units_listed, sold_est, spike, blip, flag_wipe, flag_long_gap) to one row per item per day."""
+def daily_table(h: pd.DataFrame, tz: str = "America/New_York", extra: Optional[dict] = None) -> pd.DataFrame:
+    """Collapse an hourly table (item_id, ts, floor_gold, units_listed, sold_est, spike, blip, flag_wipe, flag_long_gap) to one row per item per day.
+
+    extra: optional {output column: (hourly column, "median" | "min" | "max" | "mean")}. Each is taken over the same usable hours as the other columns and appended after COLUMNS (a missing hourly column gives NaN).
+    The default (None) changes nothing: the retail table keeps exactly COLUMNS."""
+    cols = COLUMNS + list(extra or {})
     if h is None or h.empty:
-        return pd.DataFrame(columns=COLUMNS)
+        return pd.DataFrame(columns=cols)
     s = h.copy()
     bad = np.zeros(len(s), dtype=bool)
     for c in ("spike", "blip", "flag_wipe", "flag_long_gap"):
@@ -175,16 +179,20 @@ def daily_table(h: pd.DataFrame, tz: str = "America/New_York") -> pd.DataFrame:
     s["sold"] = s["sold_est"].astype(float).clip(lower=0)
     use = s[ok]
     if use.empty:
-        return pd.DataFrame(columns=COLUMNS)
+        return pd.DataFrame(columns=cols)
     g = use.groupby(["item_id", "day"])
     d = pd.DataFrame({"hours": g.size(), "sold_day": g["sold"].mean() * 24.0, "price_day": g["floor_gold"].median(), "units_day": g["units_listed"].median()})
     d["flagged_hours"] = s.groupby(["item_id", "day"])["flagged"].sum().reindex(d.index).fillna(0).astype(int)
     for col, src in (("price_p15", "p15"), ("price_p30", "p30")):
         d[col] = g[src].median() if src in use.columns else np.nan
+    for col, (src, how) in (extra or {}).items():
+        if how not in ("median", "min", "max", "mean"):
+            raise ValueError(f"extra column {col!r}: how must be median, min, max or mean, not {how!r}")
+        d[col] = getattr(g[src], how)() if src in use.columns else np.nan
     d = d.reset_index()
     d["item_id"] = d["item_id"].astype(int)
     d["engine_version"] = __version__
-    return d[COLUMNS]
+    return d[COLUMNS + list(extra or {})]
 
 
 def merge_daily(old: Optional[pd.DataFrame], new: pd.DataFrame) -> pd.DataFrame:

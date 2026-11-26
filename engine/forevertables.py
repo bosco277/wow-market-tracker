@@ -455,13 +455,18 @@ def meta_bytes(meta: dict) -> bytes:
 #   structure run   the API lists 15 houses (110 to 125 without 122); 112, 115 and 118 hold no auctions; the `ruleset` field of a house record just repeats the ruleset asked for, so it says nothing about the house.
 #   price match     foreverwowcraft.com's eight US pages priced against every house's commodity book over 40 hours: each page lined up with exactly one house (scores 0.00 to 0.02; the PvE Alliance match
 #                   is "unclear" only because the Horde PvE house scores almost as well, but that house is taken by the Horde PvE page).
-#   listing test    house 110 is the player's Alliance house on the PvP ruleset (a Linen Cloth listing on Nov 13).
-#   neutral houses  not on the site; matched to a ruleset only by slot order (116, 117, 121, 125 fill the same slots as the faction houses) and by size. NOT verified.
+#   listing test    house 110 is the player's Alliance house on the PvP ruleset (a Linen Cloth listing on Nov 13). House 116 is the neutral house of the same ruleset: a Thick Leather listed on the
+#                   neutral auction house on Nov 25 (4:17 PM ET) was found in house 116 and nowhere else, as a commodity listing (auction id 217287921, quantity 1).
+#   neutral houses  not on the site; 117, 121 and 125 are matched to a ruleset only by slot order (they fill the same slots as the faction houses) and by size. NOT verified. 116 is confirmed (above).
 RULESET_INFO = {
     "pvp": dict(ruleset_id=1, id_basis="API: ruleset 1 = PvP"),
     "pve": dict(ruleset_id=2, id_basis="API: ruleset 2 = Normal"),
     "rp": dict(ruleset_id=3, id_basis="community post (Nov 12); not read from the API"),
     "rp pvp": dict(ruleset_id=15, id_basis="community post (Nov 12); not read from the API"),
+}
+LISTING_TESTS = {
+    110: "listing test (Nov 13) and price match (Nov 25, score 0.00)",
+    116: "listing test (Nov 25): a Thick Leather listed on the neutral auction house of the PvP ruleset was found in this house and no other, as a commodity listing",
 }
 SLOTS: Tuple[Tuple[str, int, int, int], ...] = (("pvp", 110, 113, 116), ("pve", 111, 114, 117), ("rp", 119, 120, 121), ("rp pvp", 123, 124, 125))
 EMPTY_HOUSES = (112, 115, 118)
@@ -477,10 +482,10 @@ def house_map() -> dict:
         info = RULESET_INFO[ruleset]
         for house, faction in ((a, "alliance"), (h, "horde"), (n, "neutral")):
             row = dict(region="us", ruleset=ruleset, **info, faction=faction)
-            if faction == "neutral":
+            if house in LISTING_TESTS:
+                row.update(confidence="confirmed", basis=LISTING_TESTS[house])
+            elif faction == "neutral":
                 row.update(confidence="assumed", basis="slot order and size only (neutral houses are not on foreverwowcraft.com); not verified")
-            elif house == 110:
-                row.update(confidence="confirmed", basis="listing test (Nov 13) and price match (Nov 25, score 0.00)")
             elif house == 111:
                 row.update(confidence="likely", basis=f"price match (Nov 25, score {MATCH_SCORE[house]:.2f}); the runner-up is the Horde PvE house, which another page claims")
             else:
@@ -491,7 +496,7 @@ def house_map() -> dict:
     return dict(
         as_of=AS_OF,
         notes=["House 122 is not listed by the API. The `ruleset` field in a house record repeats the ruleset in the URL and says nothing about the house.",
-               "Neutral rows (Blackwater) are the weakest: confidence 'assumed' means a guess from slot order and size until a listing test confirms it."],
+               "Neutral rows (Blackwater) are the weakest: 116 is confirmed by a listing test (Nov 25); 117, 121 and 125 are 'assumed', a guess from slot order and size until a listing test confirms them."],
         houses=dict(sorted(houses.items(), key=lambda kv: int(kv[0]))),
     )
 

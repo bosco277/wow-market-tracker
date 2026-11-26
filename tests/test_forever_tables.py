@@ -453,13 +453,15 @@ class TestHouseMap(unittest.TestCase):
         m = T.house_map()
         self.assertEqual(sorted(map(int, m["houses"])), [h for h in range(110, 126) if h != 122])
 
-    def test_factions_agree_with_the_fingerprint_module_and_neutral_rows_are_marked_assumed(self):
+    def test_factions_agree_with_the_fingerprint_module_and_the_unverified_neutral_rows_are_marked_assumed(self):
         m = T.house_map()["houses"]
         for fac, hs in HM.FACTION_HOUSES.items():
             for h in hs:
                 self.assertEqual(m[str(h)]["faction"], fac, h)
-        for h in (116, 117, 121, 125):
+        for h in (117, 121, 125):
             self.assertEqual((m[str(h)]["confidence"], m[str(h)]["faction"]), ("assumed", "neutral"))
+        self.assertEqual((m["116"]["confidence"], m["116"]["faction"]), ("confirmed", "neutral"))              # the Nov 25 Thick Leather listing
+        self.assertIn("Thick Leather", m["116"]["basis"])
         for h in (112, 115, 118):
             self.assertEqual((m[str(h)]["confidence"], m[str(h)]["ruleset"]), ("empty", None))
 

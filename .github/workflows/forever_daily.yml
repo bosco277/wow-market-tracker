@@ -1,0 +1,90 @@
+name: Forever daily tables
+
+# WoW Forever only. Boils the hourly commodity files down to ONE ROW PER AUCTION HOUSE, ITEM AND US EASTERN DAY (script: tools/forever_daily.py, logic: engine/foreverdaily.py):
+#   price_day, price_min, price_p15 / p30, buy20 / buy200 (average price per unit to buy 20 / 200), units_day, listings_day, gold_day, hours (usable hours), flagged_hours,
+#   and the sales columns sold_cert_day / sold_low_day / sold_day / sold_high_day, turnover_day, active_share (LOWER BOUNDS: a listing posted and sold inside one hour is in no snapshot)
+# Stored in the Forever dataset as one small file per day, all houses in it: daily/d_YYYY-MM-DD.csv.gz. A day is only written when its content changed.
+# With save = no (the default) it only REPORTS what it would store. With save = yes it writes the new and changed days in one commit.
+# It reads only the Forever dataset (no Blizzard calls). Commodity items only for now; the report counts how many recipes are fully priced, which shows the gap that regular auctions (gear) still leave.
+#
+# Days: how many UTC days of files to read (default 4). The first and last 12 hours of the files read are left out of every row, so a run completes the days before the newest ones and the next run finishes the rest;
+# 4 days also repairs up to two missed runs. To BACKFILL older days, run it again with an earlier end_date (in chunks of about 10 days).
+# houses: all (every house the fetcher stores, empty houses left out) or house numbers separated by commas, for example 110,116.
+# sales: yes (default) = fill the sales columns with the sales classifier (a few minutes for all houses); no = prices and depth only, sales columns blank.
+# rebuild: yes = new rows replace stored rows even where the stored row had more usable hours (use it after a change in how rows are computed, and when switching sales on or off).
+#
+# DAILY: the schedule below (13:47 UTC-5 / 14:47 UTC-4, so the previous US Eastern day is complete) is OFF until you set the repository variable FOREVER_DAILY_BUILD to yes
+# (Settings > Secrets and variables > Actions > Variables). A scheduled run saves (save = yes); delete the variable, or set it to anything else, to stop it. Manual runs are unaffected by the variable.
+# Nothing in the report names an account or a character (the dataset's name is blanked out).
+# Secrets used: HF_TOKEN (needs write access to the Forever dataset when save = yes; the same token the Forever fetcher uses).
+
+on:
+  schedule:
+    - cron: "47 18 * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "UTC days of files to read (4 also repairs up to 2 missed runs)"
+        default: "4"
+      end_date:
+        description: "Last UTC date to read, YYYY-MM-DD (blank = today); use an earlier date to backfill"
+        default: ""
+      houses:
+        description: "all, or house numbers separated by commas (for example 110,116)"
+        default: "all"
+      save:
+        description: "yes = store the days that are new or changed; no = report only"
+        default: "no"
+      sales:
+        description: "yes = fill the sales columns (lower bounds); no = prices and depth only, sales columns blank"
+        default: "yes"
+      rebuild:
+        description: "yes = new rows replace stored rows even where the stored row had more usable hours"
+        default: "no"
+
+concurrency:
+  group: forever-daily
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    if: ${{ github.event_name != 'schedule' || vars.FOREVER_DAILY_BUILD == 'yes' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pandas numpy pyarrow requests huggingface_hub
+
+      - name: Forever daily tables
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DAYS: ${{ inputs.days || '4' }}
+          END: ${{ inputs.end_date }}
+          HOUSES: ${{ inputs.houses || 'all' }}
+          SAVE: ${{ inputs.save || (github.event_name == 'schedule' && 'yes') || 'no' }}
+          SALES: ${{ inputs.sales || 'yes' }}
+          REBUILD: ${{ inputs.rebuild || 'no' }}
+        run: |
+          set -o pipefail
+          mkdir -p out
+          EXTRA=""
+          if [ "$SAVE" = "yes" ]; then EXTRA="--save"; fi
+          if [ "$SALES" = "no" ]; then EXTRA="$EXTRA --no-sales"; fi
+          if [ "$REBUILD" = "yes" ]; then EXTRA="$EXTRA --rebuild"; fi
+          if [ -n "$END" ]; then EXTRA="$EXTRA --end $END"; fi
+          python tools/forever_daily.py --days "$DAYS" --houses "$HOUSES" $EXTRA --out out | tee out_daily.txt
+          { echo '### forever daily'; echo '```'; head -c 900000 out_daily.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: forever-daily
+          path: out/forever_daily.txt
+          if-no-files-found: ignore
