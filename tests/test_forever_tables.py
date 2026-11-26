@@ -47,11 +47,11 @@ PROFS = {
 }
 RECIPES = {
     101: {"id": 101, "name": "Linen Bandage", "reagents": [{"reagent": {"id": 2000, "name": "Linen Cloth"}, "quantity": 1}], "crafted_item": {"id": 3000, "name": "Linen Bandage"}, "crafted_quantity": {"value": 1}},
-    102: {"id": 102, "name": "Heavy Linen Bandage", "reagents": [{"reagent": {"id": 2001, "name": "A"}, "quantity": 2}, {"reagent": {"id": 2002, "name": "B"}, "quantity": 1}],
+    102: {"id": 102, "name": "Heavy Linen Bandage", "rank": 2, "reagents": [{"reagent": {"id": 2001, "name": "A"}, "quantity": 2}, {"reagent": {"id": 2002, "name": "B"}, "quantity": 1}],
           "crafted_item": {"id": 3001, "name": "Heavy"}, "crafted_quantity": {"minimum": 1, "maximum": 2}},
     103: {"id": 103, "name": "Small Bag", "reagents": [{"item": {"id": 2003, "name": "C"}, "quantity": 3}], "crafted_item": {"id": 3002, "name": "Bag"}},
     201: {"id": 201, "name": "Sword", "reagents": [{"reagent": {"id": 2010, "name": "Mystery"}, "quantity": 1}], "crafted_item": {"id": 3000, "name": "Linen Bandage"}, "crafted_quantity": 1},
-    202: {"id": 202, "name": "Mail", "reagents": [{"reagent": {"id": 2005, "name": "E"}, "quantity": 4}, {"quantity": 1}], "crafted_item": {"id": 3001, "name": "Heavy"}},
+    202: {"id": 202, "name": "Mail", "rank": {"id": 1}, "reagents": [{"reagent": {"id": 2005, "name": "E"}, "quantity": 4}, {"quantity": 1}], "crafted_item": {"id": 3001, "name": "Heavy"}},
     301: {"id": 301, "name": "Enchant Bracer", "reagents": [{"reagent": {"id": 2006, "name": "F"}, "quantity": 1}]},
 }
 FOREVER_ITEMS = {2000: "Linen Cloth", 2001: "A", 2002: "B", 2003: "C", 3000: "Linen Bandage", 3001: "Heavy", 3002: "Bag"}
@@ -61,7 +61,8 @@ ERA_ITEMS = {2005: "E", 2006: "F"}
 class StaticApi:
     """A pretend Blizzard static-data API. `fail` = {exact path: [statuses to answer first, in order]}."""
 
-    def __init__(self, professions=None, recipes=None, items=None, fail=None):
+    def __init__(self, professions=None, recipes=None, items=None, fail=None, version="1.60.1_70399"):
+        self.version = version
         self.professions = PROFS if professions is None else professions
         self.recipes = RECIPES if recipes is None else recipes
         self.items = {"static-forever-us": FOREVER_ITEMS, "static-classic1x-us": ERA_ITEMS} if items is None else items
@@ -92,7 +93,10 @@ class StaticApi:
             return 200, {"id": int(m.group(2)), "name": t["name"], "categories": [{"name": c, "recipes": [{"id": r, "name": self.recipes[r]["name"]} for r in ids]} for c, ids in t["cats"].items()]}
         m = re.fullmatch(r"/data/wow/recipe/(\d+)", path)
         if m:
-            return (200, self.recipes[int(m.group(1))]) if int(m.group(1)) in self.recipes else (404, None)
+            rid = int(m.group(1))
+            if rid not in self.recipes:
+                return 404, None
+            return 200, {**self.recipes[rid], "_links": {"self": {"href": f"https://us.api.blizzard.com/data/wow/recipe/{rid}?namespace=static-{self.version}-forever-us"}}}
         m = re.fullmatch(r"/data/wow/item/(\d+)", path)
         if m:
             if ns not in self.items:
@@ -141,6 +145,22 @@ class TestParsing(Fast):
         self.assertIsNone(reag[0]["quantity"])
         with self.assertRaises(KeyError):
             T.parse_recipe({"name": "no id"})
+
+    def test_rank_forms_and_the_version_in_a_response_link(self):
+        self.assertEqual([T._rank(x) for x in (2, "3", {"id": 4}, {"value": 5}, None, True, "x", {})], [2, 3, 4, 5, None, None, None, None])
+        link = {"_links": {"self": {"href": "https://us.api.blizzard.com/data/wow/recipe/1353?namespace=static-1.60.1_70399-forever-us"}}}
+        self.assertEqual(T.static_version_from(link), "1.60.1_70399")
+        self.assertIsNone(T.static_version_from({"_links": {"self": {"href": "https://x?namespace=static-forever-us"}}}))
+        self.assertIsNone(T.static_version_from(None))
+        api = StaticApi(version="1.61.0_71000")
+        self.assertEqual(T.probe_version(api, 101, NOSLEEP), "1.61.0_71000")
+        self.assertIsNone(T.probe_version(StaticApi(fail={"/data/wow/recipe/101": [404]}), 101, NOSLEEP))
+
+    def test_placeholder_professions(self):
+        for n in ("Test Profession [DNT]", "test profession", "Foo [DNT]"):
+            self.assertTrue(T.is_test_profession(n), n)
+        for n in ("Tailoring", "First Aid", ""):
+            self.assertFalse(T.is_test_profession(n), n)
 
     def test_name_can_be_a_locale_dict(self):
         rec, _, _ = T.parse_recipe({"id": 7, "name": {"en_US": "Hello", "de_DE": "Hallo"}})
@@ -208,6 +228,56 @@ class TestCrawl(Fast):
         rec, reag, kept = T.keep_previous_for_failures(part, T.tidy(None, "recipes"), T.tidy(None, "reagents"))
         self.assertEqual(kept, 0)
         self.assertNotIn(102, set(rec["recipe_id"]))
+
+    def test_a_placeholder_profession_is_left_out_and_never_asked_about(self):
+        profs = {**PROFS, 2933: dict(name="Test Profession [DNT]", tiers={9: dict(name="Test", cats={"x": [901]})})}
+        recipes = {**RECIPES, 901: {"id": 901, "name": "Test Recipe", "reagents": []}}
+        api = StaticApi(professions=profs, recipes=recipes)
+        c = T.crawl_recipes(api, sleep=NOSLEEP)
+        self.assertEqual(c.excluded, ["Test Profession [DNT] (2933)"])
+        self.assertNotIn(901, set(c.recipes["recipe_id"]))
+        self.assertNotIn("/data/wow/profession/2933", api.paths("/data/wow/profession/"))
+        self.assertNotIn("/data/wow/recipe/901", api.paths("/data/wow/recipe/"))
+        self.assertEqual(len(c.professions), 3)
+
+    def test_ranks_and_the_version_come_out_of_the_crawl(self):
+        c, _ = self.crawl()
+        r = c.recipes.set_index("recipe_id")
+        self.assertEqual((r.loc[102, "rank"], r.loc[202, "rank"]), (2, 1))
+        self.assertTrue(pd.isna(r.loc[101, "rank"]))
+        self.assertEqual(c.version, "1.60.1_70399")
+        self.assertEqual((c.fetched, c.reused), (6, 0))
+        self.assertNotIn(".0", __import__("gzip").decompress(T.to_csv_gz(c.recipes)).decode())
+
+    def test_a_second_crawl_reads_the_lists_but_fetches_only_new_recipes(self):
+        first, _ = self.crawl()
+        api = StaticApi()
+        again = T.crawl_recipes(api, sleep=NOSLEEP, prev_recipes=first.recipes, prev_reagents=first.reagents, refetch=False)
+        self.assertEqual((again.fetched, again.reused, api.paths("/data/wow/recipe/")), (0, 6, []))
+        self.assertEqual(len(api.calls), 8)                                                               # index, 3 professions, 4 tiers
+        pd.testing.assert_frame_equal(again.recipes, first.recipes)
+        pd.testing.assert_frame_equal(again.reagents, first.reagents)
+        recipes = {**RECIPES, 104: {"id": 104, "name": "New", "reagents": [{"reagent": {"id": 2000, "name": "x"}, "quantity": 5}], "crafted_item": {"id": 3002, "name": "x"}}}
+        profs = {**PROFS, 197: dict(PROFS[197], tiers={2948: dict(name="Tailoring", cats={"Bandages": [101, 102, 104], "Bags": [103]})})}
+        api = StaticApi(professions=profs, recipes=recipes)
+        more = T.crawl_recipes(api, sleep=NOSLEEP, prev_recipes=first.recipes, prev_reagents=first.reagents, refetch=False)
+        self.assertEqual((more.fetched, more.reused, api.paths("/data/wow/recipe/")), (1, 6, ["/data/wow/recipe/104"]))
+        self.assertEqual(int(more.reagents[more.reagents["recipe_id"] == 104]["quantity"].iloc[0]), 5)
+
+    def test_a_recipe_that_moved_takes_its_new_tier_and_one_no_longer_listed_drops_out(self):
+        first, _ = self.crawl()
+        profs = {197: dict(name="Tailoring", tiers={2948: dict(name="Tailoring", cats={"Moved": [101, 102]})})}                # 103 and everything else is gone; 101 and 102 changed category
+        api = StaticApi(professions=profs)
+        again = T.crawl_recipes(api, sleep=NOSLEEP, prev_recipes=first.recipes, prev_reagents=first.reagents, refetch=False)
+        self.assertEqual(sorted(again.recipes["recipe_id"]), [101, 102])
+        self.assertEqual(set(again.recipes["category"]), {"Moved"})
+        self.assertEqual(sorted(set(again.reagents["recipe_id"])), [101, 102])
+
+    def test_refetch_reads_every_recipe_again(self):
+        first, _ = self.crawl()
+        api = StaticApi()
+        again = T.crawl_recipes(api, sleep=NOSLEEP, prev_recipes=first.recipes, prev_reagents=first.reagents, refetch=True)
+        self.assertEqual((again.fetched, again.reused, len(api.paths("/data/wow/recipe/"))), (6, 0, 6))
 
     def test_items_a_recipe_mentions_and_the_summary_table(self):
         c, _ = self.crawl()
@@ -302,6 +372,25 @@ class TestUpdateItems(Fast):
         self.assertEqual(st2["asked"], 1)                                                                  # asked again (and now nobody names it, so it is recorded)
         self.assertEqual(st2["unnamed"], 1)
 
+    def test_refresh_all_asks_every_wanted_id_again_and_a_changed_name_replaces_the_old_one(self):
+        first, _, _ = self.run_([2000, 2005, 2004])
+        api = StaticApi(items={"static-forever-us": {**FOREVER_ITEMS, 2000: "Renamed", 2005: "E again"}, "static-classic1x-us": ERA_ITEMS})
+        again, st, _ = self.run_([2000, 2005, 2004], first, api=api, refresh_all=True)
+        self.assertEqual((st["asked"], st["already_named"], st["kept_unnamed"]), (3, 0, 0))
+        row = again.set_index("item_id")
+        self.assertEqual((row.loc[2000, "name"], row.loc[2005, "name"], row.loc[2005, "source"]), ("Renamed", "E again", "forever"))
+        self.assertEqual(row.loc[2004, "source"], "none")
+        self.assertEqual(len(again), 3)
+
+    def test_refresh_all_keeps_an_old_row_when_the_lookup_gets_no_real_answer(self):
+        first, _, _ = self.run_([2000, 2005])
+        api = StaticApi(fail={"/data/wow/item/2000": [503] * 6, "/data/wow/item/2005": [503] * 3})              # Forever never answers for 2000 and 2005 this time
+        again, st, _ = self.run_([2000, 2005], first, api=api, refresh_all=True)
+        row = again.set_index("item_id")
+        self.assertEqual((row.loc[2000, "name"], row.loc[2000, "source"]), ("Linen Cloth", "forever"))
+        self.assertEqual((st["no_answer"], st["named_by"]), (1, {"classic_era": 1}))                           # 2000 got no answer from either source; 2005 was named by Classic Era again
+        self.assertEqual(len(again), 2)
+
     def test_ids_no_longer_wanted_keep_their_rows(self):
         first, _, _ = self.run_([2000, 2005])
         again, _, _ = self.run_([3000], first)
@@ -311,6 +400,52 @@ class TestUpdateItems(Fast):
         items, st, api = self.run_([])
         self.assertEqual((len(items), st["asked"], api.calls), (0, 0, []))
         self.assertEqual(list(items.columns), T.ITEM_COLUMNS)
+
+
+class TestRecheck(Fast):
+    TODAY = date(2026, 12, 2)
+
+    def table(self):
+        t, _ = T.update_items([2000, 2005, 2006, 2004], None, StaticApi(), date(2026, 11, 25), sleep=NOSLEEP)
+        return t
+
+    def test_classic_era_rows_that_forever_now_names_switch_over_and_nothing_else_changes(self):
+        first = self.table()
+        api = StaticApi(items={"static-forever-us": {**FOREVER_ITEMS, 2005: "E in Forever"}, "static-classic1x-us": ERA_ITEMS})
+        out, st = T.recheck_forever(first, api, self.TODAY, sleep=NOSLEEP)
+        self.assertEqual(st, {"checked": 2, "upgraded": 1})
+        row = out.set_index("item_id")
+        self.assertEqual((row.loc[2005, "source"], row.loc[2005, "name"], row.loc[2005, "checked_at"]), ("forever", "E in Forever", "2026-12-02"))
+        self.assertEqual((row.loc[2006, "source"], row.loc[2006, "checked_at"]), ("classic_era", "2026-11-25"))        # still only Classic Era knows it: untouched
+        self.assertEqual(row.loc[2004, "source"], "none")
+        self.assertEqual(row.loc[2000, "source"], "forever")
+        self.assertEqual(len(out), len(first))
+        self.assertEqual({u.split("namespace=")[1].split("&")[0] for u in api.calls}, {"static-forever-us"})          # Forever only
+
+    def test_a_subset_of_ids_limits_the_check_and_no_classic_rows_means_no_calls(self):
+        first = self.table()
+        api = StaticApi()
+        out, st = T.recheck_forever(first, api, self.TODAY, ids=[2006, 2000], sleep=NOSLEEP)
+        self.assertEqual((st["checked"], api.paths("/data/wow/item/")), (1, ["/data/wow/item/2006"]))
+        api = StaticApi()
+        out, st = T.recheck_forever(first[first["source"] != "classic_era"], api, self.TODAY, sleep=NOSLEEP)
+        self.assertEqual((st, api.calls), ({"checked": 0, "upgraded": 0}, []))
+
+    def test_forever_gives_no_answer_so_the_rows_stay_as_they_were(self):
+        first = self.table()
+        api = StaticApi(fail={"/data/wow/item/2005": [503] * 3, "/data/wow/item/2006": [503] * 3})
+        out, st = T.recheck_forever(first, api, self.TODAY, sleep=NOSLEEP)
+        self.assertEqual(st["upgraded"], 0)
+        pd.testing.assert_frame_equal(out, first)
+
+
+class TestMeta(unittest.TestCase):
+    def test_round_trip_and_junk(self):
+        m = {"schema": 2, "static_version": "1.60.1_70399", "forever_recheck": "2026-11-25"}
+        self.assertEqual(T.parse_meta(T.meta_bytes(m)), m)
+        self.assertEqual(T.meta_bytes(m), T.meta_bytes(dict(reversed(list(m.items())))))                       # key order does not change the bytes
+        for junk in (None, b"", b"not json", b"[1, 2]", b"\xff\xfe"):
+            self.assertEqual(T.parse_meta(junk), {})
 
 
 class TestHouseMap(unittest.TestCase):
@@ -345,7 +480,7 @@ class TestHouseMap(unittest.TestCase):
 
 
 def args(**kw):
-    d = dict(parts="all", save=False, retry_days=3, max_ids=30000, out="x")
+    d = dict(parts="all", save=False, retry_days=3, max_ids=30000, recheck_days=7, full=False, out="x")
     d.update(kw)
     return type("A", (), d)()
 
@@ -389,8 +524,8 @@ class TestWholeTool(Fast):
         self.assertEqual((r["code"], self.commits), (0, []))
         self.assertIn("report only (nothing is saved)", t)
         self.assertIn("Nothing stored yet: this is the first build.", t)
-        self.assertIn("3 professions, 6 recipes read, 7 reagent lines.", t)
-        self.assertIn("10 item ids on the auction houses (newest snapshot of each of 2 houses).", t)
+        self.assertIn("3 professions, 6 recipes listed (6 read from Blizzard, 0 reused from the stored table; all read because: first build), 7 reagent lines.", t)
+        self.assertIn("10 item ids on the auction houses (newest snapshot of every house that has data).", t)
         self.assertIn("10 item ids used or made by recipes (4 of them not on the auction houses)", t)         # 3000 to 3002 and 2010
         self.assertIn("Named by: forever 7, classic_era 2; nobody names 5.", t)
         self.assertIn("Now 9 of the 14 ids are named (64.3%)", t)
@@ -409,7 +544,7 @@ class TestWholeTool(Fast):
         self.assertEqual(len(self.commits), 1)
         files, msg = self.commits[0]
         self.assertEqual(sorted(files), sorted(T.KEYS.values()))
-        self.assertIn("Saved 4 file(s)", r["text"])
+        self.assertIn("Saved 5 file(s)", r["text"])
         self.assertNotIn(FV.hf_repo().split("/")[0], msg)
         rec = T.from_csv_gz(files[T.KEYS["recipes"]], "recipes")
         rea = T.from_csv_gz(files[T.KEYS["reagents"]], "reagents")
@@ -417,6 +552,10 @@ class TestWholeTool(Fast):
         self.assertEqual((len(rec), len(rea), len(itm)), (6, 7, 14))
         self.assertEqual(int((itm["source"] == "none").sum()), 5)
         self.assertEqual(json.loads(files[T.KEYS["house_map"]])["houses"]["110"]["confidence"], "confirmed")
+        self.assertEqual(json.loads(files[T.KEYS["meta"]]), {"forever_recheck": "2026-11-25", "schema": T.SCHEMA, "static_version": "1.60.1_70399"})
+        self.assertEqual(rec.set_index("recipe_id").loc[102, "rank"], 2)
+        self.assertEqual(rec.set_index("recipe_id").loc[202, "rank"], 1)
+        self.assertTrue(pd.isna(rec.set_index("recipe_id").loc[101, "rank"]))
 
     def test_a_second_run_finds_everything_unchanged_and_asks_nothing_about_items(self):
         self.go(save=True)
@@ -427,6 +566,75 @@ class TestWholeTool(Fast):
         self.assertIn("Asked 0 id(s) (9 already named, 5 unnamed and not due for another try).", r["text"])
         self.assertEqual(r["api"].paths("/data/wow/item/"), [])
         self.assertIn("Against the stored table: 0 new recipe(s), 0 no longer listed.", r["text"])
+        self.assertIn("(0 read from Blizzard, 6 reused from the stored table)", r["text"])
+        self.assertEqual(len(r["api"].calls), 9)                                                           # one version probe, the index, three professions, four tiers: no recipe, no item
+        self.assertEqual(r["api"].paths("/data/wow/recipe/"), ["/data/wow/recipe/201"])                     # the probe only
+        self.assertIn("Blizzard calls this run: 9.", r["text"])
+        self.assertIn("Static data version: 1.60.1_70399 (stored: 1.60.1_70399).", r["text"])
+        self.assertIn("Forever re-check of Classic-Era-named rows: not due (last done 2026-11-25; every 7 days).", r["text"])
+
+    def stored_meta(self):
+        with open(os.path.join(self.root, T.KEYS["meta"]), "rb") as f:
+            return T.parse_meta(f.read())
+
+    def set_meta(self, **kw):
+        write(self.root, T.KEYS["meta"], T.meta_bytes({**self.stored_meta(), **kw}))
+
+    def test_a_new_static_data_version_reads_everything_again_and_records_the_new_version(self):
+        self.go(save=True)
+        self.commits.clear()
+        api = StaticApi(version="1.61.0_71000", items={"static-forever-us": {**FOREVER_ITEMS, 2004: "Newly named"}, "static-classic1x-us": ERA_ITEMS})
+        r = self.go(api=api, save=True)
+        t = r["text"]
+        self.assertIn("Static data version: 1.61.0_71000 (stored: 1.60.1_70399) CHANGED: every recipe and item is read again.", t)
+        self.assertIn("(6 read from Blizzard, 0 reused from the stored table; all read because: data version changed)", t)
+        self.assertIn("Asked 14 id(s) (0 already named, 0 unnamed and not due for another try): all of them, data version changed.", t)
+        self.assertEqual(len(api.paths("/data/wow/recipe/")), 7)                                              # six recipes and the version probe
+        self.assertEqual(self.stored_meta()["static_version"], "1.61.0_71000")
+        self.assertEqual(self.stored_meta()["forever_recheck"], "2026-11-25")
+        with open(os.path.join(self.root, T.KEYS["items"]), "rb") as f:
+            itm = T.from_csv_gz(f.read(), "items").set_index("item_id")
+        self.assertEqual(itm.loc[2004, "name"], "Newly named")
+        self.assertNotIn("Forever re-check of", t)                                                            # a full read already asked Forever first
+
+    def test_tables_from_the_first_layout_read_the_recipes_in_full_once_and_do_a_forever_recheck(self):
+        self.go(save=True)
+        os.remove(os.path.join(self.root, T.KEYS["meta"]))                                                    # what v0.7.45 stored: no meta file
+        self.commits.clear()
+        api = StaticApi(items={"static-forever-us": {**FOREVER_ITEMS, 2005: "E in Forever"}, "static-classic1x-us": ERA_ITEMS})
+        r = self.go(api=api, save=True)
+        t = r["text"]
+        self.assertIn("(6 read from Blizzard, 0 reused from the stored table; all read because: the stored tables are from an older layout)", t)
+        self.assertIn("Forever re-check of 2 Classic-Era-named row(s) (last done: never): 1 are now named by Forever and were switched over.", t)
+        self.assertEqual(self.stored_meta(), {"forever_recheck": "2026-11-25", "schema": T.SCHEMA, "static_version": "1.60.1_70399"})
+        self.assertIn("Forever re-check of Classic-Era-named rows: not due", self.go(save=True)["text"])        # and now it is quiet again
+
+    def test_the_forever_recheck_comes_due_after_the_chosen_number_of_days(self):
+        self.go(save=True)
+        self.set_meta(forever_recheck="2026-11-20")                                                           # five days ago
+        r = self.go(save=True)
+        self.assertIn("not due (last done 2026-11-20; every 7 days)", r["text"])
+        r = self.go(save=True, recheck_days=5)
+        self.assertIn("Forever re-check of 2 Classic-Era-named row(s) (last done: 2026-11-20)", r["text"])
+        self.assertEqual(self.stored_meta()["forever_recheck"], "2026-11-25")
+
+    def test_full_reads_everything_again_without_a_version_change(self):
+        self.go(save=True)
+        api = StaticApi()
+        r = self.go(api=api, full=True)
+        self.assertIn("FULL refresh asked for", r["text"])
+        self.assertIn("all read because: full refresh asked for", r["text"])
+        self.assertEqual(len(api.paths("/data/wow/recipe/")), 7)                                              # six recipes and the version probe
+        self.assertIn("Asked 14 id(s)", r["text"])
+        self.assertIn("all of them, full refresh asked for", r["text"])
+
+    def test_a_blocked_recipe_save_does_not_move_the_stored_version_or_layout(self):
+        self.go(save=True)
+        os.remove(os.path.join(self.root, T.KEYS["meta"]))
+        fail = {f"/data/wow/recipe/{i}": [503] * 9 for i in (101, 102, 103, 201)}
+        self.go(api=StaticApi(fail=fail), save=True)
+        meta = self.stored_meta() if os.path.exists(os.path.join(self.root, T.KEYS["meta"])) else {}
+        self.assertNotIn("schema", meta)                                                                       # the recipes were not saved, so the layout is still the old one
 
     def test_a_changed_recipe_list_commits_only_what_changed(self):
         self.go(save=True)
@@ -437,6 +645,7 @@ class TestWholeTool(Fast):
         files, _ = self.commits[0]
         self.assertEqual(sorted(files), sorted([T.KEYS["recipes"], T.KEYS["reagents"]]))
         self.assertIn("1 new recipe(s), 0 no longer listed.", r["text"])
+        self.assertIn("(1 read from Blizzard, 6 reused from the stored table)", r["text"])
 
     def test_too_many_failed_recipe_lookups_block_saving_recipes_but_not_the_rest(self):
         fail = {f"/data/wow/recipe/{i}": [503] * 3 for i in (101, 102, 103, 201)}
@@ -568,16 +777,32 @@ class TestWorkflow(unittest.TestCase):
         with open(os.path.join(_root, path), encoding="utf-8") as f:
             return yaml.safe_load(f)
 
+    def test_the_daily_schedule_is_off_until_the_repository_variable_says_yes_and_a_scheduled_run_saves(self):
+        d = self.wf(".github/workflows/forever_tables.yml")
+        on = d.get("on") or d.get(True)
+        self.assertEqual(len(on["schedule"]), 1)
+        cron = on["schedule"][0]["cron"].split()
+        self.assertEqual(len(cron), 5)
+        self.assertNotIn(cron[0], ("0", "30", "22", "32"))                                                  # not on the hour, half hour, or at the minutes Blizzard and our fetcher use
+        job = d["jobs"]["tables"]
+        self.assertIn("FOREVER_TABLES_DAILY", job["if"])
+        self.assertIn("github.event_name != 'schedule'", job["if"])                                         # manual runs never depend on the variable
+        step = next(s for s in job["steps"] if s.get("name") == "Forever tables")
+        self.assertIn("schedule", step["env"]["SAVE"])
+        self.assertIn("'yes'", step["env"]["SAVE"])
+        self.assertIn("'no'", step["env"]["SAVE"])                                                           # a manual run with nothing chosen saves nothing
+        self.assertIn("--full", step["run"])
+
     def test_manual_only_wired_to_the_right_secrets_and_report_only_by_default(self):
         for path in (".github/workflows/forever_tables.yml", "tools/forever_tables.yml"):
             d = self.wf(path)
             on = d.get("on") or d.get(True)
-            self.assertEqual(set(on), {"workflow_dispatch"})
+            self.assertEqual(set(on), {"workflow_dispatch", "schedule"})
             inputs = on["workflow_dispatch"]["inputs"]
-            self.assertEqual(set(inputs), {"parts", "save", "retry_days"})
+            self.assertEqual(set(inputs), {"parts", "save", "retry_days", "full"})
             self.assertEqual((inputs["save"]["default"], inputs["parts"]["default"]), ("no", "all"))
             step = next(s for s in d["jobs"]["tables"]["steps"] if s.get("name") == "Forever tables")
-            self.assertEqual(set(step["env"]), {"HF_TOKEN", "BLIZZARD_CLIENT_ID", "BLIZZARD_CLIENT_SECRET", "PARTS", "SAVE", "RETRY_DAYS"})
+            self.assertEqual(set(step["env"]), {"HF_TOKEN", "BLIZZARD_CLIENT_ID", "BLIZZARD_CLIENT_SECRET", "PARTS", "SAVE", "RETRY_DAYS", "FULL"})
             for k in ("HF_TOKEN", "BLIZZARD_CLIENT_ID", "BLIZZARD_CLIENT_SECRET"):
                 self.assertIn(f"secrets.{k}", step["env"][k])
             self.assertIn('"$SAVE" = "yes"', step["run"])

@@ -3,6 +3,7 @@
     python tools/forever_tables.py                     # build everything and REPORT; saves nothing
     python tools/forever_tables.py --save              # the same, then store the tables that changed
     python tools/forever_tables.py --parts items       # one of: recipes, items, housemap (comma separated)
+    python tools/forever_tables.py --save --full       # read everything again (it also does this by itself when Blizzard's static-data version changes)
 
   recipes    every profession of Forever's static data -> its skill tiers -> their recipes -> each recipe (what it uses, what it makes). Forever only: Classic Era does not serve professions.
   items      a name and details for every item id on the auction houses (newest snapshot of every house) and in a recipe (reagents and products). Forever's own data first, Classic Era for the ids Forever does
@@ -10,7 +11,10 @@
   housemap   the house -> faction / ruleset table, with how sure we are of each row (written from evidence, not fetched).
 
 Stored in the dataset (gzip CSV; a table is only written when its content changed):
-    tables/forever_recipes.csv.gz  tables/forever_reagents.csv.gz  tables/forever_items.csv.gz  tables/forever_house_map.json
+    tables/forever_recipes.csv.gz  tables/forever_reagents.csv.gz  tables/forever_items.csv.gz  tables/forever_house_map.json  tables/forever_tables_meta.json (schema, static-data version, last re-check)
+
+Daily use (a normal run, same static-data version): the recipe lists (about 27 calls) plus only NEW recipes, only NEW item ids, ids nobody named after --retry-days, and once every --recheck-days a Forever-only
+re-check of the rows Classic Era named (those Forever now names switch to Forever). A new static-data version, or --full, reads everything again.
 
 Writes ONE plain-text report, out/forever_tables.txt (a .txt on purpose).
 Environment: BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET; HF_TOKEN (write access to the Forever dataset to save, read access otherwise); FOREVER_HF_REPO to name another dataset.
@@ -21,8 +25,9 @@ import io
 import json
 import os
 import sys
+import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -115,32 +120,58 @@ def run(args, get, store, now=None, base_reader=None, sleep=time.sleep, commit=h
     bad = [s for s in want if s not in T.PARTS]
     if bad:
         return dict(text=f"### forever tables\nUnknown part(s): {bad}. Use {T.PARTS}.", code=1)
-    out = ["### forever tables", f"run at {pd.Timestamp(now).strftime('%Y-%m-%d %H:%M')} UTC; parts: {', '.join(want)}; {'SAVE' if args.save else 'report only (nothing is saved)'}"]
+    lock, calls = threading.Lock(), [0]
+
+    def counted(url):
+        with lock:
+            calls[0] += 1
+        return get(url)
+
+    out = ["### forever tables", f"run at {pd.Timestamp(now).strftime('%Y-%m-%d %H:%M')} UTC; parts: {', '.join(want)}; {'SAVE' if args.save else 'report only (nothing is saved)'}"
+           + ("; FULL refresh asked for" if args.full else "")]
     code = 0
     files, info = {}, {}
-    stored = {k: read_key(store, T.KEYS[k]) for k in ("recipes", "reagents", "items", "house_map")}
+    stored = {k: read_key(store, T.KEYS[k]) for k in ("recipes", "reagents", "items", "house_map", "meta")}
     prev = {k: T.from_csv_gz(stored[k], k) for k in ("recipes", "reagents", "items")}
-    if any(stored[k] for k in stored):
+    meta = T.parse_meta(stored["meta"])
+    if any(stored[k] for k in ("recipes", "reagents", "items", "house_map")):
         out.append("Stored before this run: " + ", ".join(f"{k} {len(prev[k]):,} rows" for k in prev if stored[k]) + (", house map" if stored["house_map"] else "") + ".")
     else:
         out.append("Nothing stored yet: this is the first build.")
 
+    # does the static data carry a new version since the last run? (one call, read from a recipe we already hold)
+    old_version = meta.get("static_version")
+    schema_old = int(meta.get("schema") or 0) < T.SCHEMA
+    version_now, version_changed = None, False
+    if ("recipes" in want or "items" in want) and len(prev["recipes"]):
+        version_now = T.probe_version(counted, int(prev["recipes"]["recipe_id"].iloc[0]), sleep)
+        version_changed = bool(old_version and version_now and version_now != old_version)
+        out.append(f"Static data version: {version_now or 'could not be read'} (stored: {old_version or 'none'})" + (" CHANGED: every recipe and item is read again." if version_changed else "."))
+    full = bool(args.full) or version_changed
+
     recipes, reagents = prev["recipes"], prev["reagents"]
     crawl = None
+    recipes_saved = False
     if "recipes" in want:
         out += ["", "### 1 recipes (Forever's own data)"]
+        refetch = full or schema_old or len(prev["recipes"]) == 0
+        why = ("first build" if len(prev["recipes"]) == 0 else "data version changed" if version_changed else "full refresh asked for" if args.full else "the stored tables are from an older layout") if refetch else ""
         try:
-            crawl = T.crawl_recipes(get, sleep=sleep)
+            crawl = T.crawl_recipes(counted, sleep=sleep, prev_recipes=prev["recipes"], prev_reagents=prev["reagents"], refetch=refetch)
         except Exception as e:
             out.append(f"recipes: failed ({FV.scrub(e)})")
             code = 1
         if crawl is not None:
             recipes, reagents, kept = T.keep_previous_for_failures(crawl, prev["recipes"], prev["reagents"])
-            out.append(f"{len(crawl.professions)} professions, {len(crawl.recipes):,} recipes read, {len(crawl.reagents):,} reagent lines.")
+            out.append(f"{len(crawl.professions)} professions, {len(recipes):,} recipes listed ({crawl.fetched:,} read from Blizzard, {crawl.reused:,} reused from the stored table"
+                       + (f"; all read because: {why}" if refetch and why else "") + f"), {len(reagents):,} reagent lines.")
+            if crawl.excluded:
+                out.append("Left out as placeholders: " + ", ".join(crawl.excluded) + ".")
             out.append(T.recipe_summary(recipes, reagents))
             if len(crawl.professions):
                 out.append("Professions: " + ", ".join(f"{r.profession} ({r.skill_tiers} tier{'s' if r.skill_tiers != 1 else ''})" for r in crawl.professions.itertuples()))
-            out.append(f"Recipe keys in the answers: " + ", ".join(f"{k} {v:,}" for k, v in sorted(crawl.keys.items(), key=lambda kv: (-kv[1], kv[0]))))
+            if crawl.keys:
+                out.append("Recipe keys in the answers: " + ", ".join(f"{k} {v:,}" for k, v in sorted(crawl.keys.items(), key=lambda kv: (-kv[1], kv[0]))))
             if crawl.duplicates:
                 out.append(f"{crawl.duplicates:,} recipe id(s) were listed under more than one tier; the first listing was kept.")
             if crawl.bad_reagents:
@@ -162,10 +193,14 @@ def run(args, get, store, now=None, base_reader=None, sleep=time.sleep, commit=h
             else:
                 files[T.KEYS["recipes"]] = T.to_csv_gz(recipes)
                 files[T.KEYS["reagents"]] = T.to_csv_gz(reagents)
+                recipes_saved = True
             if len(prev["recipes"]):
                 have, now_ids = set(prev["recipes"]["recipe_id"].astype(int)), set(recipes["recipe_id"].astype(int))
                 out.append(f"Against the stored table: {len(now_ids - have):,} new recipe(s), {len(have - now_ids):,} no longer listed.")
+            version_now = version_now or crawl.version
     items = prev["items"]
+    items_saved = False
+    recheck_done = False
     if "items" in want:
         out += ["", "### 2 items (Forever first, Classic Era for the rest)"]
         try:
@@ -175,7 +210,7 @@ def run(args, get, store, now=None, base_reader=None, sleep=time.sleep, commit=h
                 ah_ids, value, _, notes = FP.newest_summary(store, houses, now, base_reader)
                 out += notes
                 ids |= set(ah_ids)
-                out.append(f"{len(ah_ids):,} item ids on the auction houses (newest snapshot of each of {len(houses)} houses).")
+                out.append(f"{len(ah_ids):,} item ids on the auction houses (newest snapshot of every house that has data).")
             else:
                 out.append("The lake could not be read (no sources file): no auction-house ids this run.")
             rids = T.recipe_item_ids(recipes, reagents)
@@ -185,10 +220,20 @@ def run(args, get, store, now=None, base_reader=None, sleep=time.sleep, commit=h
                 raise RuntimeError("no item ids to look up")
             if len(ids) > args.max_ids:
                 raise RuntimeError(f"{len(ids):,} ids is more than --max-ids {args.max_ids:,}")
-            items, st = T.update_items(ids, prev["items"], get, today, retry_days=args.retry_days, sleep=sleep)
-            out.append(f"Asked {st['asked']:,} id(s) ({st['already_named']:,} already named, {st['kept_unnamed']:,} unnamed and not due for another try).")
+            classic_before = {int(i) for i in prev["items"].loc[prev["items"]["source"] == "classic_era", "item_id"]}
+            items, st = T.update_items(ids, prev["items"], counted, today, retry_days=args.retry_days, sleep=sleep, refresh_all=full)
+            out.append(f"Asked {st['asked']:,} id(s) ({st['already_named']:,} already named, {st['kept_unnamed']:,} unnamed and not due for another try)" + (": all of them, " + ("data version changed" if version_changed else "full refresh asked for") if full else "") + ".")
             if st["asked"]:
                 out.append("Named by: " + (", ".join(f"{k} {v:,}" for k, v in st["named_by"].items()) or "none") + f"; nobody names {st['unnamed']:,}" + (f"; {st['no_answer']:,} got no answer and will be asked again" if st["no_answer"] else "") + ".")
+            if classic_before and not full:
+                last = meta.get("forever_recheck")
+                due = (not last) or str(last) <= (today - timedelta(days=args.recheck_days)).isoformat()
+                if due:
+                    items, rc = T.recheck_forever(items, counted, today, ids=classic_before, sleep=sleep)
+                    recheck_done = True
+                    out.append(f"Forever re-check of {rc['checked']:,} Classic-Era-named row(s) (last done: {last or 'never'}): {rc['upgraded']:,} are now named by Forever and were switched over.")
+                else:
+                    out.append(f"Forever re-check of Classic-Era-named rows: not due (last done {last}; every {args.recheck_days} days).")
             wanted = items[items["item_id"].astype(int).isin(ids)]
             named_all = wanted[wanted["source"] != "none"]
             out.append(f"Now {len(named_all):,} of the {len(ids):,} ids are named ({len(named_all) / len(ids):.1%}); by source: " + ", ".join(f"{k} {v:,}" for k, v in named_all["source"].value_counts().items()) + ".")
@@ -200,12 +245,22 @@ def run(args, get, store, now=None, base_reader=None, sleep=time.sleep, commit=h
                 out.append(f"Unnamed: {len(missing):,} ids holding {share:.1%} of the gold in play; in recipes: {len(in_recipes):,}" + (f" (e.g. {', '.join(map(str, in_recipes[:8]))})" if in_recipes else "") + ".")
                 out.append("Biggest unnamed ids (item id, gold in play): " + ", ".join(f"{int(i)} ({g:,.0f}g)" for i, g in v.head(8).items()))
             files[T.KEYS["items"]] = T.to_csv_gz(items)
+            items_saved = True
         except Exception as e:
             out.append(f"items: failed ({FV.scrub(e)})")
             code = 1
     if "recipes" in want or "items" in want:
         ok, total = usable_count(recipes, reagents, items)
         out += ["", f"Recipes a crafting tool can price today (reagents listed, product named, every item named): {ok:,} of {total:,}."] + readable_recipes(recipes, reagents, items)
+        new_meta = dict(meta)
+        if recipes_saved:
+            new_meta["schema"] = T.SCHEMA
+            if version_now:
+                new_meta["static_version"] = version_now
+        if items_saved and (recheck_done or full or len(prev["items"]) == 0):
+            new_meta["forever_recheck"] = today.isoformat()
+        if new_meta:
+            files[T.KEYS["meta"]] = T.meta_bytes(new_meta)
     if "housemap" in want:
         out += ["", "### 3 house map", "15 houses: " + ", ".join(f"{h} {r['faction'][:1].upper()}{r['faction'][1:]} {r.get('ruleset') or 'empty'} ({r['confidence']})" for h, r in T.house_map()["houses"].items())]
         files[T.KEYS["house_map"]] = T.house_map_bytes()
@@ -233,7 +288,8 @@ def run(args, get, store, now=None, base_reader=None, sleep=time.sleep, commit=h
         except Exception as e:
             out.append(f"SAVE FAILED: {FV.scrub(e)}")
             code = 1
-    return dict(text="\n".join(out), code=code, files=files, changed=changed)
+    out.append(f"Blizzard calls this run: {calls[0]:,}.")
+    return dict(text="\n".join(out), code=code, files=files, changed=changed, calls=calls[0])
 
 
 def main(argv=None):
@@ -242,6 +298,8 @@ def main(argv=None):
     ap.add_argument("--save", action="store_true", help="store the tables that are new or changed (default: report only)")
     ap.add_argument("--retry-days", type=int, default=3, dest="retry_days", help="ask again about an unnamed id after this many days (default 3)")
     ap.add_argument("--max-ids", type=int, default=30000, dest="max_ids", help="stop if more item ids than this are wanted (default 30000)")
+    ap.add_argument("--recheck-days", type=int, default=7, dest="recheck_days", help="ask Forever again about the Classic-Era-named items after this many days (default 7)")
+    ap.add_argument("--full", action="store_true", help="read every recipe and every item id again (also done by itself when the static-data version changes)")
     ap.add_argument("--out", default="out")
     args = ap.parse_args(argv)
     cid, sec, tok = os.environ.get("BLIZZARD_CLIENT_ID"), os.environ.get("BLIZZARD_CLIENT_SECRET"), os.environ.get("HF_TOKEN")

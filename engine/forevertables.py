@@ -9,6 +9,11 @@ Where the data comes from
 
 The item table only ever grows: a named id is never fetched again; an id nobody names is tried again after `retry_days` (Forever's static data may be filled in later); an id whose lookups got no answer at all
 (network trouble, 429, 5xx) is NOT recorded as unnamed, so the next run tries it again.
+Refreshing (v0.7.46): a small meta file remembers the schema, the static-data VERSION (Blizzard's static namespace carries one, e.g. `static-1.60.1_70399-forever-us`) and when Forever last re-checked the Classic-Era-named rows.
+  * Same version, normal run: the recipe LISTS are read (about 27 calls) and only new recipes are fetched; new and due-unnamed item ids are asked.
+  * Once a week (`recheck_days`): the Classic-Era-named rows are asked again of Forever only, and any that Forever now names become Forever rows.
+  * Version changed (a Forever patch) or `full`: every recipe and every item id is read again.
+  * Meta file missing or from an older schema: recipes are read in full once.
 Tables are stored as gzip CSV (small, readable by anything, and verifiable without extra libraries); integer columns keep their blanks (Int64) so ids never turn into 12345.0.
 """
 from __future__ import annotations
@@ -19,6 +24,7 @@ from dataclasses import dataclass, field
 import gzip
 import io
 import json
+import re
 import time
 from datetime import date, timedelta
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -32,7 +38,9 @@ from .groups import RateLimiter
 NAMESPACE = "static-forever-us"
 ITEM_SOURCES: Tuple[Tuple[str, str], ...] = FI.NAMESPACES[:2]          # forever, classic_era (retail and Classic are not asked: they named nothing)
 API = "https://us.api.blizzard.com"
+SCHEMA = 2                    # 1 = v0.7.45 tables (no rank column, no meta file); 2 = v0.7.46
 KEYS = {
+    "meta": "tables/forever_tables_meta.json",
     "items": "tables/forever_items.csv.gz",
     "recipes": "tables/forever_recipes.csv.gz",
     "reagents": "tables/forever_reagents.csv.gz",
@@ -40,12 +48,12 @@ KEYS = {
 }
 PARTS = ("recipes", "items", "housemap")
 
-RECIPE_COLUMNS = ["recipe_id", "recipe", "profession_id", "profession", "skill_tier_id", "skill_tier", "category", "crafted_item_id", "crafted_item", "crafted_qty_min", "crafted_qty_max", "n_reagents"]
+RECIPE_COLUMNS = ["recipe_id", "recipe", "profession_id", "profession", "skill_tier_id", "skill_tier", "category", "rank", "crafted_item_id", "crafted_item", "crafted_qty_min", "crafted_qty_max", "n_reagents"]
 REAGENT_COLUMNS = ["recipe_id", "reagent_item_id", "reagent", "quantity"]
 ITEM_COLUMNS = ["item_id", "name", "item_class_id", "item_class", "item_subclass_id", "item_subclass", "quality", "item_level", "required_level", "inventory_type", "is_stackable", "max_count",
                 "sell_price_copper", "purchase_price_copper", "source", "checked_at"]
 INT_COLUMNS = {
-    "recipes": ["recipe_id", "profession_id", "skill_tier_id", "crafted_item_id", "crafted_qty_min", "crafted_qty_max", "n_reagents"],
+    "recipes": ["recipe_id", "profession_id", "skill_tier_id", "rank", "crafted_item_id", "crafted_qty_min", "crafted_qty_max", "n_reagents"],
     "reagents": ["recipe_id", "reagent_item_id", "quantity"],
     "items": ["item_id", "item_class_id", "item_subclass_id", "item_level", "required_level", "max_count", "sell_price_copper", "purchase_price_copper"],
 }
@@ -140,6 +148,38 @@ def _name(x) -> str:
     return str(n) if n else ""
 
 
+def is_test_profession(name: str) -> bool:
+    """Blizzard's placeholder professions ("Test Profession [DNT]": do not translate / do not use) are not real crafting."""
+    n = str(name).lower()
+    return "[dnt]" in n or n.startswith("test profession")
+
+
+def _rank(x) -> Optional[int]:
+    if isinstance(x, dict):
+        x = x.get("id", x.get("value"))
+    if isinstance(x, bool) or x is None:
+        return None
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return None
+
+
+VERSION_RE = re.compile(r"namespace=static-([^&\"]+?)-forever-us")
+
+
+def static_version_from(js) -> Optional[str]:
+    """The static-data version a response was served from ("1.60.1_70399"), read from its own links; None when it names none."""
+    m = VERSION_RE.search(json.dumps(js, separators=(",", ":"))[:4000]) if isinstance(js, dict) else None
+    return m.group(1) if m else None
+
+
+def probe_version(get: Callable, recipe_id: int, sleep: Callable[[float], None] = time.sleep) -> Optional[str]:
+    """One call: the static-data version, read from a recipe we already hold. None when it cannot be read."""
+    code, js = fetch(get, f"/data/wow/recipe/{int(recipe_id)}", None, 2, sleep)
+    return static_version_from(js) if js else None
+
+
 def parse_tier(js: dict) -> List[Tuple[str, int, str]]:
     """[(category, recipe id, recipe name)] from a skill tier record: recipes sit under `categories` (the usual shape) or directly under `recipes`."""
     out: List[Tuple[str, int, str]] = []
@@ -188,7 +228,7 @@ def parse_recipe(js: dict) -> Tuple[dict, List[dict], int]:
             continue
         q = r.get("quantity")
         reagents.append(dict(recipe_id=rid, reagent_item_id=iid, reagent=_name(item), quantity=int(q) if isinstance(q, (int, float)) and not isinstance(q, bool) else None))
-    rec = dict(recipe_id=rid, recipe=_name(js), crafted_item_id=_id(ci), crafted_item=_name(ci), crafted_qty_min=lo, crafted_qty_max=hi, n_reagents=len(reagents))
+    rec = dict(recipe_id=rid, recipe=_name(js), rank=_rank(js.get("rank")), crafted_item_id=_id(ci), crafted_item=_name(ci), crafted_qty_min=lo, crafted_qty_max=hi, n_reagents=len(reagents))
     return rec, reagents, bad
 
 
@@ -203,11 +243,19 @@ class Crawl:
     duplicates: int = 0                                                     # recipe ids listed under more than one tier
     bad_reagents: int = 0
     notes: List[str] = field(default_factory=list)
+    version: Optional[str] = None                                           # static-data version seen in the answers
+    fetched: int = 0                                                        # recipes read from the API this time
+    reused: int = 0                                                         # recipes whose stored rows were kept
+    excluded: List[str] = field(default_factory=list)                       # placeholder professions left out
+    calls_listing: int = 0
 
 
-def crawl_recipes(get: Callable, workers: int = 8, per_second: float = 20.0, tries: int = 3, sleep: Callable[[float], None] = time.sleep, sample: int = 2) -> Crawl:
+def crawl_recipes(get: Callable, workers: int = 8, per_second: float = 20.0, tries: int = 3, sleep: Callable[[float], None] = time.sleep, sample: int = 2,
+                  prev_recipes: Optional[pd.DataFrame] = None, prev_reagents: Optional[pd.DataFrame] = None, refetch: bool = True) -> Crawl:
     """Everything the profession routes of Forever's static data say about recipes. Raises RuntimeError when the profession index itself cannot be read (nothing to build on);
-    a single profession, tier or recipe that cannot be read is listed in `failed` and the rest goes on."""
+    a single profession, tier or recipe that cannot be read is listed in `failed` and the rest goes on.
+    The recipe LISTS are always read (index, professions, tiers: about 27 calls). Unless `refetch`, a recipe already in the stored tables is not read again (its stored rows are reused, with its profession / tier /
+    category taken from the fresh lists); only new recipes are fetched. A recipe no longer listed drops out."""
     limiter = RateLimiter(per_second)
     code, js = fetch(get, "/data/wow/profession/index", limiter, tries, sleep)
     profs = [(_id(p), _name(p)) for p in ((js or {}).get("professions") or []) if _id(p) is not None]
@@ -217,10 +265,17 @@ def crawl_recipes(get: Callable, workers: int = 8, per_second: float = 20.0, tri
     listed: Dict[int, dict] = {}
     prof_rows = []
     for pid, pname in profs:
+        if is_test_profession(pname):
+            out.excluded.append(f"{pname} ({pid})")
+            continue
         code, pj = fetch(get, f"/data/wow/profession/{pid}", limiter, tries, sleep)
         if pj is None:
             out.failed.append(("profession", pid, code))
             continue
+        if is_test_profession(_name(pj)):
+            out.excluded.append(f"{_name(pj)} ({pid})")
+            continue
+        out.version = out.version or static_version_from(pj)
         tiers = [(_id(t), _name(t)) for t in (pj.get("skill_tiers") or []) if _id(t) is not None]
         ptype = _name(pj.get("type")) if isinstance(pj.get("type"), dict) else ""
         prof_rows.append(dict(profession_id=pid, profession=_name(pj) or pname, profession_type=ptype, skill_tiers=len(tiers)))
@@ -235,19 +290,34 @@ def crawl_recipes(get: Callable, workers: int = 8, per_second: float = 20.0, tri
                     continue
                 listed[rid] = dict(recipe_id=rid, recipe=rname, profession_id=pid, profession=_name(pj) or pname, skill_tier_id=tid, skill_tier=_name(tj) or tname, category=cat)
     out.professions = pd.DataFrame(prof_rows)
+    have = set()
+    if not refetch and prev_recipes is not None and len(prev_recipes):
+        have = set(prev_recipes["recipe_id"].dropna().astype(int))
 
     def one(rid: int):
         return rid, fetch(get, f"/data/wow/recipe/{rid}", limiter, tries, sleep)
 
+    todo = [rid for rid in sorted(listed) if rid not in have]
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        results = list(ex.map(one, sorted(listed)))
+        results = list(ex.map(one, todo))
     rec_rows, reag_rows = [], []
+    kept = sorted(set(listed) & have)
+    if kept:
+        old = prev_recipes[prev_recipes["recipe_id"].isin(kept)].drop_duplicates("recipe_id").set_index("recipe_id")
+        for rid in kept:
+            row = {**old.loc[rid].to_dict(), "recipe_id": rid, **{k: v for k, v in listed[rid].items() if k not in ("recipe",) or v}}
+            rec_rows.append(row)
+        if prev_reagents is not None and len(prev_reagents):
+            reag_rows.extend(prev_reagents[prev_reagents["recipe_id"].isin(kept)].to_dict("records"))
+        out.reused = len(kept)
+    out.fetched = len(todo)
     for rid, (code, rj) in results:
         base = listed[rid]
         if rj is None:
             out.failed.append(("recipe", rid, code))
             continue
         out.keys.update(rj.keys())
+        out.version = out.version or static_version_from(rj)
         if len(out.samples) < sample and rj.get("reagents"):
             out.samples.append(rj)
         try:
@@ -305,8 +375,9 @@ def recipe_summary(crawl_recipes_: pd.DataFrame, reagents: pd.DataFrame) -> str:
 
 # ------------------------------------------------------------------------------------------------------------ item master
 def update_items(ids: Iterable[int], previous: Optional[pd.DataFrame], get: Callable, today: date, retry_days: int = 3, workers: int = 8, per_second: float = 20.0,
-                 sleep: Callable[[float], None] = time.sleep) -> Tuple[pd.DataFrame, dict]:
-    """(new item table, stats). Only ids that are new, or were unnamed `retry_days` or more ago, are asked; named ids are never fetched again."""
+                 sleep: Callable[[float], None] = time.sleep, refresh_all: bool = False) -> Tuple[pd.DataFrame, dict]:
+    """(new item table, stats). Only ids that are new, or were unnamed `retry_days` or more ago, are asked; named ids are not fetched again, unless `refresh_all` (a new static-data version):
+    then every wanted id is asked again (Forever first, then Classic Era) and its row replaced; an id that gets no real answer keeps its old row."""
     prev = tidy(previous, "items")
     want = sorted({int(i) for i in ids})
     named = set(prev.loc[prev["source"] != "none", "item_id"].astype(int))
@@ -314,8 +385,8 @@ def update_items(ids: Iterable[int], previous: Optional[pd.DataFrame], get: Call
     seen = prev.set_index("item_id")
     stale = {int(i) for i in prev.loc[(prev["source"] == "none") & (prev["checked_at"] <= cutoff), "item_id"]}
     known = {int(i) for i in seen.index}
-    todo = [i for i in want if i not in named and (i not in known or i in stale)]
-    stats = dict(wanted=len(want), already_named=len([i for i in want if i in named]), asked=len(todo), named_by={}, unnamed=0, no_answer=0, kept_unnamed=len([i for i in want if i in known and i not in named and i not in stale]))
+    todo = [i for i in want if refresh_all or (i not in named and (i not in known or i in stale))]
+    stats = dict(wanted=len(want), already_named=0 if refresh_all else len([i for i in want if i in named]), asked=len(todo), named_by={}, unnamed=0, no_answer=0, kept_unnamed=0 if refresh_all else len([i for i in want if i in known and i not in named and i not in stale]))
     if not todo:
         return prev, stats
     items, att = FI.resolve_items(todo, get, namespaces=ITEM_SOURCES, workers=workers, per_second=per_second, sleep=sleep)
@@ -345,6 +416,38 @@ def update_items(ids: Iterable[int], previous: Optional[pd.DataFrame], get: Call
     if lost:
         new = pd.concat([new, prev[prev["item_id"].astype(int).isin(lost)]], ignore_index=True)
     return tidy(new, "items"), stats
+
+
+def recheck_forever(items: pd.DataFrame, get: Callable, today: date, ids: Optional[Iterable[int]] = None, workers: int = 8, per_second: float = 20.0,
+                    sleep: Callable[[float], None] = time.sleep) -> Tuple[pd.DataFrame, dict]:
+    """Rows named by Classic Era are asked of FOREVER only (`ids` limits which); a row Forever now names becomes a Forever row. Rows Forever still does not name, or could not answer for, are left exactly as they were."""
+    tab = tidy(items, "items")
+    classic = {int(i) for i in tab.loc[tab["source"] == "classic_era", "item_id"]}
+    todo = sorted(classic if ids is None else classic & {int(i) for i in ids})
+    stats = dict(checked=len(todo), upgraded=0)
+    if not todo:
+        return tab, stats
+    got, _ = FI.resolve_items(todo, get, namespaces=ITEM_SOURCES[:1], workers=workers, per_second=per_second, sleep=sleep)
+    if len(got) == 0:
+        return tab, stats
+    got = got.copy()
+    got["checked_at"] = today.isoformat()
+    stats["upgraded"] = len(got)
+    keep = tab[~tab["item_id"].astype(int).isin(set(got["item_id"].astype(int)))]
+    return tidy(pd.concat([keep, tidy(got, "items")], ignore_index=True), "items"), stats
+
+
+# ------------------------------------------------------------------------------------------------------------ meta
+def parse_meta(data: Optional[bytes]) -> dict:
+    try:
+        m = json.loads(data.decode("utf-8")) if data else {}
+    except (ValueError, UnicodeDecodeError, AttributeError):
+        return {}
+    return m if isinstance(m, dict) else {}
+
+
+def meta_bytes(meta: dict) -> bytes:
+    return (json.dumps(meta, indent=1, sort_keys=True) + "\n").encode("utf-8")
 
 
 # ------------------------------------------------------------------------------------------------------------ house map

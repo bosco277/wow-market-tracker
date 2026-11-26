@@ -6,10 +6,16 @@ name: Forever tables
 #   housemap  house -> faction / ruleset, with how sure we are of each row
 # With save = no (the default) it only REPORTS what it would store. With save = yes it writes the tables that are new or changed to the Forever dataset, in one commit:
 #   tables/forever_recipes.csv.gz, tables/forever_reagents.csv.gz, tables/forever_items.csv.gz, tables/forever_house_map.json
-# Later runs only ask about item ids that are new (or were unnamed and are due another try), so they are short. Nothing in the report names an account or a character (the dataset's name is blanked out).
+# Later runs are short: the recipe lists (about 27 calls) and only NEW recipes, only NEW item ids (plus unnamed ones after retry_days), and once a week a Forever-only re-check of the rows Classic Era named
+# (rows Forever now names switch over). A change of Blizzard's static-data version (a Forever patch), or full = yes, reads everything again.
+# DAILY: the schedule below is OFF until you set the repository variable FOREVER_TABLES_DAILY to yes (Settings > Secrets and variables > Actions > Variables). A scheduled run saves (save = yes); delete the
+# variable, or set it to anything else, to stop it. Manual runs are unaffected by the variable.
+# Nothing in the report names an account or a character (the dataset's name is blanked out).
 # Secrets used: BLIZZARD_CLIENT_ID, BLIZZARD_CLIENT_SECRET, HF_TOKEN (needs write access to the Forever dataset when save = yes; the same token the Forever fetcher uses).
 
 on:
+  schedule:
+    - cron: "47 9 * * *"
   workflow_dispatch:
     inputs:
       parts:
@@ -21,6 +27,9 @@ on:
       retry_days:
         description: "Ask again about an unnamed item id after this many days"
         default: "3"
+      full:
+        description: "yes = read every recipe and every item id again (done by itself when the static-data version changes)"
+        default: "no"
 
 concurrency:
   group: forever-tables
@@ -28,6 +37,7 @@ concurrency:
 
 jobs:
   tables:
+    if: ${{ github.event_name != 'schedule' || vars.FOREVER_TABLES_DAILY == 'yes' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -46,13 +56,15 @@ jobs:
           BLIZZARD_CLIENT_ID: ${{ secrets.BLIZZARD_CLIENT_ID }}
           BLIZZARD_CLIENT_SECRET: ${{ secrets.BLIZZARD_CLIENT_SECRET }}
           PARTS: ${{ inputs.parts || 'all' }}
-          SAVE: ${{ inputs.save || 'no' }}
+          SAVE: ${{ inputs.save || (github.event_name == 'schedule' && 'yes') || 'no' }}
           RETRY_DAYS: ${{ inputs.retry_days || '3' }}
+          FULL: ${{ inputs.full || 'no' }}
         run: |
           set -o pipefail
           mkdir -p out
           EXTRA=""
           if [ "$SAVE" = "yes" ]; then EXTRA="--save"; fi
+          if [ "$FULL" = "yes" ]; then EXTRA="$EXTRA --full"; fi
           python tools/forever_tables.py --parts "$PARTS" --retry-days "$RETRY_DAYS" $EXTRA --out out | tee out_tables.txt
           { echo '### forever tables'; echo '```'; head -c 900000 out_tables.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
