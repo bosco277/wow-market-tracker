@@ -933,11 +933,11 @@ Third `api_probe` log (Nov 3, 2026, afternoon ET): no change in what Blizzard se
   - Checked: tests on a pretend dataset (51), the whole suite, every price and depth value of an unflagged item-day recomputed by plain loops over the raw listings (64 values, 0 differences), and the certain sales per day recomputed the same way (8 item-days, 0 differences). A hand-made market bought down by exactly 10 units an hour gives exactly 240 certain sales a day and an active share of 1. NOT checked on real data until the first run: speed (one house at a time; unknown for about 12 houses over 4 days), file sizes, and whether the flags (calibrated on retail) behave on Forever.
   - House map: house 116 is now `confirmed` (the Nov 25 Thick Leather listing on the neutral house of the PvP ruleset was found in house 116 and nowhere else, as a commodity listing). 117, 121 and 125 stay `assumed`. The stored `tables/forever_house_map.json` changes, so the next Forever tables run stores it again.
   - Not built yet: the capture check (scale the sales lower bounds with the player's own sales and posting times), a floor-clearing indicator (the share of the cheapest listings gone by the next snapshot), the Retail / Forever switch in the app, buy-below prices on Forever, the derived hourly table, regular-auction (gear) daily rows, crafting-cost and profit tables, compaction.
-* v0.7.48: the app switched to WoW Forever ONLY, and buy200 fixed (Nov 27; first built as a Retail / Forever switch, then at the player's word at 10:23 AM ET
-  "There is no reason to use a toggle. The dashboard should just be 100% switched to Forever data" the switch and the retail page were removed before release).
-  - `app.py` is now a few lines: page setup, then `forever_page.render`. No retail table is read (a test checks that no parquet file is opened). The retail page and its tests
-    (Market, Buy targets, Flips, Forecasts, Experiment, Confidence tabs) are gone from the app; they are in the git history. `lib.py` (retail page helpers) is no longer used by the app.
-    The retail ENGINE, jobs and dataset are untouched. The chosen house is kept in the page address (`?house=110`).
+* v0.7.48: a separate WoW Forever page, then the app switched to it ONLY (Nov 27). A MISTAKE, undone in v0.7.49: the player asked for the app's DATA to change from retail to
+  Forever with every tab kept ("We were testing a front end on retail to build out the front end we would eventually use in Forever... I wanted the data changed from Retail to Forever,
+  but all of the functionality to stay the same"). v0.7.48 instead replaced app.py with a new, smaller Forever page and removed the Market, Buy targets, Flips, Forecasts,
+  Experiment and Confidence tabs. Nothing was lost (git history, and the v0.7.41 app.py is restored byte for byte in v0.7.49). What v0.7.48 left that is still good: the buy200 fix,
+  the corrected backfill text, and forever_page.py / forever_lib.py as an unused module whose readers and house helpers the port reuses.
   - Forever view (`forever_page.py`, helpers without Streamlit in `forever_lib.py`; all three files sit next to `lib.py` in the main folder). Reads ONLY the Forever dataset: the newest 60
     `daily/d_YYYY-MM-DD.csv.gz` files (listed with `HfApi.list_repo_tree(path_in_repo="daily")`, so the raw hourly folders are never listed), `tables/forever_items.csv.gz` (names, classes) and
     `tables/forever_house_map.json`. Secrets: HF_TOKEN must be able to READ the Forever dataset; optional FOREVER_HF_REPO. A failure shows one message with the dataset's name blanked out.
@@ -964,6 +964,13 @@ Third `api_probe` log (Nov 3, 2026, afternoon ET): no change in what Blizzard se
     is read, a house in the address is used, missing names and missing days are explained. NOT checked: how it looks in a real browser and the
     first load against the real dataset (Streamlit is not installed where the tests run, and the dataset cannot be reached from there).
   - Not built yet: buy-below prices on Forever, regular-auction (gear) rows, crafting margins, the capture check, live-listing sniping.
+* v0.7.49: the app restored (Nov 27, 11:08 AM ET). `app.py` and `tests/test_app_smoke.py` are the v0.7.41 files exactly (all six tabs, retail data, as before v0.7.48). forever_page.py and
+  forever_lib.py stay in the repo, NOT used by app.py; their tests run the page on its own (tests/test_forever_frontend.py). Lesson recorded: a change to what the app shows keeps every tab
+  unless the player says to remove one.
+  - Agreed direction (not built): PORT the app to Forever data with every tab kept. Each retail tab reads engine/*.parquet tables written by engine.derive (items, item_hourly, profile,
+    flips, calibration), the Daily chain (item_daily, hourly history, forecast_ledger, buy_targets, buy_calibration, buy_when, buy_meta) and the experiment. All of them take snapshots;
+    engine.forever.load_house gives one house's snapshots in that form. So: run the same jobs per Forever house into the Forever dataset (engine/h<house>/<table>.parquet), then point
+    the app at them with a house picker. Tab code stays; retail-only pieces (realm names, prices shown with 2 decimals) are adjusted.
 
 ### Planned, saved for later (NOT started): cross-market sniper (asked for by the user, Nov 25)
 * What: a front-end tab for Forever that finds listings on one auction house that could be bought and resold for more on another. A toggle picks the faction, "Alliance" or "Horde" (the user plays Alliance on the PvP ruleset; a Horde character on another ruleset is possible later), and the tab covers

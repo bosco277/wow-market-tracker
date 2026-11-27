@@ -1,4 +1,4 @@
-"""The WoW Forever app (app.py, forever_page.py, forever_lib.py; Forever only since v0.7.48).
+"""The WoW Forever page (forever_page.py, forever_lib.py). Not wired into app.py: kept as a module whose helpers the port of the app to Forever data reuses.
 
 Helpers on hand-made tables, then the whole page run against stand-ins for Streamlit and Plotly on a pretend Forever dataset folder whose day files are
 built by the real daily-table code (engine/foreverdaily.py) from simulated snapshots for houses 110, 113 (prices doubled) and 116 (prices x 1.5).
@@ -24,7 +24,41 @@ import forever_lib as F  # noqa: E402
 from engine import foreverdaily as FD  # noqa: E402
 from engine import forevertables as T  # noqa: E402
 from engine.simulator import MarketSimulator, default_profiles  # noqa: E402
-from test_app_smoke import Any, run_app  # noqa: E402
+from test_app_smoke import Any, fake_streamlit  # noqa: E402
+import types  # noqa: E402
+from unittest import mock  # noqa: E402
+
+
+def run_app(forever_dir=None, **kw):
+    """Runs forever_page.render on its own (it is not in app.py yet) against the stand-ins for Streamlit and Plotly."""
+    st = fake_streamlit(**kw)
+    st.query_params.pop("watch", None)
+
+    def stop():
+        raise SystemExit(0)
+    st.stop = stop
+    if forever_dir:
+        os.environ["FOREVER_LOCAL_DIR"] = forever_dir
+    px = types.ModuleType("plotly")
+    go = types.ModuleType("plotly.graph_objects")
+    for name in ("Figure", "Scatter", "Bar", "Heatmap"):
+        setattr(go, name, Any(name))
+    px.graph_objects = go
+    for m in ("forever_lib", "forever_page"):
+        sys.modules.pop(m, None)
+    try:
+        with mock.patch.dict(sys.modules, {"streamlit": st, "plotly": px, "plotly.graph_objects": go}):
+            try:
+                import forever_page
+                forever_page.render({"width": "stretch"})
+            except SystemExit:
+                pass
+    finally:
+        os.environ.pop("FOREVER_LOCAL_DIR", None)
+        for m in ("forever_lib", "forever_page"):
+            sys.modules.pop(m, None)
+        import forever_lib  # noqa: F401  (put the helpers back for the other tests)
+    return st
 
 HMAP = F.parse_house_map(T.house_map_bytes())
 
@@ -266,18 +300,18 @@ class TestForeverPage(unittest.TestCase):
         Any.calls.clear()
         st = run_app(forever_dir=self.root, selected_row=None)
         st2_params = {"house": "116"}
-        import test_app_smoke as S
-        orig = S.fake_streamlit
+        global fake_streamlit
+        orig = fake_streamlit
 
         def fake(**kw):
             s = orig(**kw)
             s.query_params.update(st2_params)
             return s
-        S.fake_streamlit = fake
+        fake_streamlit = fake
         try:
             st2 = run_app(forever_dir=self.root, selected_row=None)
         finally:
-            S.fake_streamlit = orig
+            fake_streamlit = orig
         m1 = next(d for d, k in st.seen if "Seen traded (g/day)" in d)
         m2 = next(d for d, k in st2.seen if "Seen traded (g/day)" in d)
         self.assertEqual(st2.query_params.get("house"), "116")
