@@ -762,11 +762,19 @@ class TestMain(unittest.TestCase):
                 s = self.seq.pop(0)
                 if s:
                     raise Err(s)
-        hub = type("Hub", (), {"HfApi": Api, "CommitOperationAdd": lambda path_in_repo, path_or_fileobj: type("Op", (), {"path_in_repo": path_in_repo})()})
+        uploaded = {}
+
+        def op(path_in_repo, path_or_fileobj):
+            self.assertIsInstance(path_or_fileobj, str)                         # a file on disk, so Hugging Face's Xet storage takes it (not an in-memory buffer)
+            with open(path_or_fileobj, "rb") as fh:
+                uploaded[path_in_repo] = fh.read()
+            return type("Op", (), {"path_in_repo": path_in_repo})()
+        hub = type("Hub", (), {"HfApi": Api, "CommitOperationAdd": op})
         sleeps = []
         with mock.patch.dict(sys.modules, {"huggingface_hub": hub}):
             FT.hf_commit({"a": b"1", "b": b"2"}, "m", sleep=sleeps.append)
             self.assertEqual((len(calls), sleeps), (3, [15, 30]))
+            self.assertEqual(uploaded, {"a": b"1", "b": b"2"})
             Api.seq = [403]
             calls.clear()
             with self.assertRaises(Err):

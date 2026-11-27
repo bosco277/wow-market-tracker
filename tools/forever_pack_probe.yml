@@ -1,0 +1,50 @@
+name: Forever pack probe
+
+# WoW Forever only. REPORT ONLY: stores nothing, deletes nothing (script: tools/forever_pack_probe.py, logic: engine/foreverpack.py).
+# Takes one UTC day of each chosen house's hourly commodity files (every column), packs it three ways (concat, sorted by auction id, listing ledger),
+# proves each is lossless (every hourly file rebuilt exactly, every auction id; the sales classifier gives identical sales), and prints the sizes and
+# what a year would come to. Used to choose the compaction format; nothing changes in the dataset.
+# Secrets used: HF_TOKEN (read only). Nothing in the report names an account or a character.
+
+on:
+  workflow_dispatch:
+    inputs:
+      day:
+        description: "UTC day to test, YYYY-MM-DD (blank = yesterday)"
+        default: ""
+      houses:
+        description: "house numbers separated by commas"
+        default: "110,116,121"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pandas numpy pyarrow requests huggingface_hub
+
+      - name: Forever pack probe
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DAY: ${{ inputs.day }}
+          HOUSES: ${{ inputs.houses || '110,116,121' }}
+        run: |
+          set -o pipefail
+          mkdir -p out
+          python tools/forever_pack_probe.py --day "$DAY" --houses "$HOUSES" --out out | tee out_probe.txt
+          { echo '### forever pack probe'; echo '```'; head -c 900000 out_probe.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: forever-pack-probe
+          path: out/forever_pack_probe.txt
+          if-no-files-found: ignore

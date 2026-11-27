@@ -86,9 +86,31 @@ class TestForeverDerive(DeriveFixture):
         self.assertIn(FDV.HOUSES_KEY, r["files"])
         self.assertIn("REPORT ONLY", r["text"])
 
-    def test_save_stores_one_commit_and_the_tables_match_each_house(self):
+    def test_save_stores_each_house_in_its_own_commit_then_the_houses_list(self):
+        r = self.go(save=True)
+        self.assertEqual(self.commits, ["forever derive: house 110", "forever derive: house 113", "forever derive: house 116", "forever derive: houses list"])
+        self.assertEqual(r["saved"], [110, 113, 116])
+
+    def test_an_upload_failure_loses_that_house_only_and_the_list_keeps_what_is_stored(self):
+        self.go(save=True)                                                      # every house stored once
+        self.commits.clear()
+        orig = self.commit
+
+        def flaky(files, message):
+            if message.endswith("house 113"):
+                raise RuntimeError("Error while uploading 'engine/h113/items.parquet' to the Hub.") from ConnectionError("connection reset by peer")
+            orig(files, message)
+        with mock.patch.object(self, "commit", flaky):
+            r = FDV.run(SimpleNamespace(hours=96.0, houses="all", save=True), self.store, now=NOW, base_reader=base_reader, commit=self.commit)
+        self.assertEqual(r["code"], 1)
+        self.assertEqual(r["saved"], [110, 116])
+        self.assertIn("house 113: UPLOAD FAILED", r["text"])
+        self.assertIn("connection reset by peer", r["text"])                    # the cause is shown, not only the Hub's short message
+        with open(os.path.join(self.root, FDV.HOUSES_KEY), encoding="utf-8") as f:
+            self.assertEqual(sorted(json.load(f)["built"]), ["110", "113", "116"])   # 113's earlier tables are still stored, so it stays in the app
+
+    def test_the_tables_match_each_house(self):
         self.go(save=True)
-        self.assertEqual(len(self.commits), 1)
         a, b = self.table(110, "items").set_index("item_id"), self.table(113, "items").set_index("item_id")
         common = a.index.intersection(b.index)
         self.assertGreater(len(common), 0)

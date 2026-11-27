@@ -54,17 +54,27 @@ def read_key(store, key):
 def hf_commit(files, message, sleep=time.sleep):
     """Writes several files in one commit; transient Hugging Face trouble is retried (15s, 30s, 60s, 120s), a wrong token or missing permission is raised at once."""
     from huggingface_hub import CommitOperationAdd, HfApi
+    import tempfile
     api = HfApi(token=os.environ.get("HF_TOKEN"))
-    for i in range(COMMIT_TRIES):
-        ops = [CommitOperationAdd(path_in_repo=k, path_or_fileobj=io.BytesIO(v)) for k, v in files.items()]
-        try:
-            api.create_commit(repo_id=FV.hf_repo(), repo_type="dataset", operations=ops, commit_message=message)
-            return
-        except Exception as e:
-            code = getattr(getattr(e, "response", None), "status_code", None)
-            if i == COMMIT_TRIES - 1 or not (code is None or code >= 500 or code == 429):
-                raise
-            sleep(15 * 2 ** i)
+    # v0.7.51: files are written to a temporary folder and uploaded from there. Hugging Face's Xet storage does not take in-memory buffers ("Uploading files
+    # as a binary IO buffer is not supported by Xet Storage. Falling back to HTTP upload."), and the HTTP fallback failed on a 97-file derive commit.
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = {}
+        for n, (k, v) in enumerate(files.items()):
+            p = os.path.join(tmp, f"{n:05d}_{os.path.basename(k)}")
+            with open(p, "wb") as fh:
+                fh.write(v)
+            paths[k] = p
+        for i in range(COMMIT_TRIES):
+            ops = [CommitOperationAdd(path_in_repo=k, path_or_fileobj=paths[k]) for k in files]
+            try:
+                api.create_commit(repo_id=FV.hf_repo(), repo_type="dataset", operations=ops, commit_message=message)
+                return
+            except Exception as e:
+                code = getattr(getattr(e, "response", None), "status_code", None)
+                if i == COMMIT_TRIES - 1 or not (code is None or code >= 500 or code == 429):
+                    raise
+                sleep(15 * 2 ** i)
 
 
 # ------------------------------------------------------------------------------------------------------------ report pieces

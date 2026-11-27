@@ -993,6 +993,25 @@ Third `api_probe` log (Nov 3, 2026, afternoon ET): no change in what Blizzard se
     does not stop the others, neutral shelves at 15%); House flips and picker unit tests on hand-made numbers; app tests (address picks the folder and ruleset, defaults, House flips
     numbers worked by hand, footnote, neutral house message, no Experiment tab); END TO END: the derive job's real output read by the app with no error, and on the Horde house House flips
     finds neutral items at 15%+ margin. NOT checked: real data (speed of a 12-house run, how many items pass the Forever cut-offs, the cuts themselves in game).
+* v0.7.51: measuring before compacting (Nov 27, agreed 1:36 PM ET: "yes let's launch that"). REPORT ONLY; nothing is stored or deleted.
+  - First real derive run (Nov 27, report only): 12 houses, 23 minutes, 97 files / 18 MB. The app's schedule is ONCE A DAY, started by a separate Cloudflare Worker
+    (cron 40 12 * * * = 7:40 AM ET in winter; dispatch with inputs save = yes); FOREVER_DERIVE_BUILD stays unset so the workflow's own schedule never fires.
+  - FIRST SAVE FAILED (Nov 27, 32 min): "Uploading files as a binary IO buffer is not supported by Xet Storage. Falling back to HTTP upload", then five tries of the 97-file
+    commit (96, 78, 72, 62, 56 files left) and "Error while uploading 'engine/h117/calibration_history.parquet' to the Hub". Fixes: (1) `forever_tables.hf_commit` (shared by the
+    tables, daily and derive jobs) writes the files to a temporary folder and uploads from paths, so Xet storage is used; (2) derive stores each house in its own commit as soon as it
+    is built, then engine/houses.json, which lists the houses stored now plus those stored earlier (one failed upload no longer drops a house from the app or loses the run);
+    (3) errors show their cause chain (the Hub's own message hid it). The hourly fetcher's upload is unchanged (small files, working).
+  - Derive report now splits each house's time into "load s" (downloading and reading the hourly files) and "calc s" (the derive itself). Compaction can only cut the first.
+  - Pack probe (`engine/foreverpack.py`, `tools/forever_pack_probe.py`, workflow "Forever pack probe"): one UTC day of chosen houses' hourly commodity files with EVERY column (the
+    loader reads only the columns it needs; the probe reads all), packed three ways: concat (retail compaction), sorted by auction id, listing ledger (one row per run of unchanged
+    values in consecutive files; per-file columns once per file; original column types kept). Lossless = (1) every hourly file rebuilt equals the original in every row and column, every
+    auction id (row order inside a file is not kept: it carries no information), AND (2) the sales classifier on the rebuilt day gives the same per-item, per-hour sales. (1) is the
+    strict test: a test shows one missing listing-hour can leave the day's sales totals unchanged, so (2) alone would not catch it. Prints sizes (parquet zstd) and a year for 12 houses.
+  - Agreed order after the probe: the player picks the format from its numbers; copy-only compaction (one packed file per house per completed day, round trip re-checked every run,
+    NO hourly file deleted); derive and the daily tables read packed days plus today's hourly files; derive's schedule set from the measured speed (possibly hourly; the player's idea);
+    a light hourly latest-listings job for House flips; deleting hourly files only later, by the player's decision, after clean round trips and a safety margin.
+  - Pretend data (one day, one house, 25 files): ledger 16% of the stored rows, 4.3x smaller than stored; concat and sorted no smaller there because the pretend files are pickles,
+    not parquet. Real sizes come from the probe.
 
 ### Planned, saved for later (NOT started): cross-market sniper (asked for by the user, Nov 25)
 * What: a front-end tab for Forever that finds listings on one auction house that could be bought and resold for more on another. A toggle picks the faction, "Alliance" or "Horde" (the user plays Alliance on the PvP ruleset; a Horde character on another ruleset is possible later), and the tab covers

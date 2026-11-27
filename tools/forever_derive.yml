@@ -3,7 +3,7 @@ name: Forever derive
 # WoW Forever only. Builds the tables the app reads, one set per auction house (script: tools/forever_derive.py, logic: engine/derive.py, the same derive the app was built on):
 #   items (latest price, typical band, sales per day low / best / high, confidence), item_hourly (the hourly charts), profile (hour of day), flips, shelves,
 #   calibration and its history, and book_now (the latest order book by price level, for the House flips tab).
-# Stored in the Forever dataset under engine/h<house>/ (for example engine/h110/items.parquet), plus engine/houses.json, in one commit.
+# Stored in the Forever dataset under engine/h<house>/ (for example engine/h110/items.parquet), one commit per house as it is built, then engine/houses.json.
 # With save = no (the default) it only REPORTS. With save = yes it stores the tables. It reads only the Forever dataset (no Blizzard calls) and never deletes anything.
 # hours: how many hours of snapshots per house (default 96; sales rates use the last 72).
 # houses: all (every house the fetcher stores, empty houses left out) or house numbers separated by commas, for example 110,113,116.

@@ -9,7 +9,7 @@ the latest order book by price level (book_now, for the House flips tab). Stored
     engine/h<house>/items.parquet, item_hourly.parquet, profile.parquet, flips.parquet, shelves.parquet, calibration.parquet,
                     calibration_history.parquet (this run appended), book_now.parquet
     engine/houses.json   which houses were built, when, and their labels (ruleset, faction, confirmed or not) from engine/forevertables.py
-All in one commit. It reads only the Forever dataset (HF_TOKEN; no Blizzard calls) and never deletes anything.
+One commit per house as it is built, then the houses list (v0.7.51: an upload failure loses that house only). It reads only the Forever dataset (HF_TOKEN; no Blizzard calls) and never deletes anything.
 Sales figures are LOWER BOUNDS: a listing posted and sold inside one hour is in no snapshot.
 """
 import argparse
@@ -102,6 +102,16 @@ def item_names(store) -> dict:
         return {}
 
 
+def cause(e) -> str:
+    """The error and what caused it (the Hub's own message is often only 'Error while uploading ...'), with the dataset's name blanked out."""
+    parts, seen = [], set()
+    while e is not None and id(e) not in seen and len(parts) < 4:
+        seen.add(id(e))
+        parts.append(f"{type(e).__name__}: {e}")
+        e = e.__cause__ or e.__context__
+    return FV.scrub(" <- ".join(parts))[:600]
+
+
 def et(ts) -> str:
     return pd.Timestamp(ts).tz_localize("UTC").tz_convert("America/New_York").strftime("%m-%d %H:%M") if pd.Timestamp(ts).tzinfo is None else \
         pd.Timestamp(ts).tz_convert("America/New_York").strftime("%m-%d %H:%M")
@@ -136,12 +146,13 @@ def run(args, store, now=None, base_reader=None, commit=FT.hf_commit):
     out(f"Item names: {len(names):,} known" + ("" if names else " (run the Forever tables workflow to store them)") + ".")
     out("")
     out("### 1 houses")
-    out(f"  {'house':>5} {'snapshots':>9}  {'first (ET)':<11} {'last (ET)':<11} {'items':>6} {'High':>5} {'Med':>5} {'Low':>5} {'flips':>6} {'shelves':>7} {'book items':>10} {'secs':>5}")
-    files, built, failed = {}, {}, []
+    out(f"  {'house':>5} {'snapshots':>9}  {'first (ET)':<11} {'last (ET)':<11} {'items':>6} {'High':>5} {'Med':>5} {'Low':>5} {'flips':>6} {'shelves':>7} {'book items':>10} {'load s':>6} {'calc s':>6}")
+    files, built, failed, saved, upload_failed = {}, {}, [], {}, []
     for h in houses:
         t0 = time.time()
         try:
             hd = FV.load_house(store, h, start, end, kinds=("commodity",), on_error="skip", base_reader=base_reader)
+            t_load = time.time() - t0
             snaps = [s for s in hd.commodity.snapshots]
             if snaps:
                 last_ts = snaps[-1].ts
@@ -151,37 +162,65 @@ def run(args, store, now=None, base_reader=None, commit=FT.hf_commit):
                 code = 1
                 continue
             cut = AH_CUTS.get((labels.get(str(h)) or {}).get("faction"), AH_CUTS["alliance"])
+            t1 = time.time()
             res = derive(snaps, replace(cfg, shelf=replace(cfg.shelf, ah_cut=cut)), names=names)
             res["book_now"] = book_now(snaps[-1])
             res["calibration_history"] = append_history(from_bytes(FT.read_key(store, key_for(h, "calibration_history"))), res["calibration"])
             it, cal = res["items"], res["calibration"].iloc[0]
             out(f"  {h:>5} {len(snaps):>9}  {et(snaps[0].ts):<11} {et(snaps[-1].ts):<11} {len(it):>6} {int(cal.get('n_high', 0)):>5} {int(cal.get('n_medium', 0)):>5} "
-                f"{int(cal.get('n_low', 0)):>5} {len(res['flips']):>6} {len(res['shelves']):>7} {res['book_now']['item_id'].nunique():>10} {time.time() - t0:>5.0f}")
+                f"{int(cal.get('n_low', 0)):>5} {len(res['flips']):>6} {len(res['shelves']):>7} {res['book_now']['item_id'].nunique():>10} {t_load:>6.0f} {time.time() - t1:>6.0f}")
+            mine = {}
             for k in TABLES:
                 df = res.get(k)
                 if df is not None and len(df):
-                    files[key_for(h, k)] = to_bytes(df)
+                    mine[key_for(h, k)] = to_bytes(df)
+            files.update(mine)
             built[h] = str(pd.Timestamp(snaps[-1].ts))
+            if save:                                 # each house is stored as soon as it is built: an upload failure loses that house only
+                try:
+                    commit(mine, f"forever derive: house {h}")
+                    saved[h] = built[h]
+                except Exception as e:
+                    upload_failed.append(h)
+                    code = 1
+                    out(f"        house {h}: UPLOAD FAILED (the other houses are not affected): {cause(e)}")
             if hd.commodity.result.skipped:
                 out(f"        {len(hd.commodity.result.skipped)} file(s) skipped (unreadable)")
             del snaps, hd, res
         except Exception as e:                       # one house failing must not stop the others
             failed.append(h)
             code = 1
-            out(f"  {h:>5} FAILED: {FV.scrub(e)}")
-    if built:
-        files[HOUSES_KEY] = json.dumps(dict(engine_version=ENGINE_VERSION, built=built, labels=house_labels(built), as_of=now.strftime("%Y-%m-%d %H:%M UTC")),
-                                       indent=1, sort_keys=True).encode("utf-8")
+            out(f"  {h:>5} FAILED: {cause(e)}")
+    # houses.json lists every house with stored tables: the ones stored now, plus earlier ones (kept as they were), so one failed house does not vanish from the app
+    listed = dict(saved) if save else dict(built)
+    if save:
+        try:
+            old = json.loads((FT.read_key(store, HOUSES_KEY) or b"{}").decode("utf-8")).get("built") or {}
+            for k, v in old.items():
+                listed.setdefault(int(k), v)
+        except Exception:
+            pass
+    houses_file = None
+    if listed:
+        houses_file = json.dumps(dict(engine_version=ENGINE_VERSION, built={str(k): v for k, v in sorted(listed.items())}, labels=house_labels(sorted(listed)),
+                                      as_of=now.strftime("%Y-%m-%d %H:%M UTC")), indent=1, sort_keys=True).encode("utf-8")
+        files[HOUSES_KEY] = houses_file
+    out("load s = downloading and reading the hourly files; calc s = the derive itself (what packing the files into day files can and cannot speed up).")
     out("")
     out("### 2 storing")
     total = sum(len(v) for v in files.values())
-    out(f"  {len(files)} file(s), {FT.kb(total)} in all, for {len(built)} house(s)" + (f"; failed: {', '.join(map(str, failed))}" if failed else ""))
-    if save and files:
-        commit(files, f"forever derive: {len(built)} house(s)")
-        out(f"Saved {len(files)} file(s) to the Forever dataset in one commit.")
+    out(f"  {len(files)} file(s), {FT.kb(total)} in all, for {len(built)} house(s)" + (f"; failed to build: {', '.join(map(str, failed))}" if failed else ""))
+    if save:
+        if saved and houses_file is not None:
+            try:
+                commit({HOUSES_KEY: houses_file}, "forever derive: houses list")
+            except Exception as e:
+                code = 1
+                out(f"  houses list: UPLOAD FAILED: {cause(e)}")
+        out(f"Saved {len(saved)} house(s), one commit each" + (f"; upload failed for: {', '.join(map(str, upload_failed))}" if upload_failed else "") + ".")
     elif files:
         out("Report only: nothing stored. Run again with save = yes to store them.")
-    return dict(text="\n".join(lines), code=code, files=files, houses=sorted(built))
+    return dict(text="\n".join(lines), code=code, files=files, houses=sorted(built), saved=sorted(saved))
 
 
 def main(argv=None):
