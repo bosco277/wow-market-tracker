@@ -12,7 +12,9 @@ What a row says (all prices in gold per unit; a "usable" hour is one with a good
   price_day        the day's typical lowest price (median of the usable hours' lowest price)
   price_min        the lowest price seen in any usable hour
   price_p15/p30    typical price at which the cheapest 15% / 30% of the units for sale have all been reached (one cheap listing cannot set it); the retail table has these too
-  buy20, buy200    typical AVERAGE price per unit to buy 20 / 200 units, walking up the listings from the cheapest; blank when fewer units than that were for sale
+  buy20, buy200    typical AVERAGE price per unit to buy 20 / 200 units, walking up the listings from the cheapest. buy20 is the median over the usable hours that had 20 units for sale.
+                   buy200 is buy20 times the median, over the hours that had 200 units, of that hour's buy200 / buy20 (the extra cost of going deeper), so it can never be lower than buy20
+                   (v0.7.48: a plain median over only the deep hours could be, because those hours were the deeper, cheaper ones). Blank when fewer than half the usable hours had that many units.
   units_day        typical units for sale
   listings_day     typical number of listings
   gold_day         typical gold in play: price x quantity summed over all listings
@@ -69,8 +71,20 @@ TEXT_COLUMNS = ("kind", "day", "engine_version")
 ROUND = {"price_day": 4, "price_min": 4, "price_p15": 4, "price_p30": 4, "buy20": 4, "buy200": 4, "units_day": 1, "listings_day": 1, "gold_day": 2,
          "sold_cert_day": 2, "sold_low_day": 2, "sold_day": 2, "sold_high_day": 2, "turnover_day": 4, "active_share": 3}
 EXTRA = {"price_min": ("floor_gold", "min"), "listings_day": ("n_listings", "median"), "gold_day": ("gold", "median"),
-         "buy20": ("buy20", "median"), "buy200": ("buy200", "median"),
+         "buy20": ("buy20", "median"),
          "sold_cert_day": ("sold_cert", "mean"), "sold_low_day": ("sold_low", "mean"), "sold_high_day": ("sold_high", "mean"), "active_share": ("active", "mean")}
+DEEP_MIN_SHARE = 0.5          # a deeper buy price needs that depth in at least half of the usable hours
+
+
+def _deep_extra() -> dict:
+    """Hourly helper columns for the deeper buy sizes: the depth ratio (median) and whether the depth was there (mean = share of hours)."""
+    out = {}
+    for n in BUY_SIZES[1:]:
+        out[f"_ratio{n}"] = (f"ratio{n}", "median")
+        out[f"_has{n}"] = (f"has{n}", "mean")
+    return out
+
+
 PER_DAY = ("sold_cert_day", "sold_low_day", "sold_high_day")        # a mean per hourly interval, scaled to 24 hours like the retail sold_day
 
 
@@ -156,14 +170,24 @@ def build_house(snaps: Sequence[Snapshot], house: int, ids: Optional[Iterable[in
     stats = book_stats(snaps, ids)
     if not stats.empty:
         h = h.merge(stats, on=["item_id", "ts"], how="left")
+    base = f"buy{BUY_SIZES[0]}"
+    for n in BUY_SIZES[1:]:
+        col = f"buy{n}"
+        if col in h.columns and base in h.columns:
+            h[f"ratio{n}"] = h[col] / h[base]
+            h[f"has{n}"] = h[col].notna().astype(float)
     if not sales:
         h["sold_est"] = 0.0                      # every hour with a price counts; the sales columns are blanked below
     h = D.trim_edges(h, snaps[0].ts, snaps[-1].ts)
     if h.empty:
         return tidy(None)
-    d = D.daily_table(h, TZ, extra=EXTRA)
+    d = D.daily_table(h, TZ, extra={**EXTRA, **_deep_extra()})
     if d.empty:
         return tidy(None)
+    for n in BUY_SIZES[1:]:
+        ok = d[f"_has{n}"].fillna(0) >= DEEP_MIN_SHARE
+        d[f"buy{n}"] = np.where(ok, d[f"buy{BUY_SIZES[0]}"] * d[f"_ratio{n}"], np.nan)
+        d = d.drop(columns=[f"_ratio{n}", f"_has{n}"])
     if sales:
         for c in PER_DAY:
             d[c] = d[c] * 24.0

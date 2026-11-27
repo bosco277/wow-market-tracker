@@ -8,7 +8,7 @@ name: Forever daily tables
 # It reads only the Forever dataset (no Blizzard calls). Commodity items only for now; the report counts how many recipes are fully priced, which shows the gap that regular auctions (gear) still leave.
 #
 # Days: how many UTC days of files to read (default 4). The first and last 12 hours of the files read are left out of every row, so a run completes the days before the newest ones and the next run finishes the rest;
-# 4 days also repairs up to two missed runs. To BACKFILL older days, run it again with an earlier end_date (in chunks of about 10 days).
+# 4 days also repairs up to two missed runs. To BACKFILL older days, run it again with an earlier end_date: chunks of about 10 days, each end_date 8 days before the last (days minus 2), so the windows overlap by 2 days.
 # houses: all (every house the fetcher stores, empty houses left out) or house numbers separated by commas, for example 110,116.
 # sales: yes (default) = fill the sales columns with the sales classifier (a few minutes for all houses); no = prices and depth only, sales columns blank.
 # rebuild: yes = new rows replace stored rows even where the stored row had more usable hours (use it after a change in how rows are computed, and when switching sales on or off).

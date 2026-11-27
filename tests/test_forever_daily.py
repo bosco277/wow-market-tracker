@@ -27,6 +27,7 @@ from engine import foreverdaily as FD  # noqa: E402
 from engine import forevertables as T  # noqa: E402
 from engine.classifier import classify_series  # noqa: E402
 from engine.loader import LocalStore  # noqa: E402
+from engine.simulator import MarketSimulator, default_profiles  # noqa: E402
 from test_forever_adapter import Lake, base_reader, write, write_house  # noqa: E402
 import forever_daily as FDT  # noqa: E402
 
@@ -188,6 +189,38 @@ class TestVelocityColumns(unittest.TestCase):
     def test_turnover_is_the_conservative_sales_over_the_standing_stock(self):
         row = FD.build_house(self.snaps(), 110).set_index("day").loc["2026-10-02"]
         self.assertAlmostEqual(row["turnover_day"], row["sold_low_day"] / row["units_day"], places=3)
+
+
+class TestDeepBuy(unittest.TestCase):
+    """The Cured Rugged Hide case (Nov 25 report: buy200 25.45 under buy20 25.60): stock hovering around 200 units, deep in some hours and shallow in others, and the deep hours cheaper."""
+
+    def snaps(self, every=2):
+        out = []
+        for h in range(60):
+            rows = [(1, 5, 150, 1020000, "VERY_LONG")]                                       # always: 150 units at 102g
+            if (h // 5) % every == 1:
+                rows.append((2, 5, 190, 1000000, "VERY_LONG"))                               # deep blocks of 5 hours: 190 more units at 100g
+            filler = [(100 + k, 9, 10, 50000, "VERY_LONG") for k in range(40)]                # a quiet second item, so the house is not one listing appearing and vanishing
+            s = mk(rows + filler, ts=pd.Timestamp("2026-10-01 00:00") + pd.Timedelta(hours=h))
+            s.meta["house"] = 110
+            out.append(s)
+        return out
+
+    def test_the_deeper_buy_price_is_never_under_the_shallow_one(self):
+        d = FD.build_house(self.snaps(), 110)
+        row = d[d["item_id"] == 5].set_index("day").loc["2026-10-02"]
+        self.assertEqual((int(row["hours"]), int(row["flagged_hours"])), (20, 0))
+        self.assertAlmostEqual(row["buy20"], 101.0, places=4)                      # median of ten 100g hours and ten 102g hours
+        deep_hour = (190 * 100 + 10 * 102) / 200                                   # 100.1g: what a deep hour costs for 200 units
+        self.assertLess(deep_hour, row["buy20"])                                   # the old rule (median over the deep hours only) gave this, UNDER buy20
+        self.assertAlmostEqual(row["buy200"], 101.0 * deep_hour / 100.0, places=4) # the new rule: buy20 times the deep hours' extra cost of going deeper
+        self.assertGreaterEqual(row["buy200"], row["buy20"])
+
+    def test_a_depth_seen_in_under_half_the_hours_gives_a_blank(self):
+        d = FD.build_house(self.snaps(every=3), 110)
+        row = d[d["item_id"] == 5].set_index("day").loc["2026-10-02"]
+        self.assertTrue(np.isnan(row["buy200"]))
+        self.assertFalse(np.isnan(row["buy20"]))
 
 
 class TestStoredForm(unittest.TestCase):
@@ -434,6 +467,35 @@ class TestRunSales(RunFixture):
         self.assertIn("Visible sales, house 110", r["text"])
         self.assertIn("sold_low/day", r["text"])
         self.assertIn("(all lower bounds)", r["text"])
+
+
+class TestBackfillSeams(RunFixture):
+    """Why backfill windows must overlap: a run leaves out the first and last 12 hours of the files it reads, so two windows that merely touch leave Eastern days at the seam with too few hours,
+    and windows that overlap by two days do not. Six pretend days (Oct 1 00:00 to Oct 7 00:00 UTC) in two houses."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.snaps = MarketSimulator(default_profiles(), seed=5).run(6 * 24 + 1).snapshots
+
+    def hours_by_day(self):
+        out = {}
+        for o in self.store.list("daily/"):
+            d = FD.from_csv_gz(self.store.read_range(o.key, 0, o.size))
+            out[o.key.split("d_")[1][:10]] = int(d[d["house"] == 110]["hours"].max())
+        return out
+
+    def test_windows_that_only_touch_leave_a_seam_of_partial_days(self):
+        self.go(save=True, days=3, end="2026-10-06")
+        self.go(save=True, days=3, end="2026-10-03")
+        self.assertLess(self.hours_by_day()["2026-10-03"], FD.COMPLETE_HOURS)
+
+    def test_windows_that_overlap_by_two_days_complete_every_day_between_their_edges(self):
+        self.go(save=True, days=4, end="2026-10-06")
+        self.go(save=True, days=4, end="2026-10-04")        # the end date steps back by days minus 2
+        hours = self.hours_by_day()
+        for day in ("2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05"):
+            self.assertGreaterEqual(hours[day], FD.COMPLETE_HOURS, day)
 
 
 class TestWorkflow(unittest.TestCase):

@@ -2,7 +2,7 @@
 
     python tools/forever_daily.py                      # read the last 4 days of files, build the rows and REPORT; saves nothing
     python tools/forever_daily.py --save               # the same, then store the days that are new or changed (one commit)
-    python tools/forever_daily.py --days 10 --end 2026-11-20 --save     # backfill: the 10 UTC days ending Nov 20 (run it in chunks; each run leaves its first and last 12 hours to its neighbours)
+    python tools/forever_daily.py --days 10 --end 2026-11-20 --save     # backfill: the 10 UTC days ending Nov 20 (run it in chunks whose windows overlap by at least 2 days: step --end back by days minus 2, e.g. 11-25, 11-17, 11-09; each run leaves its first and last 12 hours to its neighbours)
     python tools/forever_daily.py --houses 110,116     # only these houses (default: every house the fetcher stores, empty houses left out)
     python tools/forever_daily.py --no-sales           # skip the sales classifier: prices and depth only (faster); the sales columns are left blank
     python tools/forever_daily.py --save --rebuild     # new rows replace stored ones even where the stored row had more usable hours
