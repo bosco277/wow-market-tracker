@@ -2,7 +2,9 @@
 small made-up tables. It cannot judge how the page looks; it catches typos, wrong column names and crashes on empty or old tables."""
 import os
 import runpy
+import json
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -130,19 +132,37 @@ def buy_tables(days=40):
     return t
 
 
-def run_app(data, **kw):  # kw: selected_row, found, version, only_for
+def run_app(data, query=None, houses_json=None, **kw):  # kw: selected_row, found, version, only_for. query: page address values; houses_json: engine/houses.json content
     st = fake_streamlit(**kw)
+    if query:
+        st.query_params.update(query)
     px = types.ModuleType("plotly")
     go = types.ModuleType("plotly.graph_objects")
     for name in ("Figure", "Scatter", "Bar", "Heatmap"):
         setattr(go, name, Any(name))
     px.graph_objects = go
-    os.environ["DERIVED_DIR"] = "/nowhere"
+    tmp = tempfile.TemporaryDirectory()
+    os.environ["DERIVED_DIR"] = tmp.name                   # the app reads <DERIVED_DIR>/h<house>/<table>.parquet and <DERIVED_DIR>/houses.json
+    if houses_json is not None:
+        with open(os.path.join(tmp.name, "houses.json"), "w", encoding="utf-8") as fh:
+            json.dump(houses_json, fh)
     orig_read = pd.read_parquet
-    pd.read_parquet = lambda path, *a, **k: data[os.path.basename(path)[:-len(".parquet")]].copy() if os.path.basename(path)[:-8] in data else (_ for _ in ()).throw(FileNotFoundError(path))
+    st.reads = []
+
+    def read(path, *a, **k):                               # a table is looked up by its file name; st.reads keeps which house folder was asked for
+        st.reads.append(os.path.relpath(path, tmp.name))
+        name = os.path.basename(path)[:-len(".parquet")]
+        per_house = data.get(os.path.basename(os.path.dirname(path)), {})
+        if isinstance(per_house, dict) and name in per_house:
+            return per_house[name].copy()
+        if name in data:
+            return data[name].copy()
+        raise FileNotFoundError(path)
+    pd.read_parquet = read
     saved_path = list(sys.path)
     sys.path.insert(0, _app_dir)
-    sys.modules.pop("lib", None)
+    for m in ("lib", "forever_lib", "houseflip"):
+        sys.modules.pop(m, None)
     try:
         with mock.patch.dict(sys.modules, {"streamlit": st, "plotly": px, "plotly.graph_objects": go}):
             try:
@@ -153,6 +173,7 @@ def run_app(data, **kw):  # kw: selected_row, found, version, only_for
         pd.read_parquet = orig_read
         sys.path[:] = saved_path
         os.environ.pop("DERIVED_DIR", None)
+        tmp.cleanup()
     return st
 
 
@@ -317,9 +338,75 @@ class TestForecastViews(unittest.TestCase):
     def test_no_ledger_file_at_all(self):
         Any.calls.clear()
         st = run_app(tables(), selected_row=0)                                 # no forecast_ledger table: the page loads it as empty
-        self.assertTrue(any("No forecasts recorded yet" in str(a[0]) for a, k in named("info")))
+        self.assertTrue(any("Forecasts are not built for WoW Forever yet" in str(a[0]) for a, k in named("info")))
         self.assertFalse([k for a, k in named("Scatter") if str(k.get("name", "")).startswith("forecast")])
         self.assertFalse(any("Result" in df for df, k in st.seen))
+
+
+
+HOUSES_JSON = dict(engine_version="0.7.5", as_of="2026-11-27 16:40 UTC",
+                   built={str(h): "2026-11-27 16:32:00" for h in (110, 111, 113, 114, 116, 117)},
+                   labels={"110": dict(ruleset="pvp", faction="alliance", confidence="confirmed"), "113": dict(ruleset="pvp", faction="horde", confidence="matched"),
+                           "116": dict(ruleset="pvp", faction="neutral", confidence="confirmed"), "111": dict(ruleset="pve", faction="alliance", confidence="likely"),
+                           "114": dict(ruleset="pve", faction="horde", confidence="matched"), "117": dict(ruleset="pve", faction="neutral", confidence="assumed")})
+
+
+def flip_data():
+    """tables() for house 110 and the neutral house 116, where item 1 (1.00g on 110) is listed at 0.50g x 30 and 0.90g x 100."""
+    d = tables()
+    book = pd.DataFrame({"item_id": [1, 1, 2], "price_gold": [0.5, 0.9, 30.0], "quantity": [30, 100, 5], "listings": [1, 2, 1],
+                         "ts": pd.Timestamp("2026-11-27 16:32")})
+    n_items = d["items"].assign(floor_gold=[2.0, 40.0, 1.0], active_share=[0.9, 0.2, 0.5])
+    d["h116"] = {"book_now": book, "items": n_items}
+    d["h110"] = {"book_now": book.assign(price_gold=[0.8, 0.9, 10.0])}
+    return d
+
+
+class TestForeverApp(unittest.TestCase):
+    """v0.7.50: the same app on WoW Forever data: ruleset, then house; every table read from that house's folder."""
+
+    def test_the_house_in_the_address_picks_the_folder_and_its_ruleset(self):
+        st = run_app(tables(), query={"house": "113"}, houses_json=HOUSES_JSON, selected_row=None)
+        self.assertEqual((st.query_params.get("ruleset"), st.query_params.get("house")), ("pvp", "113"))
+        self.assertIn(os.path.join("h113", "items.parquet"), st.reads)
+        self.assertFalse(any(r.startswith("h110") for r in st.reads))
+
+    def test_without_an_address_it_opens_on_pvp_alliance(self):
+        st = run_app(tables(), houses_json=HOUSES_JSON, selected_row=None)
+        self.assertEqual((st.query_params.get("ruleset"), st.query_params.get("house")), ("pvp", "110"))
+
+    def test_a_ruleset_in_the_address_without_its_house_opens_its_first_house(self):
+        st = run_app(tables(), query={"ruleset": "pve"}, houses_json=HOUSES_JSON, selected_row=None)
+        self.assertEqual(st.query_params.get("house"), "111")
+
+    def test_house_flips_buys_on_neutral_and_resells_on_alliance_after_the_cut(self):
+        st = run_app(flip_data(), houses_json=HOUSES_JSON, selected_row=None)
+        hf = next(d for d, k in st.seen if "Profit after cut (g)" in d)
+        r = hf.set_index("Item ID").loc[1]
+        self.assertAlmostEqual(r["Resell at (g)"], 1.0)                                    # 110's lowest price (no typical price in these tables)
+        self.assertAlmostEqual(r["Pay at most (g)"], 0.95 / 1.15)                          # 5% cut, 15% margin
+        self.assertEqual(r["Buy (units)"], 30)                                             # only the 0.50g units are cheap enough
+        self.assertAlmostEqual(r["Profit after cut (g)"], 30 * (0.95 - 0.5))
+        self.assertIn(os.path.join("h116", "book_now.parquet"), st.reads)
+
+    def test_the_footnote_lists_the_assumed_cuts(self):
+        Any.calls.clear()
+        run_app(tables(), houses_json=HOUSES_JSON, selected_row=None)
+        notes = [str(a[0]) for n, a, k in Any.calls if n == "caption" and a]
+        self.assertTrue(any("Assumptions behind every profit figure" in t and "5%" in t and "15%" in t for t in notes))
+
+    def test_the_neutral_house_explains_that_house_flips_needs_a_faction_house(self):
+        Any.calls.clear()
+        st = run_app(tables(), query={"house": "116"}, houses_json=HOUSES_JSON, selected_row=None)
+        self.assertFalse(any("Profit after cut (g)" in d for d, k in st.seen))
+        self.assertTrue(any("Pick your Alliance or Horde house" in str(a[0]) for a, k in named("info")))
+
+    def test_the_experiment_tab_is_gone_and_the_retail_dataset_is_not_read(self):
+        with open(os.path.join(_app_dir, "app.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertNotIn('"Experiment"', src)
+        self.assertNotIn("wow-market-data-lake", src)
+        self.assertIn('"House flips"', src)
 
 
 if __name__ == "__main__":

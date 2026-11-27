@@ -1,17 +1,30 @@
-"""WoW market desk. Reads the small tables the engine writes to engine/ in the Hugging Face dataset repo (not Backblaze).
+"""WoW market desk, on WoW FOREVER data (v0.7.50). Reads the small tables the Forever derive job writes to engine/h<house>/ in the Forever dataset on Hugging Face.
+Pick a ruleset, then an auction house; every tab shows that house (houses are never added together).
 
 Every estimate is shown as low - best - high with a confidence label. Nothing here is advice to buy; the ranges are the point.
 Click a row in the Market or Flips table to see that item's charts below it."""
 import os
 
+import houseflip as HFL
+import forever_lib as F
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 import lib
 
-HF_REPO = "bosco277/wow-market-data-lake"
-st.set_page_config(page_title="WoW Market Desk", layout="wide")
+st.set_page_config(page_title="WoW Market Desk · WoW Forever", layout="wide")
+
+
+def _secret(name):
+    try:
+        v = st.secrets.get(name)
+    except Exception:
+        v = None
+    return v or os.environ.get(name)
+
+
+HF_REPO = _secret("FOREVER_HF_REPO") or F.DEFAULT_REPO        # the Forever dataset (the retail dataset is no longer read)
 
 
 def _stretch() -> dict:
@@ -27,43 +40,84 @@ WIDE = _stretch()
 
 
 @st.cache_data(ttl=600, show_spinner="Loading tables...")
-def load(name: str) -> pd.DataFrame:
+def load(name: str, house: int) -> pd.DataFrame:
+    """One table of one house: engine/h<house>/<name>.parquet in the Forever dataset."""
     local = os.environ.get("DERIVED_DIR")
     try:
         if local:
-            return pd.read_parquet(os.path.join(local, f"{name}.parquet"))
+            return pd.read_parquet(os.path.join(local, f"h{int(house)}", f"{name}.parquet"))
         from huggingface_hub import hf_hub_download
-        path = hf_hub_download(HF_REPO, f"engine/{name}.parquet", repo_type="dataset", token=st.secrets.get("HF_TOKEN"))
+        path = hf_hub_download(HF_REPO, f"engine/h{int(house)}/{name}.parquet", repo_type="dataset", token=_secret("HF_TOKEN"))
         return pd.read_parquet(path)
     except Exception:
         return pd.DataFrame()
 
 
-items, hourly, prof = load("items"), load("item_hourly"), load("profile")
-cal, hist, exp, flips = load("calibration"), load("calibration_history"), load("experiment"), load("flips")
-shelves = load("shelves")
-ledger = lib.clean_ledger(load("forecast_ledger"))      # the live forecast record; empty until mode forecast_ledger has run
+@st.cache_data(ttl=600, show_spinner=False)
+def load_houses() -> tuple:
+    """(houses with tables, {house: ruleset / faction / confidence}) from engine/houses.json; every non-empty house, unlabelled, if it is missing."""
+    local = os.environ.get("DERIVED_DIR")
+    data = None
+    try:
+        if local:
+            with open(os.path.join(local, "houses.json"), "rb") as fh:
+                data = fh.read()
+        else:
+            from huggingface_hub import hf_hub_download
+            with open(hf_hub_download(HF_REPO, "engine/houses.json", repo_type="dataset", token=_secret("HF_TOKEN")), "rb") as fh:
+                data = fh.read()
+    except Exception:
+        data = None
+    built, labels, _ = F.parse_houses_file(data)
+    hmap = F.parse_house_map(None)
+    hmap.update({h: {**hmap.get(h, {}), **{k: v for k, v in r.items() if v}} for h, r in labels.items()})
+    return (built or sorted(hmap)), hmap
+
+
+# ---------------------------------------------------------------- Ruleset, then auction house (kept in the page address: ?ruleset=pvp&house=110)
+HOUSES, HMAP = load_houses()
+RULESETS = F.rulesets_of(HOUSES, HMAP)
+_q_house = lib.parse_ids(str(st.query_params.get("house", "")))
+_q_house = _q_house[0] if _q_house else 110
+_q_rs = str(st.query_params.get("ruleset", "")) or (HMAP.get(_q_house) or {}).get("ruleset", "pvp")
+p1, p2, _ = st.columns([1, 1, 2])
+RULESET = p1.selectbox("Ruleset", RULESETS, index=RULESETS.index(_q_rs) if _q_rs in RULESETS else 0, format_func=lambda r: F.RULESET_NAME.get(r, r), key="pick_ruleset")
+HOUSE_OPTS = F.houses_of(RULESET, HOUSES, HMAP)
+HOUSE = p2.selectbox("Auction house", HOUSE_OPTS, index=HOUSE_OPTS.index(_q_house) if _q_house in HOUSE_OPTS else 0,
+                     format_func=lambda h: F.picker_label(h, HMAP), key="pick_house",
+                     help="WoW Forever has no realms: each auction house is its own market. '(unverified)' = placed by slot order only, not yet confirmed by a listing test.")
+try:
+    st.query_params["ruleset"] = RULESET
+    st.query_params["house"] = str(HOUSE)
+except Exception:
+    pass
+
+items, hourly, prof = load("items", HOUSE), load("item_hourly", HOUSE), load("profile", HOUSE)
+cal, hist, flips = load("calibration", HOUSE), load("calibration_history", HOUSE), load("flips", HOUSE)
+shelves = load("shelves", HOUSE)
+ledger = lib.clean_ledger(load("forecast_ledger", HOUSE))      # forecasts are not built for Forever yet (empty)
 shelves_old = len(shelves) > 0 and "test_regime" not in shelves.columns
 shelves_ver = str(shelves["engine_version"].iloc[0]) if len(shelves) and "engine_version" in shelves.columns else "unknown"
 shelves = lib.ensure_shelf_columns(shelves)
-backtest = load("backtest_summary")
+backtest = load("backtest_summary", HOUSE)
 bt_rates = lib.backtest_rates(backtest)
-buy_targets, buy_cal, buy_when, buy_meta = load("buy_targets"), load("buy_calibration"), load("buy_when"), load("buy_meta")   # written daily by the Daily chain
+buy_targets, buy_cal, buy_when, buy_meta = (load(n, HOUSE) for n in ("buy_targets", "buy_calibration", "buy_when", "buy_meta"))   # not built for Forever yet (empty)
 if hist.empty:
     hist = cal
 
-st.title("WoW Market Desk")
+st.title("WoW Market Desk · WoW Forever")
 hrs, state = lib.freshness(cal)
 if items.empty:
-    st.error("No tables found yet. Run the 'Market tools' workflow with mode=derive and upload ticked.")
+    st.error(f"No tables for house {HOUSE} yet. Run the 'Forever derive' workflow with save = yes (GitHub > Actions). If it has run, the app's HF_TOKEN secret "
+             "may not be able to read the Forever dataset (Streamlit: Manage app > Settings > Secrets).")
     st.stop()
 ver = items["engine_version"].iloc[0] if "engine_version" in items else "?"
-st.caption(f"Data {state}: built from snapshots up to {pd.Timestamp(cal['data_last_ts'].max()):%a %b %d %H:%M} UTC "
+st.caption(f"House {F.picker_label(HOUSE, HMAP)} ({F.RULESET_NAME.get(RULESET, RULESET)}). Data {state}: built from snapshots up to {pd.Timestamp(cal['data_last_ts'].max()):%a %b %d %H:%M} UTC "
            f"({hrs:.1f} h ago) | engine {ver} | ranges are low - best - high; labels say how much to trust them")
 
 
 def column_config(df: pd.DataFrame) -> dict:
-    """Numbers stay numbers (so the column sorts properly) and are only formatted for display. Gold is exact to 2 decimals (one silver)."""
+    """Numbers stay numbers (so the column sorts properly) and are only formatted for display. Gold shows 4 decimals (one copper): Forever prices are small."""
     cfg = {}
     for c in df.columns:
         if c == "_id" or not pd.api.types.is_numeric_dtype(df[c]) or pd.api.types.is_bool_dtype(df[c]):
@@ -71,7 +125,7 @@ def column_config(df: pd.DataFrame) -> dict:
         if c == "Item ID":
             cfg[c] = st.column_config.NumberColumn(c, format="%d")
         elif c.endswith("(g)"):
-            cfg[c] = st.column_config.NumberColumn(c, format="%.2f")
+            cfg[c] = st.column_config.NumberColumn(c, format="%.4f")
         elif c.endswith("(%)"):
             cfg[c] = st.column_config.NumberColumn(c, format="%.1f%%")
         elif c.endswith(("(units)", "passed", "failed", "warned")):
@@ -159,34 +213,34 @@ def item_detail(pick: int, key: str):
             fc_method = methods[0]
     fig = go.Figure()
     # Constant lines are drawn as traces (not hline / hrect) so hovering anywhere shows their numbers, same for every point.
-    g = lambda v: f"{v:,.2f}g"
+    g = lambda v: f"{v:,.4f}g"
     fig.add_trace(go.Scatter(x=h["ts"], y=[r["band_p90"]] * len(h), line=dict(width=0), name="typical high (p90)",
-                             hovertemplate="%{y:,.2f}g", showlegend=False))
+                             hovertemplate="%{y:,.4f}g", showlegend=False))
     fig.add_trace(go.Scatter(x=h["ts"], y=[r["band_p10"]] * len(h), line=dict(width=0), fill="tonexty", fillcolor="rgba(43,76,89,0.12)",
-                             name=f"typical band (p10 {g(r['band_p10'])} - p90 {g(r['band_p90'])})", hovertemplate="%{y:,.2f}g"))
-    fig.add_trace(go.Scatter(x=h["ts"], y=h["floor_gold"], name="lowest price", line=dict(color="#2B4C59"), hovertemplate="%{y:,.2f}g"))
+                             name=f"typical band (p10 {g(r['band_p10'])} - p90 {g(r['band_p90'])})", hovertemplate="%{y:,.4f}g"))
+    fig.add_trace(go.Scatter(x=h["ts"], y=h["floor_gold"], name="lowest price", line=dict(color="#2B4C59"), hovertemplate="%{y:,.4f}g"))
     sp = h.loc[lib.flag_mask(h, "spike")]
     fig.add_trace(go.Scatter(x=sp["ts"], y=sp["floor_gold"], mode="markers", name="price spike", marker=dict(color="#B5483A", size=8),
-                             hovertemplate="%{y:,.2f}g"))
+                             hovertemplate="%{y:,.4f}g"))
     bl = h.loc[lib.flag_mask(h, "blip")]
     fig.add_trace(go.Scatter(x=bl["ts"], y=bl["floor_gold"], mode="markers", name="listing blip (likely API)",
-                             marker=dict(color="#C28A1B", symbol="x", size=8), hovertemplate="%{y:,.2f}g"))
+                             marker=dict(color="#C28A1B", symbol="x", size=8), hovertemplate="%{y:,.4f}g"))
     for col, nm, first in (("wall_low_gold", "wall low", True), ("wall_high_gold", "wall high", False)):
         if col in r and r[col] == r[col]:
             fig.add_trace(go.Scatter(x=h["ts"], y=[r[col]] * len(h), name="price wall (low / high)", legendgroup="wall", showlegend=first,
-                                     line=dict(dash="dot", color="#8A9BA3"), hovertemplate=nm + " %{y:,.2f}g"))
+                                     line=dict(dash="dot", color="#8A9BA3"), hovertemplate=nm + " %{y:,.4f}g"))
     fc = lib.item_forecast(ledger, pick, fc_method) if fc_method else pd.DataFrame()
     dp = lib.item_daily_points(ledger, pick)
     if len(dp):
         fig.add_trace(go.Scatter(x=[lib.day_to_utc(d) for d in dp["day"]], y=dp["price"], mode="markers", name="daily price (median of the day)",
-                                 marker=dict(color="#1B2A33", symbol="diamond", size=9), hovertemplate="%{y:,.2f}g"))
+                                 marker=dict(color="#1B2A33", symbol="diamond", size=9), hovertemplate="%{y:,.4f}g"))
     if len(fc) and fc["origin"].iloc[0] == fc["origin"].iloc[0]:
         o, made = float(fc["origin"].iloc[0]), fc["made_day"].iloc[0]
         X = [lib.day_to_utc(made)] + [lib.day_to_utc(d) for d in fc["target_day"]]
         for lo, hi, alpha, nm in (("lo80", "hi80", 0.12, "80% range"), ("lo50", "hi50", 0.26, "50% range")):
             fig.add_trace(go.Scatter(x=X + X[::-1], y=[o] + list(fc[hi]) + list(fc[lo])[::-1] + [o], mode="lines", fill="toself", line=dict(width=0),
                                      fillcolor=f"rgba(58,110,165,{alpha})", name=f"forecast {nm}", hoverinfo="skip"))
-        tips = [f"daily price on {made}: {o:,.2f}g"] + [
+        tips = [f"daily price on {made}: {o:,.4f}g"] + [
             f"{lib.HORIZON_NAME.get(int(r['horizon']), str(r['horizon']))} ahead ({r['target_day']}): guess {r['guess']:,.2f}g, "
             f"50% range {r['lo50']:,.2f} - {r['hi50']:,.2f}g, 80% range {r['lo80']:,.2f} - {r['hi80']:,.2f}g" for _, r in fc.iterrows()]
         fig.add_trace(go.Scatter(x=X, y=[o] + list(fc["guess"]), mode="lines+markers", name=f"forecast: {lib.METHOD_NAME.get(fc_method, fc_method)}",
@@ -238,7 +292,7 @@ def item_detail(pick: int, key: str):
             ev = lib.past_events_table(f)
             st.dataframe(ev, hide_index=True, **WIDE, column_config=column_config(ev))
 
-tab_market, tab_buy, tab_flip, tab_fc, tab_exp, tab_conf = st.tabs(["Market", "Buy targets", "Flips", "Forecasts", "Experiment", "Confidence"])
+tab_market, tab_buy, tab_flip, tab_house, tab_fc, tab_conf = st.tabs(["Market", "Buy targets", "Flips", "House flips", "Forecasts", "Confidence"])
 
 # ---------------------------------------------------------------- Market
 with tab_market:
@@ -286,8 +340,8 @@ with tab_buy:
              "and how often that price has actually shown up. Scan the auction house in game and buy what is at or under the number. "
              "This does not look at what you will do with the items.")
     if buy_targets.empty:
-        st.info("No buy targets yet. The daily chain writes them once the hourly history holds at least a week of prices. Check the Actions tab on GitHub "
-                "(Daily chain) if this stays empty for more than a day.")
+        st.info("Buy targets are not built for WoW Forever yet: they need the hourly history per house and the buy-window job (the next step after this version). "
+                "The tab will fill in by itself once that job runs.")
     else:
         caption, stale = lib.buy_meta_caption(buy_meta)
         if caption:
@@ -402,12 +456,63 @@ with tab_flip:
             st.caption("The cheap units stay in the book in the replay, so 'reached' is a cautious reading. Undercut risk is the better "
                        "read of whether cheaper listings would have appeared. This is price behaviour, not a record of profit.")
 
+# ---------------------------------------------------------------- House flips (buy on one house of the ruleset, resell on another)
+with tab_house:
+    faction = (HMAP.get(HOUSE) or {}).get("faction")
+    neutral = F.neutral_of(HOUSE, HMAP, HOUSES)
+    if faction not in ("alliance", "horde"):
+        st.info("Pick your Alliance or Horde house above: this tab compares it with the neutral (Blackwater) house of the same ruleset.")
+    elif neutral is None:
+        st.info("The neutral house of this ruleset has no tables yet, so there is nothing to compare with.")
+    else:
+        mine, other = F.picker_label(HOUSE, HMAP), F.picker_label(neutral, HMAP)
+        fname = F.HOUSE_NAME[faction]
+        direction = st.radio("Direction", ["n2f", "f2n"], horizontal=True, key="hf_direction",
+                             format_func=lambda d: f"Buy on Blackwater (neutral), resell on {fname}" if d == "n2f" else f"Buy on {fname}, resell on Blackwater (neutral)")
+        h1, h2, h3 = st.columns(3)
+        if direction == "n2f":
+            need = h1.slider("Margin after the cut, at least (%)", 0, 100, int(HFL.DEFAULTS["min_margin"] * 100), 5, key="hf_margin") / 100.0
+            fast_share, fast_margin = None, None
+        else:
+            need = h1.slider("Margin after the cut, at least (%)", 0, 150, int(HFL.DEFAULTS["min_margin_reverse"] * 100), 5, key="hf_margin_rev",
+                             help="The neutral house sells slowly, so the reverse direction asks for a bigger margin...") / 100.0
+            fast_share = h2.slider("...unless seen selling on Blackwater in at least this share of hours (%)", 0, 100, int(HFL.DEFAULTS["fast_active_share"] * 100), 5,
+                                   key="hf_fast_share") / 100.0
+            fast_margin = HFL.DEFAULTS["min_margin"]
+        days = h3.slider("Buy no more than the resell house sells in (days)", 1, 7, int(HFL.DEFAULTS["days_to_sell"]), 1, key="hf_days")
+        buy_house, sell_house = (neutral, HOUSE) if direction == "n2f" else (HOUSE, neutral)
+        cut = HFL.FEES["faction_cut"] if sell_house == HOUSE else HFL.FEES["neutral_cut"]
+        book = load("book_now", buy_house)
+        sell_items = items if sell_house == HOUSE else load("items", sell_house)
+        names = {int(i): n for i, n in zip(items["item_id"], items["name"]) if n}
+        hf = HFL.flip_table(book, sell_items, cut, need, days, names, fast_share, fast_margin)
+        when = pd.Timestamp(book["ts"].max()).strftime("%a %b %d %H:%M") + " UTC" if len(book) and "ts" in book.columns else "unknown"
+        st.write(f"Items listed on **{F.picker_label(buy_house, HMAP)}** that can be resold on **{F.picker_label(sell_house, HMAP)}**, biggest profit first. "
+                 f"Listings as of {when}. Click a row for the item's charts on your house.")
+        if book.empty:
+            st.info(f"No order book stored for house {buy_house} yet (the Forever derive job writes it).")
+        elif hf.empty:
+            st.info("Nothing passes right now with these settings.")
+        else:
+            a1, a2, a3 = st.columns(3)
+            a1.metric("Items", f"{len(hf):,}")
+            a2.metric("Profit after cut, all rows", f"{hf['Profit after cut (g)'].sum():,.2f}g", help="If you bought every row's units and sold them all at the resell price.")
+            a3.metric("Gold needed, all rows", f"{hf['Cost (g)'].sum():,.2f}g")
+            sel_h = pick_row(hf, "house_flip_table")
+            if sel_h is not None:
+                if sel_h in set(items["item_id"].astype(int)):
+                    item_detail(sel_h, "houseflip")
+                else:
+                    st.caption("This item has no market row on your house, so there are no charts for it here.")
+        st.caption("Profit and margin already have the resell house's auction house cut taken off (the assumptions are in the note at the bottom of the page). "
+                   "Sales per day are lower bounds, so 'days to sell' is cautious.")
+
 # ---------------------------------------------------------------- Forecasts
 with tab_fc:
     cnt = lib.ledger_counts(ledger)
     if not cnt["made"]:
-        st.info("No forecasts recorded yet. They are written once a day by the forecast ledger (the last step of the Daily chain workflow). "
-                "Once there are some, click an item on the Market tab to see its forecast drawn on the price chart.")
+        st.info("Forecasts are not built for WoW Forever yet. Their ranges were sized from retail price history, which does not exist for Forever; they will be sized "
+                "from our own Forever daily history once there are enough days. Once there are some, click an item on the Market tab to see its forecast on the price chart.")
     else:
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Forecasts recorded", f"{cnt['made']:,}")
@@ -483,24 +588,6 @@ with tab_fc:
                 st.dataframe(lvt, hide_index=True, **WIDE, column_config=score_config(lvt))
                 st.caption("Cheap items usually swing the most, so expect wider ranges and larger misses there.")
 
-# ---------------------------------------------------------------- Experiment
-with tab_exp:
-    sc = lib.experiment_scorecard(cal)
-    if exp.empty:
-        st.info("No experiment results in the tables yet.")
-    else:
-        st.write("Your real buy-and-list results checked against what our tool predicted. This is what moves items from Medium to High.")
-        if sc.get("rate_n"):
-            a, b, c = st.columns(3)
-            a.metric("Predicted time inside what happened", f"{sc['inside']} of {sc['rate_n']}")
-            b.metric("We predicted too fast", sc["too_fast"])
-            c.metric("We predicted too slow", sc["too_slow"])
-        if sc.get("unsold_n"):
-            st.warning(f"{sc['stayed']} of {sc['unsold_n']} unsold listings sat first in line and still did not sell, although the tool predicted a sale.")
-        cols = [c for c in ("posted_utc", "item_id", "lane", "price_gold", "quantity", "units_sold", "units_expired", "appeared_share",
-                            "front_share", "still_there_h", "observed_hours_to_clear", "pred_lifo_h_est", "status") if c in exp.columns]
-        st.dataframe(exp[cols], hide_index=True, **WIDE)
-
 # ---------------------------------------------------------------- Confidence
 with tab_conf:
     mix = lib.confidence_mix(hist)
@@ -523,3 +610,7 @@ with tab_conf:
 - **Medium**: everything else. The highest label without a real-sales check.
 - **High**: your experiment checked this item and the predicted time fell inside what happened, with no check pointing the other way.
 """)
+
+# ---------------------------------------------------------------- Assumptions (footnote under every tab)
+st.divider()
+st.caption("**Assumptions behind every profit figure on this page.** " + " ".join(HFL.assumptions()))

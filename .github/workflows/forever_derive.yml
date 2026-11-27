@@ -1,0 +1,71 @@
+name: Forever derive
+
+# WoW Forever only. Builds the tables the app reads, one set per auction house (script: tools/forever_derive.py, logic: engine/derive.py, the same derive the app was built on):
+#   items (latest price, typical band, sales per day low / best / high, confidence), item_hourly (the hourly charts), profile (hour of day), flips, shelves,
+#   calibration and its history, and book_now (the latest order book by price level, for the House flips tab).
+# Stored in the Forever dataset under engine/h<house>/ (for example engine/h110/items.parquet), plus engine/houses.json, in one commit.
+# With save = no (the default) it only REPORTS. With save = yes it stores the tables. It reads only the Forever dataset (no Blizzard calls) and never deletes anything.
+# hours: how many hours of snapshots per house (default 96; sales rates use the last 72).
+# houses: all (every house the fetcher stores, empty houses left out) or house numbers separated by commas, for example 110,113,116.
+#
+# SCHEDULE: every 6 hours at minute 40 (after the hourly fetch at about :32), OFF until you set the repository variable FOREVER_DERIVE_BUILD to yes
+# (Settings > Secrets and variables > Actions > Variables). A scheduled run saves. Each run uses Actions minutes (see the run time of your first run);
+# to run it more often, change the cron line below, for example "40 */2 * * *" for every 2 hours.
+# Nothing in the report names an account or a character (the dataset's name is blanked out).
+# Secrets used: HF_TOKEN (needs write access to the Forever dataset when save = yes; the same token the Forever fetcher uses).
+
+on:
+  schedule:
+    - cron: "40 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: "hours of snapshots per house (96 = 4 days)"
+        default: "96"
+      houses:
+        description: "all, or house numbers separated by commas (for example 110,113,116)"
+        default: "all"
+      save:
+        description: "yes = store the tables; no = report only"
+        default: "no"
+
+concurrency:
+  group: forever-derive
+  cancel-in-progress: false
+
+jobs:
+  derive:
+    if: ${{ github.event_name != 'schedule' || vars.FOREVER_DERIVE_BUILD == 'yes' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pandas numpy pyarrow requests huggingface_hub
+
+      - name: Forever derive
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HOURS: ${{ inputs.hours || '96' }}
+          HOUSES: ${{ inputs.houses || 'all' }}
+          SAVE: ${{ inputs.save || (github.event_name == 'schedule' && 'yes') || 'no' }}
+        run: |
+          set -o pipefail
+          mkdir -p out
+          EXTRA=""
+          if [ "$SAVE" = "yes" ]; then EXTRA="--save"; fi
+          python tools/forever_derive.py --hours "$HOURS" --houses "$HOUSES" $EXTRA --out out | tee out_derive.txt
+          { echo '### forever derive'; echo '```'; head -c 900000 out_derive.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: forever-derive
+          path: out/forever_derive.txt
+          if-no-files-found: ignore

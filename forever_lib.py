@@ -33,6 +33,8 @@ TZ = "America/New_York"
 RULESET_NAME = {"pvp": "PvP", "pve": "PvE", "rp": "RP", "rp pvp": "RP-PvP"}
 FACTION_NAME = {"alliance": "Alliance", "horde": "Horde", "neutral": "Neutral"}
 FACTION_ORDER = {"alliance": 0, "horde": 1, "neutral": 2}
+HOUSE_NAME = {"alliance": "Alliance", "horde": "Horde", "neutral": "Blackwater (neutral)"}    # the auction house names shown in the app
+RULESET_ORDER = ["pvp", "pve", "rp", "rp pvp"]
 # The slots as the fetcher found them (Nov 25): used when the stored house map is missing.
 FALLBACK_SLOTS = (("pvp", 110, 113, 116), ("pve", 111, 114, 117), ("rp", 119, 120, 121), ("rp pvp", 123, 124, 125))
 
@@ -121,6 +123,44 @@ def house_label(house: int, hmap: Dict[int, dict]) -> str:
     faction = FACTION_NAME.get(r.get("faction"), str(r.get("faction") or "?"))
     tail = " (unverified)" if r.get("confidence") in ("assumed", "unknown") else ""
     return f"{int(house)} · {ruleset} · {faction}{tail}"
+
+
+def picker_label(house: int, hmap: Dict[int, dict]) -> str:
+    """'116 · Blackwater (neutral)', with '(unverified)' when the house map only assumes it (the app's House box; the Ruleset box says the ruleset)."""
+    r = hmap.get(int(house)) or {}
+    name = HOUSE_NAME.get(r.get("faction"), str(r.get("faction") or "?"))
+    tail = " (unverified)" if r.get("confidence") in ("assumed", "unknown") else ""
+    return f"{int(house)} · {name}{tail}"
+
+
+def parse_houses_file(data: Optional[bytes]) -> Tuple[List[int], Dict[int, dict], dict]:
+    """engine/houses.json (written by the Forever derive job) -> (houses built, {house: labels}, {house: last snapshot time}). Empty when missing."""
+    try:
+        m = json.loads(data.decode("utf-8")) if data else {}
+    except Exception:
+        m = {}
+    built = {int(k): v for k, v in (m.get("built") or {}).items()}
+    labels = {int(k): dict(v) for k, v in (m.get("labels") or {}).items()}
+    return sorted(built), labels, built
+
+
+def rulesets_of(houses: Iterable[int], hmap: Dict[int, dict]) -> List[str]:
+    present = {(hmap.get(int(h)) or {}).get("ruleset") for h in houses}
+    return [r for r in RULESET_ORDER if r in present]
+
+
+def houses_of(ruleset: str, houses: Iterable[int], hmap: Dict[int, dict]) -> List[int]:
+    return house_order([h for h in houses if (hmap.get(int(h)) or {}).get("ruleset") == ruleset], hmap)
+
+
+def neutral_of(house: int, hmap: Dict[int, dict], houses: Iterable[int]) -> Optional[int]:
+    """The neutral house of the same ruleset, if it has data."""
+    rs = (hmap.get(int(house)) or {}).get("ruleset")
+    for h in houses:
+        r = hmap.get(int(h)) or {}
+        if r.get("ruleset") == rs and r.get("faction") == "neutral":
+            return int(h)
+    return None
 
 
 def house_order(houses: Iterable[int], hmap: Dict[int, dict]) -> List[int]:

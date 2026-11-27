@@ -971,6 +971,28 @@ Third `api_probe` log (Nov 3, 2026, afternoon ET): no change in what Blizzard se
     flips, calibration), the Daily chain (item_daily, hourly history, forecast_ledger, buy_targets, buy_calibration, buy_when, buy_meta) and the experiment. All of them take snapshots;
     engine.forever.load_house gives one house's snapshots in that form. So: run the same jobs per Forever house into the Forever dataset (engine/h<house>/<table>.parquet), then point
     the app at them with a house picker. Tab code stays; retail-only pieces (realm names, prices shown with 2 decimals) are adjusted.
+* v0.7.50: THE APP ON WOW FOREVER DATA, every tab kept (Nov 27; player's spec 11:21-11:28 AM ET). Phase 1 of the port.
+  - Forever derive job (`tools/forever_derive.py`, workflow "Forever derive"): for each house with data (empty houses left out), loads the last 96 hours of that house's commodity
+    snapshots (never pooled), runs the SAME engine.derive the retail app was built on, and adds `book_now` (the latest order book by price level, every listed item). Stored in the
+    Forever dataset: `engine/h<house>/{items, item_hourly, profile, flips, shelves, calibration, calibration_history, book_now}.parquet` and `engine/houses.json` (houses built, time of
+    their last snapshot, labels ruleset / faction / confidence taken from the CODE's house map, so 116 shows confirmed even while the stored tables/forever_house_map.json is old).
+    One commit; report only unless save = yes; never deletes. calibration_history keeps 60 days.
+    Forever settings (NOT calibrated, printed in the report): tracked if it could have sold 2+ a day (retail: 20), "slow" under 50 a day (retail: 500), rates over 72 h, charts 96 h.
+    Flip shelves use each house's own ASSUMED cut (Alliance / Horde 5%, neutral 15%; `AH_CUTS`). Schedule every 6 hours at :40, OFF until FOREVER_DERIVE_BUILD = yes (Actions minutes).
+  - App (`app.py`): the same tabs, data from the chosen house's folder. Picker: Ruleset (PvP, PvE, RP, RP-PvP; only rulesets with data) then Auction house ("110 · Alliance",
+    "113 · Horde", "116 · Blackwater (neutral)", "(unverified)" for houses the map only assumes); kept in the address (?ruleset=pvp&house=110); default PvP / 110. Gold shows 4 decimals.
+    Tabs: Market, Buy targets, Flips, House flips (new), Forecasts, Confidence. The Experiment tab is REMOVED (player: "Experiment is unnecessary"). Buy targets and Forecasts are kept
+    and say they are not built for Forever yet (Phase 2: per-house hourly history + buy-window job; Phase 3: forecasts with ranges from our own Forever history). The retail dataset is not read.
+  - House flips (`houseflip.py`; player's spec): choose ruleset, then your Alliance or Horde house; the neutral house of that ruleset is the other side. Direction "buy on Blackwater, resell on
+    <faction>" (default) or the reverse. Resell price = the lower of the resell house's lowest price now and its typical (p50, 72 h) price; after the cut = x (1 - that house's cut);
+    pay at most = after-cut / (1 + margin); units = every unit on the buy house's latest book at or under that, cheapest first, capped at the resell house's best-estimate sales per day x
+    the chosen days (default 2); profit = after-cut x units - cost. Defaults: 15% margin; reverse 30%, or 15% for items seen selling in 75%+ of the neutral house's hours. All adjustable.
+    The ASSUMED cuts (5% faction, 15% neutral; deposits not subtracted, refunded on sale on Classic-era rules) are subtracted in the backend and listed in a footnote under the page,
+    not as table columns (player: "That doesn't have to be represented in the table. Maybe make a footnote at the bottom of the page"). A test keeps the app's and the derive job's cuts equal.
+  - Checked: derive job tests on a pretend dataset (houses 110, 113 x2, 116 x1.5; never pooled, book_now = latest snapshot, 116 confirmed in houses.json, history grows, a failing house
+    does not stop the others, neutral shelves at 15%); House flips and picker unit tests on hand-made numbers; app tests (address picks the folder and ruleset, defaults, House flips
+    numbers worked by hand, footnote, neutral house message, no Experiment tab); END TO END: the derive job's real output read by the app with no error, and on the Horde house House flips
+    finds neutral items at 15%+ margin. NOT checked: real data (speed of a 12-house run, how many items pass the Forever cut-offs, the cuts themselves in game).
 
 ### Planned, saved for later (NOT started): cross-market sniper (asked for by the user, Nov 25)
 * What: a front-end tab for Forever that finds listings on one auction house that could be bought and resold for more on another. A toggle picks the faction, "Alliance" or "Horde" (the user plays Alliance on the PvP ruleset; a Horde character on another ruleset is possible later), and the tab covers
