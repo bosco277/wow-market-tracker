@@ -116,6 +116,16 @@ st.caption(f"House {F.picker_label(HOUSE, HMAP)} ({F.RULESET_NAME.get(RULESET, R
            f"({hrs:.1f} h ago) | engine {ver} | ranges are low - best - high; labels say how much to trust them")
 
 
+def auctionator_export(table: pd.DataFrame, list_name: str):
+    """Under a table: the rows as an Auctionator shopping list to import in game (Auctionator > Shopping > Import), best row first."""
+    with st.expander("Export to Auctionator (shopping list)"):
+        stamp = pd.Timestamp.now(tz="America/New_York").strftime("%b %d %H%M")
+        text = HFL.auctionator_list(f"{list_name} {stamp}", table["Item"] if "Item" in table.columns else [])
+        st.code(text, language=None)
+        st.caption("Copy it (button at the top right of the box), then in game: Auctionator > Shopping > Import, paste, and search the list to see whether the "
+                   "deals still stand. Items are in the table's order, best first; items without a known name are left out.")
+
+
 def column_config(df: pd.DataFrame) -> dict:
     """Numbers stay numbers (so the column sorts properly) and are only formatted for display. Gold shows 4 decimals (one copper): Forever prices are small."""
     cfg = {}
@@ -438,6 +448,7 @@ with tab_flip:
     else:
         show = lib.flip_numbers(sh, bt_rates)
         sel = pick_row(show, "flip_table")
+        auctionator_export(show, f"WMD Flips {HOUSE}")
     with st.expander("What the checks mean"):
         st.markdown("Each shelf is tested six ways. **Verdict: candidate** means no check failed and at most one warned; **weak** means none failed "
                     "but more than one warned. The 'Watch out for' column lists anything that did not pass.")
@@ -499,6 +510,7 @@ with tab_house:
             a2.metric("Profit after cut, all rows", f"{hf['Profit after cut (g)'].sum():,.2f}g", help="If you bought every row's units and sold them all at the resell price.")
             a3.metric("Gold needed, all rows", f"{hf['Cost (g)'].sum():,.2f}g")
             sel_h = pick_row(hf, "house_flip_table")
+            auctionator_export(hf, f"WMD House flips {buy_house} to {sell_house}")
             if sel_h is not None:
                 if sel_h in set(items["item_id"].astype(int)):
                     item_detail(sel_h, "houseflip")

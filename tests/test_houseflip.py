@@ -91,6 +91,19 @@ class TestFlipTable(unittest.TestCase):
         self.assertEqual(HFL.FEES["neutral_cut"], FDV.AH_CUTS["neutral"])
 
 
+class TestAuctionator(unittest.TestCase):
+    def test_the_shopping_list_string_matches_auctionators_format(self):
+        self.assertEqual(HFL.auctionator_list("Bronze", ["bronze bar", "tin bar", "tin ore", "copper bar", "copper ore"]),
+                         'Bronze^"bronze bar"^"tin bar"^"tin ore"^"copper bar"^"copper ore"')            # the export the player pasted, rebuilt exactly
+
+    def test_order_kept_duplicates_and_unnamed_items_dropped_and_format_characters_removed(self):
+        s = HFL.auctionator_list('WMD "Flips" ^110', ["Thick Leather", "Item 12345", "(no name)", "thick leather", 'Odd "Name"^', "Mooncloth", ""])
+        self.assertEqual(s, 'WMD Flips 110^"Thick Leather"^"Odd Name"^"Mooncloth"')
+
+    def test_an_empty_table_gives_just_the_list_name(self):
+        self.assertEqual(HFL.auctionator_list("WMD Flips 110", []), "WMD Flips 110")
+
+
 class TestPicker(unittest.TestCase):
     def setUp(self):
         self.data = (b'{"built": {"110": "t", "113": "t", "116": "t", "111": "t", "117": "t"}, "labels": {"110": {"ruleset": "pvp", "faction": "alliance", '

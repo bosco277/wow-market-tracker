@@ -389,6 +389,17 @@ class TestForeverApp(unittest.TestCase):
         self.assertAlmostEqual(r["Profit after cut (g)"], 30 * (0.95 - 0.5))
         self.assertIn(os.path.join("h116", "book_now.parquet"), st.reads)
 
+    def test_house_flips_and_flips_can_be_exported_as_auctionator_shopping_lists(self):
+        Any.calls.clear()
+        run_app(flip_data(), houses_json=HOUSES_JSON, selected_row=None)
+        codes = [str(a[0]) for n, a, k in Any.calls if n == "code" and a]
+        house = [c for c in codes if c.startswith("WMD House flips 116 to 110")]
+        self.assertEqual(len(house), 1)
+        self.assertIn('^"Iceweb Spider Silk"', house[0])
+        flips = [c for c in codes if c.startswith("WMD Flips 110")]
+        self.assertEqual(len(flips), 1)
+        self.assertTrue(flips[0].count('^"') >= 1)
+
     def test_the_footnote_lists_the_assumed_cuts(self):
         Any.calls.clear()
         run_app(tables(), houses_json=HOUSES_JSON, selected_row=None)

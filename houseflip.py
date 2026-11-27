@@ -106,3 +106,20 @@ def assumptions(fees: Dict[str, float] = FEES) -> list:
         "chosen number of days (best estimate, a lower bound: listings posted and sold inside one hour are in no snapshot).",
         "Prices are from the latest hourly snapshot; listings may be gone by the time you look. Check in game before you buy.",
     ]
+
+
+def auctionator_list(list_name: str, names) -> str:
+    """An Auctionator shopping-list import string: the list name, then each item name in quotes, joined by ^ (the format Auctionator exports, for example
+    Bronze^"bronze bar"^"tin bar"). Quoted names make Auctionator search for that exact item. Names are kept in the given order, each once; items without a
+    known name ("Item 12345") are left out, and the characters ^ and " are removed from names because the format uses them."""
+    def clean(t):
+        return str(t).replace("^", "").replace('"', "").strip()
+    out, seen = [], set()
+    for n in names:
+        c = clean(n)
+        low = c.lower()
+        if not c or low == "(no name)" or (low.startswith("item ") and low[5:].isdigit()) or low in seen:
+            continue
+        seen.add(low)
+        out.append(c)
+    return clean(list_name) + "".join(f'^"{n}"' for n in out)
