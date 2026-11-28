@@ -152,3 +152,54 @@ def check(frames: Sequence[pd.DataFrame], rebuilt: Sequence[pd.DataFrame]) -> Tu
         if not ok:
             return False, f"file {k}: {why}"
     return True, ""
+
+
+# ------------------------------------------------------------------------------------------------ the stored packed file (one per source per UTC day)
+PACK_VERSION = 1
+PACK_PREFIX = "packed"
+
+
+def pack_key(source: str, day) -> str:
+    """packed/<source>/year=YYYY/month=MM/day=DD/ledger.parquet: outside every raw source folder, so no loader takes it for raw or retail-compacted data."""
+    d = pd.Timestamp(day)
+    return f"{PACK_PREFIX}/{source}/year={d.year:04d}/month={d.month:02d}/day={d.day:02d}/ledger.parquet"
+
+
+def pack(frames: Sequence[pd.DataFrame], keys: Sequence[str]) -> Tuple[pd.DataFrame, dict]:
+    """(runs, meta) for one day: meta holds what rebuilding needs (per-file table, per-file columns, column order and types, the hourly file names)."""
+    runs, files, const = to_ledger(frames)
+    cols = list(frames[0].columns) if frames else []
+    meta = dict(version=PACK_VERSION, keys=list(keys), columns=cols, const=list(const),
+                dtypes={c: str(t) for c, t in (frames[0].dtypes.items() if frames else [])}, files=files)
+    return runs, meta
+
+
+def unpack(runs: pd.DataFrame, meta: dict) -> List[pd.DataFrame]:
+    return from_ledger(runs, meta["files"], meta["const"], meta["columns"], meta["dtypes"])
+
+
+def parquet_writer(runs: pd.DataFrame, meta: dict) -> bytes:
+    """One parquet file (zstd): the runs as the table; the per-file table (itself parquet, base64) and the rest of meta in the file's key-value metadata."""
+    import base64
+    import io
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    fb = io.BytesIO()
+    meta["files"].to_parquet(fb, index=False)
+    m = {k: v for k, v in meta.items() if k != "files"}
+    m["files_parquet_b64"] = base64.b64encode(fb.getvalue()).decode("ascii")
+    table = pa.Table.from_pandas(runs, preserve_index=False)
+    table = table.replace_schema_metadata({**(table.schema.metadata or {}), b"forever_pack": json.dumps(m).encode("utf-8")})
+    buf = io.BytesIO()
+    pq.write_table(table, buf, compression="zstd")
+    return buf.getvalue()
+
+
+def parquet_reader(data: bytes) -> Tuple[pd.DataFrame, dict]:
+    import base64
+    import io
+    import pyarrow.parquet as pq
+    table = pq.read_table(io.BytesIO(data))
+    m = json.loads(table.schema.metadata[b"forever_pack"].decode("utf-8"))
+    m["files"] = pd.read_parquet(io.BytesIO(base64.b64decode(m.pop("files_parquet_b64"))))
+    return table.to_pandas(), m

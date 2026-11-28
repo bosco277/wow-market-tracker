@@ -1012,6 +1012,27 @@ Third `api_probe` log (Nov 3, 2026, afternoon ET): no change in what Blizzard se
     a light hourly latest-listings job for House flips; deleting hourly files only later, by the player's decision, after clean round trips and a safety margin.
   - Pretend data (one day, one house, 25 files): ledger 16% of the stored rows, 4.3x smaller than stored; concat and sorted no smaller there because the pretend files are pickles,
     not parquet. Real sizes come from the probe.
+* v0.7.52: Auctionator export (Nov 27, 4:52 PM ET): under the Flips and House flips tables, "Export to Auctionator (shopping list)" gives one line in Auctionator's own format,
+  `<list name>^"item"^"item"...` (the player's example `Bronze^"bronze bar"^"tin bar"...` is rebuilt exactly by a test), items in table order, each once, unnamed items left out,
+  ^ and " removed from names; the list name carries tab, house(s) and time. lib.py and tests/test_frontend_lib.py restored (deleted after the wrong v0.7.48 note; lib.py holds every tab's logic).
+* First real derive save and pack probe (Nov 27): derive saved 12 houses one commit each; load 304 s in all, calc 748 s (compaction can save at most the load part, about 5 of
+  17.5 minutes; running derive often needs an incremental derive, not only packed files). Probe on Nov 26, houses 110 / 116 / 121, commodity files: all three forms lossless and sales
+  identical; vs stored: concat 1.9 / 2.2 / 3.6x, sorted 1.8 / 2.0 / 4.1x (sorting scatters the per-file columns), ledger 3.0 / 3.1 / 6.2x; a year for 12 houses: stored 39.6 GB and
+  105,120 commodity files (over the 100k-file guideline in under a year, about twice that with regular-auction files), concat 20.4 GB, ledger 12.9 GB, 4,380 files. Player chose the LEDGER.
+* v0.7.53: COPY-ONLY LEDGER COMPACTION (Nov 27, "move along with building the ledger process"). `tools/forever_compact.py`, workflow "Forever compact".
+  - For each house (empty houses left out) and kind (commodity listings AND regular auctions; the probe only measured commodity, the per-pack check covers auctions), each UTC day that is
+    complete (next day 2+ hours old) and not packed yet, oldest first: read every hourly file (every column), pack (engine/foreverpack.pack), write the bytes that would be stored,
+    READ THOSE BYTES BACK and rebuild every hourly file; kept only if every rebuilt file equals the original exactly. With save: one commit per day; then every stored file is read back
+    and must be byte for byte identical (sha256). Limits per run: --days (60) and --minutes (90, no new day started after it).
+  - Stored file: packed/<source>/year=YYYY/month=MM/day=DD/ledger.parquet (outside every raw source folder: the retail loader treats a day folder's daily.parquet as compacted data, so
+    nothing may be written there). One parquet (zstd): the runs as the table; in its key-value metadata "forever_pack": version, the hourly file names, column order and types, the
+    per-file columns and the per-file table (itself parquet, base64). Rebuild = engine/foreverpack.unpack.
+  - NOTHING IS DELETED: the job has no delete operation (a test checks the source). Deleting hourly files is a separate decision, not built. Nothing reads packed files yet (step 4: derive
+    and the daily tables read packed days plus today's hourly files).
+  - Schedule: 06:43 UTC daily, OFF until FOREVER_COMPACT_BUILD = yes (or a Cloudflare Worker with save = yes).
+  - Checked (pickle stands in for parquet here; the real parquet write and read-back are checked by the job itself on every pack): report only stores nothing; save makes one commit per day
+    outside the raw folders and leaves every hourly file; a stored pack rebuilds its day exactly and lists the hourly file names; the next run skips packed days and picks up the newly complete
+    day; a day is not complete until 2 hours after midnight; a pack that does not rebuild exactly is not stored; a stored file that reads back different is reported; limits; options.
 
 ### Planned, saved for later (NOT started): cross-market sniper (asked for by the user, Nov 25)
 * What: a front-end tab for Forever that finds listings on one auction house that could be bought and resold for more on another. A toggle picks the faction, "Alliance" or "Horde" (the user plays Alliance on the PvP ruleset; a Horde character on another ruleset is possible later), and the tab covers

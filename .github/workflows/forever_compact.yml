@@ -1,0 +1,77 @@
+name: Forever compact
+
+# WoW Forever only. COPY-ONLY compaction: packs each completed UTC day of each house's hourly files (commodity listings and regular auctions) into one ledger
+# file at packed/<source>/year=YYYY/month=MM/day=DD/ledger.parquet. NOTHING IS EVER DELETED: the hourly files stay where they are.
+# (script: tools/forever_compact.py, logic: engine/foreverpack.py)
+# Each pack is kept only if every hourly file rebuilt from the bytes that would be stored equals the original exactly (every row, column and auction id);
+# after a save, each stored file is read back and must be byte for byte what was sent.
+# save = no (the default): packs are made and checked, nothing is stored. save = yes: the packs that pass are stored, one commit per day.
+# days / minutes: at most that many days per run, oldest first, and no new day started after that many minutes; the next run carries on.
+#
+# SCHEDULE: once a day at 06:43 UTC (about 1:43 AM Eastern), OFF until the repository variable FOREVER_COMPACT_BUILD is yes (a scheduled run saves).
+# Or start it from a Cloudflare Worker with inputs save = yes (see the README).
+# Secrets used: HF_TOKEN (write access to the Forever dataset when save = yes). Nothing in the report names an account or a character.
+
+on:
+  schedule:
+    - cron: "43 6 * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "at most this many days in one run, oldest first"
+        default: "60"
+      minutes:
+        description: "stop starting new days after this many minutes"
+        default: "90"
+      houses:
+        description: "all, or house numbers separated by commas"
+        default: "all"
+      kinds:
+        description: "both, commodity or auction"
+        default: "both"
+      save:
+        description: "yes = store the packs that pass; no = report only"
+        default: "no"
+
+concurrency:
+  group: forever-compact
+  cancel-in-progress: false
+
+jobs:
+  compact:
+    if: ${{ github.event_name != 'schedule' || vars.FOREVER_COMPACT_BUILD == 'yes' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pandas numpy pyarrow requests huggingface_hub
+
+      - name: Forever compact
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DAYS: ${{ inputs.days || '60' }}
+          MINUTES: ${{ inputs.minutes || '90' }}
+          HOUSES: ${{ inputs.houses || 'all' }}
+          KINDS: ${{ inputs.kinds || 'both' }}
+          SAVE: ${{ inputs.save || (github.event_name == 'schedule' && 'yes') || 'no' }}
+        run: |
+          set -o pipefail
+          mkdir -p out
+          EXTRA=""
+          if [ "$SAVE" = "yes" ]; then EXTRA="--save"; fi
+          python tools/forever_compact.py --days "$DAYS" --minutes "$MINUTES" --houses "$HOUSES" --kinds "$KINDS" $EXTRA --out out | tee out_compact.txt
+          { echo '### forever compact'; echo '```'; head -c 900000 out_compact.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: forever-compact
+          path: out/forever_compact.txt
+          if-no-files-found: ignore
