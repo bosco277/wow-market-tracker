@@ -45,7 +45,7 @@ class TestLedger(unittest.TestCase):
     def roundtrip(self, frames):
         cols = list(frames[0].columns)
         runs, files, const = P.to_ledger(frames)
-        return runs, const, P.check(frames, P.from_ledger(runs, files, const, cols, frames[0].dtypes))
+        return runs, const, P.check(frames, P.from_ledger(runs, files, const, cols, [f.dtypes for f in frames]))
 
     def test_runs_split_on_any_change_or_a_missing_hour(self):
         runs, const, (ok, why) = self.roundtrip(day())
@@ -85,6 +85,17 @@ class TestLedger(unittest.TestCase):
         bad = P.from_ledger(runs, files, const, cols)
         bad[0]["item"] = [{"id": 5, "extra": 1}, {"id": 6}]
         self.assertFalse(P.check(frames, bad)[0])
+
+    def test_a_column_that_is_whole_numbers_in_one_hour_and_decimals_in_another(self):
+        # house 125, regular auctions, Nov 13: a bid-only auction (no buyout) makes pandas read that hour's buyout column as decimals; other hours are whole numbers
+        def g(k, buyouts):
+            return pd.DataFrame({"id": range(10 * k, 10 * k + len(buyouts)), "item_id": 5, "quantity": 1, "buyout": buyouts, "snapshot_ts": TS[k]})
+        frames = [g(0, [100.0, np.nan]), g(1, np.array([100, 200], dtype="int64")), g(2, [300.0, np.nan])]
+        self.assertEqual([str(x["buyout"].dtype) for x in frames], ["float64", "int64", "float64"])
+        runs, meta = P.pack(frames, ["a", "b", "c"])
+        ok, why = P.check(frames, P.unpack(runs, meta))
+        self.assertTrue(ok, why)
+        self.assertFalse(P.check(frames, P.from_ledger(runs, meta["files"], meta["const"], meta["columns"], meta["dtypes"][0]))[0])   # the v0.7.53 rule fails
 
     def test_prices_keep_every_decimal(self):
         frames = day()

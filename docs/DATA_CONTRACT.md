@@ -1033,6 +1033,11 @@ Third `api_probe` log (Nov 3, 2026, afternoon ET): no change in what Blizzard se
   - Checked (pickle stands in for parquet here; the real parquet write and read-back are checked by the job itself on every pack): report only stores nothing; save makes one commit per day
     outside the raw folders and leaves every hourly file; a stored pack rebuilds its day exactly and lists the hourly file names; the next run skips packed days and picks up the newly complete
     day; a day is not complete until 2 hours after midnight; a pack that does not rebuild exactly is not stored; a stored file that reads back different is reported; limits; options.
+* v0.7.54: first real compaction run (Nov 28 00:16 UTC, report only, oldest day Nov 13, 19 hourly files per source): 23 of 24 packs lossless through REAL parquet bytes;
+  189.2 MB of hourly files -> 54.0 MB (3.5x; commodity 2.9-5.4x, regular auctions 3.7-6.9x); about 10 minutes per day for all 12 houses and both kinds. The one refusal: house 125,
+  regular auctions, "file 4: column buyout: type int64 vs float64": a bid-only auction (no buyout) makes pandas read that hour's buyout column as float64, other hours read int64, and
+  the pack restored every hour with the FIRST hour's types. Values were equal; the strict check refused it, as designed. Fix: column types are kept PER HOURLY FILE (PACK_VERSION 2);
+  a test reproduces the case and shows the old rule failing. No pack had been stored.
 
 ### Planned, saved for later (NOT started): cross-market sniper (asked for by the user, Nov 25)
 * What: a front-end tab for Forever that finds listings on one auction house that could be bought and resold for more on another. A toggle picks the faction, "Alliance" or "Horde" (the user plays Alliance on the PvP ruleset; a Horde character on another ruleset is possible later), and the tab covers

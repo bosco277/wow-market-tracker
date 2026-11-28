@@ -107,9 +107,13 @@ def from_ledger(runs: pd.DataFrame, files: pd.DataFrame, const: Sequence[str], c
     """The files back from the ledger: file k = every run covering k, plus file k's per-file values, columns in the original order and, with `dtypes`
     (the original column types, as a stored packed file records them), the original types (an hour with no listings would otherwise turn a whole-number
     per-file column into decimals)."""
-    dtypes = dict(dtypes) if dtypes is not None else {}
+    if isinstance(dtypes, (list, tuple)):          # one set of types per file (v0.7.54: a column can be whole numbers in one hour and decimals in another)
+        per_file = [dict(d) for d in dtypes]
+    else:
+        per_file = [dict(dtypes) if dtypes is not None else {}] * len(files)
     out = []
     for k in range(len(files)):
+        dtypes = per_file[k]
         r = runs[(runs["k_first"] <= k) & (runs["k_last"] >= k)].drop(columns=["k_first", "k_last"])
         r = r.sort_values([ID, "_dup"], kind="mergesort").drop(columns=["_dup"]).copy()
         for c in const:
@@ -155,7 +159,7 @@ def check(frames: Sequence[pd.DataFrame], rebuilt: Sequence[pd.DataFrame]) -> Tu
 
 
 # ------------------------------------------------------------------------------------------------ the stored packed file (one per source per UTC day)
-PACK_VERSION = 1
+PACK_VERSION = 2          # 2: column types kept per hourly file
 PACK_PREFIX = "packed"
 
 
@@ -169,8 +173,10 @@ def pack(frames: Sequence[pd.DataFrame], keys: Sequence[str]) -> Tuple[pd.DataFr
     """(runs, meta) for one day: meta holds what rebuilding needs (per-file table, per-file columns, column order and types, the hourly file names)."""
     runs, files, const = to_ledger(frames)
     cols = list(frames[0].columns) if frames else []
+    # each hour's own column types: pandas reads a whole-number column with a missing value (a bid-only auction has no buyout) as decimals, so the same column
+    # can be int64 in one hour and float64 in the next (found on house 125, regular auctions, Nov 13: "column buyout: type int64 vs float64")
     meta = dict(version=PACK_VERSION, keys=list(keys), columns=cols, const=list(const),
-                dtypes={c: str(t) for c, t in (frames[0].dtypes.items() if frames else [])}, files=files)
+                dtypes=[{c: str(t) for c, t in f.dtypes.items()} for f in frames], files=files)
     return runs, meta
 
 

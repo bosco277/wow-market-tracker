@@ -117,7 +117,7 @@ def run(args, store, now=None, reader=read_raw, sizer=size_of):
             t = time.time()
             runs, files, const = P.to_ledger(frames)
             s_led = sizer(ledger_for_size(runs, files))
-            rebuilt = P.from_ledger(runs, files, const, cols, frames[0].dtypes)
+            rebuilt = P.from_ledger(runs, files, const, cols, [f.dtypes for f in frames])
             ok_led, why_led = P.check(frames, rebuilt)
             t_led = time.time() - t
 
