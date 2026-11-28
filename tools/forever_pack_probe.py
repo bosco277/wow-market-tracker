@@ -100,6 +100,7 @@ def run(args, store, now=None, reader=read_raw, sizer=size_of):
             t_read = time.time() - t0
             raw = sum(o.size for o in objs)
             cols = list(frames[0].columns)
+            per_cols = [list(f.columns) for f in frames]
             rows = sum(len(f) for f in frames)
 
             t = time.time()
@@ -117,7 +118,7 @@ def run(args, store, now=None, reader=read_raw, sizer=size_of):
             t = time.time()
             runs, files, const = P.to_ledger(frames)
             s_led = sizer(ledger_for_size(runs, files))
-            rebuilt = P.from_ledger(runs, files, const, cols, [f.dtypes for f in frames])
+            rebuilt = P.from_ledger(runs, files, const, per_cols, [f.dtypes for f in frames])
             ok_led, why_led = P.check(frames, rebuilt)
             t_led = time.time() - t
 

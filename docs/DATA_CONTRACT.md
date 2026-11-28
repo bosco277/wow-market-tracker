@@ -1050,6 +1050,12 @@ Third `api_probe` log (Nov 3, 2026, afternoon ET): no change in what Blizzard se
   - Schedule: every hour at :45, OFF until FOREVER_LATEST_BUILD = yes (or an hourly Cloudflare Worker, workflow forever_latest.yml, inputs save = yes).
   - Checked: newest snapshot's lowest prices and units per item exactly; a newer half-price hour shows nearly every item as cheap now while other houses keep their own time;
     yesterday's file just after midnight; blank rank without a build; only now / book_now files written; overlay newer / older / empty; the app shows the hourly price and the caption.
+* v0.7.56: first SAVING compaction run (Nov 28 ~02:00 UTC, days 5, 45 min): Nov 13-17 done, 110 packs STORED, each read back byte for byte identical; 1,187 MB of hourly files ->
+  333 MB (3.6x). 10 regular-auction packs REFUSED by the check, nothing wrong stored: (a) "columns differ": in some hours the 'bid' column comes after 'time_left' instead of after
+  'item'; (b) "['bid'] not in index": an hour in which no auction had a bid has no 'bid' column at all (houses 121 Nov 14 and 17). The pack used the FIRST hour's column list for every
+  hour; worse, had the first hour lacked 'bid', later hours' bids would have been dropped, and only the strict check would have stopped it. Fix: the ledger holds every column of every hour
+  (order of first appearance) and meta keeps EACH HOUR'S OWN column list (PACK_VERSION 3); a column an hour did not have is not added back. Packs stored by versions 1 and 2 still unpack
+  (tested). Refused source-days are not marked packed, so the next run packs them again with the fix.
 
 ### Planned, saved for later (NOT started): cross-market sniper (asked for by the user, Nov 25)
 * What: a front-end tab for Forever that finds listings on one auction house that could be bought and resold for more on another. A toggle picks the faction, "Alliance" or "Horde" (the user plays Alliance on the PvP ruleset; a Horde character on another ruleset is possible later), and the tab covers

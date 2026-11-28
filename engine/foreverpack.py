@@ -81,9 +81,13 @@ def to_ledger(frames: Sequence[pd.DataFrame]) -> Tuple[pd.DataFrame, pd.DataFram
     if not frames:
         return pd.DataFrame(), pd.DataFrame(), []
     const = file_constants(frames)
-    lcols = [c for c in frames[0].columns if c not in const]                   # includes ID
+    # every column of every file, in order of first appearance: a regular-auction file has no 'bid' column in an hour without bids, and the column order can
+    # differ between hours (v0.7.56). Each file's own column list is kept in meta, so a column a file did not have is not added back to it.
+    all_cols = list(dict.fromkeys(c for f in frames for c in f.columns))
+    lcols = [c for c in all_cols if c not in const]                           # includes ID
     files = pd.DataFrame([{**{c: (f[c].iloc[0] if len(f) else None) for c in const}, "_rows": len(f)} for f in frames])
-    long = to_concat([f[lcols] for f in frames])
+    long = to_concat([f[[c for c in lcols if c in f.columns]] for f in frames])
+    long = long.reindex(columns=lcols + ["_file"])
     long["_dup"] = long.groupby(["_file", ID]).cumcount()
     canon = _canon_frame(long[[c for c in lcols if c != ID]])
     long["_sig"] = pd.util.hash_pandas_object(canon, index=False).to_numpy()
@@ -107,6 +111,10 @@ def from_ledger(runs: pd.DataFrame, files: pd.DataFrame, const: Sequence[str], c
     """The files back from the ledger: file k = every run covering k, plus file k's per-file values, columns in the original order and, with `dtypes`
     (the original column types, as a stored packed file records them), the original types (an hour with no listings would otherwise turn a whole-number
     per-file column into decimals)."""
+    if columns and isinstance(columns[0], (list, tuple)):     # one column list per file (v0.7.56)
+        per_cols = [list(c) for c in columns]
+    else:
+        per_cols = [list(columns)] * len(files)
     if isinstance(dtypes, (list, tuple)):          # one set of types per file (v0.7.54: a column can be whole numbers in one hour and decimals in another)
         per_file = [dict(d) for d in dtypes]
     else:
@@ -125,7 +133,7 @@ def from_ledger(runs: pd.DataFrame, files: pd.DataFrame, const: Sequence[str], c
                     r[c] = r[c].astype(t)
                 except (TypeError, ValueError):
                     pass
-        out.append(r[list(columns)].reset_index(drop=True))
+        out.append(r[per_cols[k]].reset_index(drop=True))
     return out
 
 
@@ -159,7 +167,7 @@ def check(frames: Sequence[pd.DataFrame], rebuilt: Sequence[pd.DataFrame]) -> Tu
 
 
 # ------------------------------------------------------------------------------------------------ the stored packed file (one per source per UTC day)
-PACK_VERSION = 2          # 2: column types kept per hourly file
+PACK_VERSION = 3          # 2: column types kept per hourly file; 3: column list kept per hourly file (packs of versions 1 and 2 still unpack)
 PACK_PREFIX = "packed"
 
 
@@ -172,7 +180,7 @@ def pack_key(source: str, day) -> str:
 def pack(frames: Sequence[pd.DataFrame], keys: Sequence[str]) -> Tuple[pd.DataFrame, dict]:
     """(runs, meta) for one day: meta holds what rebuilding needs (per-file table, per-file columns, column order and types, the hourly file names)."""
     runs, files, const = to_ledger(frames)
-    cols = list(frames[0].columns) if frames else []
+    cols = [list(f.columns) for f in frames]                 # each hour's own columns, in its own order (v0.7.56)
     # each hour's own column types: pandas reads a whole-number column with a missing value (a bid-only auction has no buyout) as decimals, so the same column
     # can be int64 in one hour and float64 in the next (found on house 125, regular auctions, Nov 13: "column buyout: type int64 vs float64")
     meta = dict(version=PACK_VERSION, keys=list(keys), columns=cols, const=list(const),

@@ -97,6 +97,31 @@ class TestLedger(unittest.TestCase):
         self.assertTrue(ok, why)
         self.assertFalse(P.check(frames, P.from_ledger(runs, meta["files"], meta["const"], meta["columns"], meta["dtypes"][0]))[0])   # the v0.7.53 rule fails
 
+    def test_regular_auction_hours_with_the_bid_column_moved_or_missing(self):
+        # Nov 14-17, regular auctions: some hours put 'bid' after 'time_left', and an hour without any bid has no 'bid' column at all
+        def g(k, cols):
+            d = {"id": [1, 2], "item": [{"id": 5}, {"id": 6}], "bid": [50.0, np.nan], "buyout": [100, 200], "quantity": [1, 1], "time_left": ["LONG", "LONG"],
+                 "item_id": [5, 6], "snapshot_ts": TS[k]}
+            return pd.DataFrame({c: d[c] for c in cols})
+        a = ["id", "item", "bid", "buyout", "quantity", "time_left", "item_id", "snapshot_ts"]
+        moved = ["id", "item", "buyout", "quantity", "time_left", "bid", "item_id", "snapshot_ts"]
+        none = ["id", "item", "buyout", "quantity", "time_left", "item_id", "snapshot_ts"]
+        for frames in ([g(0, a), g(1, moved), g(2, a)], [g(0, a), g(1, none), g(2, a)], [g(0, none), g(1, a), g(2, none)]):
+            runs, meta = P.pack(frames, ["x", "y", "z"])
+            ok, why = P.check(frames, P.unpack(runs, meta))
+            self.assertTrue(ok, why)
+        rebuilt = P.unpack(*P.pack([g(0, none), g(1, a), g(2, none)], ["x", "y", "z"]))
+        self.assertEqual(rebuilt[1]["bid"].iloc[0], 50.0)                    # the bid in the middle hour is kept even though the first hour had no bid column
+        self.assertNotIn("bid", rebuilt[0].columns)
+
+    def test_packs_stored_by_earlier_versions_still_unpack(self):
+        frames = day()
+        runs, files, const = P.to_ledger(frames)
+        meta = dict(version=2, keys=["k"] * len(frames), columns=list(frames[0].columns), const=const, dtypes=[{c: str(t) for c, t in f.dtypes.items()} for f in frames], files=files)
+        self.assertTrue(P.check(frames, P.unpack(runs, meta))[0])
+        meta1 = {**meta, "version": 1, "dtypes": {c: str(t) for c, t in frames[0].dtypes.items()}}
+        self.assertTrue(P.check(frames, P.unpack(runs, meta1))[0])
+
     def test_prices_keep_every_decimal(self):
         frames = day()
         frames[0].loc[1, "unit_price"] = 50.123456789
