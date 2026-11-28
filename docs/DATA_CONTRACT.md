@@ -1038,6 +1038,18 @@ Third `api_probe` log (Nov 3, 2026, afternoon ET): no change in what Blizzard se
   regular auctions, "file 4: column buyout: type int64 vs float64": a bid-only auction (no buyout) makes pandas read that hour's buyout column as float64, other hours read int64, and
   the pack restored every hour with the FIRST hour's types. Values were equal; the strict check refused it, as designed. Fix: column types are kept PER HOURLY FILE (PACK_VERSION 2);
   a test reproduces the case and shows the old rule failing. No pack had been stored.
+  Second report-only run (Nov 28): all 24 packs lossless; 7.75 minutes for one day. Storing started (one run per batch of days, oldest first).
+* v0.7.55: HOURLY LATEST LISTINGS (Nov 27, player chose it first: "start with step 1"). `tools/forever_latest.py`, workflow "Forever latest listings".
+  - For each house: only the NEWEST hourly commodity file (today's folder, else yesterday's), read the way the loader reads it. Writes engine/h<house>/book_now.parquet (order book by
+    price level) and engine/h<house>/now.parquet (item_id, floor_gold, units_listed, n_listings, now_percentile, now_ts). now_percentile = share of the item's hourly lowest prices in the
+    last 72 hours of the daily build's item_hourly (spike hours left out) at or under the current lowest price (the same definition as engine.market.price_bands), blank if no build yet.
+    One commit for all houses; nothing deleted.
+  - It NEVER rewrites the daily build's tables (a race could otherwise put an old items table back over a new one). The app lays now.parquet over items (floor_gold, units_listed,
+    n_listings, now_percentile) when it is newer than the build (forever_lib.apply_now), for the chosen house and for the neutral house House flips resells on; items not listed now keep
+    the build's numbers; rates, ranges, confidence and charts stay the build's. A caption gives the time of the hourly numbers.
+  - Schedule: every hour at :45, OFF until FOREVER_LATEST_BUILD = yes (or an hourly Cloudflare Worker, workflow forever_latest.yml, inputs save = yes).
+  - Checked: newest snapshot's lowest prices and units per item exactly; a newer half-price hour shows nearly every item as cheap now while other houses keep their own time;
+    yesterday's file just after midnight; blank rank without a build; only now / book_now files written; overlay newer / older / empty; the app shows the hourly price and the caption.
 
 ### Planned, saved for later (NOT started): cross-market sniper (asked for by the user, Nov 25)
 * What: a front-end tab for Forever that finds listings on one auction house that could be bought and resold for more on another. A toggle picks the faction, "Alliance" or "Horde" (the user plays Alliance on the PvP ruleset; a Horde character on another ruleset is possible later), and the tab covers

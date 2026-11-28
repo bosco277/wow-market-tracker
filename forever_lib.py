@@ -361,3 +361,23 @@ def market_headline(daily: pd.DataFrame, house: int, day: str) -> dict:
     return dict(items=int(len(d)), complete=int(len(full)), gold=float(full["gold_day"].fillna(0).sum()),
                 traded=float((full["sold_low_day"].fillna(0) * full["price_day"].fillna(0)).sum()),
                 selling_share=float(active.mean()) if len(full) else float("nan"))
+
+
+NOW_COLUMNS = ["floor_gold", "units_listed", "n_listings", "now_percentile"]
+
+
+def apply_now(items: pd.DataFrame, now: pd.DataFrame, built_ts=None) -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
+    """The daily build's items with the hourly job's current numbers laid over them (lowest price now, units and listings now, where the price sits in its
+    usual range), when now.parquet is newer than the build. Items not listed right now keep the build's numbers. Returns (items, time of the current numbers)."""
+    if items is None or items.empty or now is None or now.empty or "now_ts" not in now.columns:
+        return items, None
+    ts = pd.Timestamp(pd.to_datetime(now["now_ts"]).max())
+    if built_ts is not None and pd.notna(built_ts) and ts <= pd.Timestamp(built_ts):
+        return items, None
+    n = now.drop_duplicates("item_id").set_index("item_id")
+    out = items.copy()
+    hit = out["item_id"].isin(n.index)
+    for c in NOW_COLUMNS:
+        if c in n.columns and c in out.columns:
+            out.loc[hit, c] = n.loc[out.loc[hit, "item_id"], c].to_numpy()
+    return out, ts

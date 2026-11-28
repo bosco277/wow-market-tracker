@@ -400,6 +400,18 @@ class TestForeverApp(unittest.TestCase):
         self.assertEqual(len(flips), 1)
         self.assertTrue(flips[0].count('^"') >= 1)
 
+    def test_the_hourly_current_prices_are_laid_over_the_daily_build(self):
+        d = tables()
+        d["h110"] = {"now": pd.DataFrame({"item_id": [1], "floor_gold": [0.4321], "units_listed": [7], "n_listings": [1], "now_percentile": [0.05],
+                                          "now_ts": pd.Timestamp("2099-01-01 00:32")})}
+        Any.calls.clear()
+        st = run_app(d, houses_json=HOUSES_JSON, selected_row=None)
+        market = next(t for t, k in st.seen if "Sold/day best" in t)
+        row = market[market["Item"] == "Iceweb Spider Silk"].iloc[0]
+        self.assertAlmostEqual(row["Lowest price (g)"], 0.4321)
+        notes = [str(a[0]) for n, a, k in Any.calls if n == "caption" and a]
+        self.assertTrue(any("hourly refresh" in t for t in notes))
+
     def test_the_footnote_lists_the_assumed_cuts(self):
         Any.calls.clear()
         run_app(tables(), houses_json=HOUSES_JSON, selected_row=None)

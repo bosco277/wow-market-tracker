@@ -92,8 +92,16 @@ try:
 except Exception:
     pass
 
-items, hourly, prof = load("items", HOUSE), load("item_hourly", HOUSE), load("profile", HOUSE)
 cal, hist, flips = load("calibration", HOUSE), load("calibration_history", HOUSE), load("flips", HOUSE)
+
+
+def load_items(house: int, cal_table: pd.DataFrame):
+    """A house's items from the daily build, with the hourly latest-listings job's current prices laid over them when those are newer."""
+    built = pd.to_datetime(cal_table["data_last_ts"]).max() if not cal_table.empty and "data_last_ts" in cal_table.columns else None
+    return F.apply_now(load("items", house), load("now", house), built)
+
+
+(items, NOW_TS), hourly, prof = load_items(HOUSE, cal), load("item_hourly", HOUSE), load("profile", HOUSE)
 shelves = load("shelves", HOUSE)
 ledger = lib.clean_ledger(load("forecast_ledger", HOUSE))      # forecasts are not built for Forever yet (empty)
 shelves_old = len(shelves) > 0 and "test_regime" not in shelves.columns
@@ -114,6 +122,9 @@ if items.empty:
 ver = items["engine_version"].iloc[0] if "engine_version" in items else "?"
 st.caption(f"House {F.picker_label(HOUSE, HMAP)} ({F.RULESET_NAME.get(RULESET, RULESET)}). Data {state}: built from snapshots up to {pd.Timestamp(cal['data_last_ts'].max()):%a %b %d %H:%M} UTC "
            f"({hrs:.1f} h ago) | engine {ver} | ranges are low - best - high; labels say how much to trust them")
+if NOW_TS is not None:
+    st.caption(f"Lowest prices, units listed and the House flips order book are from the hourly refresh, as of {pd.Timestamp(NOW_TS):%a %b %d %H:%M} UTC. "
+               "Sales per day, typical ranges, confidence and the charts come from the daily build above.")
 
 
 def auctionator_export(table: pd.DataFrame, list_name: str):
@@ -494,7 +505,7 @@ with tab_house:
         buy_house, sell_house = (neutral, HOUSE) if direction == "n2f" else (HOUSE, neutral)
         cut = HFL.FEES["faction_cut"] if sell_house == HOUSE else HFL.FEES["neutral_cut"]
         book = load("book_now", buy_house)
-        sell_items = items if sell_house == HOUSE else load("items", sell_house)
+        sell_items = items if sell_house == HOUSE else load_items(sell_house, load("calibration", sell_house))[0]
         names = {int(i): n for i, n in zip(items["item_id"], items["name"]) if n}
         hf = HFL.flip_table(book, sell_items, cut, need, days, names, fast_share, fast_margin)
         when = pd.Timestamp(book["ts"].max()).strftime("%a %b %d %H:%M") + " UTC" if len(book) and "ts" in book.columns else "unknown"

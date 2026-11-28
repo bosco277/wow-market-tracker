@@ -1,0 +1,55 @@
+name: Forever latest listings
+
+# WoW Forever only. Light job: refreshes each house's CURRENT prices and order book from its newest hourly snapshot (script: tools/forever_latest.py).
+# Writes engine/h<house>/now.parquet and engine/h<house>/book_now.parquet in the Forever dataset, one commit for all houses. It never rewrites the daily build's
+# tables; the app lays now.parquet over them when it is newer. Nothing is deleted.
+# save = no (the default) only reports; save = yes stores.
+#
+# SCHEDULE: every hour at minute 45 (after the hourly fetch at about :32), OFF until the repository variable FOREVER_LATEST_BUILD is yes (a scheduled run saves).
+# Or start it from a Cloudflare Worker every hour with workflow "forever_latest.yml" and inputs { save: "yes" }.
+# Each run uses Actions minutes (see the run time); 24 runs a day.
+# Secrets used: HF_TOKEN. Nothing in the report names an account or a character.
+
+on:
+  schedule:
+    - cron: "45 * * * *"
+  workflow_dispatch:
+    inputs:
+      houses:
+        description: "all, or house numbers separated by commas"
+        default: "all"
+      save:
+        description: "yes = store; no = report only"
+        default: "no"
+
+concurrency:
+  group: forever-latest
+  cancel-in-progress: false
+
+jobs:
+  latest:
+    if: ${{ github.event_name != 'schedule' || vars.FOREVER_LATEST_BUILD == 'yes' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install pandas numpy pyarrow requests huggingface_hub
+
+      - name: Forever latest listings
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HOUSES: ${{ inputs.houses || 'all' }}
+          SAVE: ${{ inputs.save || (github.event_name == 'schedule' && 'yes') || 'no' }}
+        run: |
+          set -o pipefail
+          mkdir -p out
+          EXTRA=""
+          if [ "$SAVE" = "yes" ]; then EXTRA="--save"; fi
+          python tools/forever_latest.py --houses "$HOUSES" $EXTRA --out out | tee out_latest.txt
+          { echo '### forever latest listings'; echo '```'; head -c 200000 out_latest.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
